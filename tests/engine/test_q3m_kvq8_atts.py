@@ -22,7 +22,7 @@ shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. On
             the transform spreads it, so all four K blocks of each kv head are refused, blocks 1 / 3 included
   prefill   q3p_qk_rope_q8 (75 tokens at position 1,000, with the edge blocks) writes encode_q8_kv(hadamard128(K), V) of
             q3p_qk_rope's halves, byte for byte, and its q16 is fp16(hadamard128(q3p_qk_rope's q16)), bit for bit; it refuses
-            a NaN block into its error word; q3p_attn_q8 over Q8 rows equals q3p_attn over an F16 cache holding
+            a NaN block into its error word; q3mp_attn_q8 over Q8 rows equals q3mp_attn over an F16 cache holding
             fp16(decoded rows), bit for bit (the Q8 staging's values are exactly those halves)
   tools/guard.sh LOG 600 python -I tests/engine/test_q3m_kvq8_atts.py [--tp]
 --tp: the same checks on the two-card module's Q8 build (k3_q3m_lean_tp_kvq8) at one card's shapes of the two-card engine
@@ -248,7 +248,7 @@ qa = torch.from_numpy((rng.standard_normal(n * NH * HD) * 0.5).astype(np.float16
 oa = torch.zeros(n * NH * HD, dtype=torch.float16, device=dev); ob = torch.zeros_like(oa)
 oq8.attn(qa, cache, pos0, n, NKV, scale, oa); ops.attn(qa, f16c, pos0, n, NKV, scale, ob); torch.cuda.synchronize()
 check(torch.equal(oa.view(torch.int16), ob.view(torch.int16)),
-      f'q3p_attn_q8 over Q8 rows = q3p_attn over fp16(decoded rows), bit for bit ({n} queries at position {pos0})')
+      f'q3mp_attn_q8 over Q8 rows = q3mp_attn over fp16(decoded rows), bit for bit ({n} queries at position {pos0})')
 # a refused block in the prefill
 xs2 = xs.copy(); xs2[3, NH * HD + M + 40] = np.nan
 cache[(pos0 + 3) * RB:(pos0 + 4) * RB] = 0xA5

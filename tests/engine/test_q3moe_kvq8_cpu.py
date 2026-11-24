@@ -287,11 +287,11 @@ check(pf.q8 and pf.ops.q8 and pf.ops.module == 'q3m_prefill' and pf.ops.kvmod.na
 LOG.clear()
 toks = list(range(1, 41))
 pf._chunk(toks, 0, 40)
-rope = [e for e in LOG if e[1].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[1].startswith('q3p_attn')]
+rope = [e for e in LOG if e[1].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[1].startswith('q3mp_attn')]
 check(rope and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3p_qk_rope_q8' and e[3][-1] is pf.kverr for e in rope)
-      and att and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3p_attn_q8' for e in att)
-      and len(rope) == mp.nl and not any(e[1] in ('q3p_qk_rope', 'q3p_attn') for e in LOG),
-      f'a chunk: {len(rope)} q3p_qk_rope_q8 (with the KV error word) and {len(att)} q3p_attn_q8 launches; no F16 row kernel')
+      and att and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3mp_attn_q8' for e in att)
+      and len(rope) == mp.nl and not any(e[1] in ('q3p_qk_rope', 'q3mp_attn') for e in LOG),
+      f'a chunk: {len(rope)} q3p_qk_rope_q8 (with the KV error word) and {len(att)} q3mp_attn_q8 launches; no F16 row kernel')
 check(raises(lambda: pf.ops.qk_rope(pf.qkv, 512, mp.nh, mp.nkv, mp.L[0]['qk_par'], 0, pf.q16, mp.L[0]['cache'], 4))
       and raises(lambda: pf.ops.qk_rope(pf.qkv, 512, mp.nh, mp.nkv, mp.L[0]['qk_par'], MC - 2, pf.q16, mp.L[0]['cache'], 4, rows=MC, err=pf.kverr), k3.ContextBoundsError)
       and raises(lambda: pf.ops.attn(pf.q16, f.L[0]['cache'], 0, 4, mp.nkv, 0.1, pf.att16)),

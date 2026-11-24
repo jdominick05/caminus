@@ -608,6 +608,26 @@ extern "C" __global__ void __launch_bounds__(128) q3p_qk_rope(const float * __re
 #endif
 }
 
+// ---- q3mp_attn: causal attention of a chunk's queries over the cache (rows 0 .. p for the token at position p), the
+// 30B's head dim 128 (8 query heads per kv head; q16 [n][nh][128] fp16 in, out16 the same shape, fp16 out):
+// kernels/prefill_attn_g8.h, the 35B's q35mp_attn's source (rocKE's gfx11 pipeline on absolute-position tiles; at head dim
+// 128 each wave holds its own query pair, workgroup = 16 positions, tiles of 64), q3mp_attn_q8 over Q8_0 rows in the Q8
+// object (q16 and K rotated by q3p_qk_rope_q8: the kernel is rotation-blind). Grid (16-position blocks, nkv), block 256.
+// The q3p_attn below (Q3P_ATTN_OLD) is the dense qwen35 objects' copy only, kept so their code stays unchanged (none
+// of them launches it; tests/prefill/test_q35_prefill_attn.py --speed times it as the old arm); its comment holds the
+// zero-product argument both kernels follow. A cleanup pull request removes it with that arm: the dense objects' code
+// then changes, so it reruns their object check (and the 35B Q8 object's, which holds q3p_attn_q8).
+#ifndef Q3P_ATTN_OLD
+#define PA_D 128
+#define PA_QT _Float16
+#define PA_OT _Float16
+#ifdef Q3P_KV_Q8
+#define PA_NAME q3mp_attn_q8
+#else
+#define PA_NAME q3mp_attn
+#endif
+#include "prefill_attn_g8.h"
+#else
 // ---- q3p_attn: causal attention of a chunk's queries over the cache (rows 0 .. p for the token at position p), WMMA, fp16
 // q / k / v and p, fp32 scores, softmax state and sums.
 // Work by ABSOLUTE position: workgroup i (8 waves) = positions 16 i .. 16 i + 15 x the 8 query heads of one kv head; wave
@@ -802,3 +822,4 @@ extern "C" __global__ void __launch_bounds__(256) q3p_attn(const _Float16 * __re
 #pragma unroll
         for (int v = 0; v < 8; v++) op[d * 16 + 2 * v + hi] = (_Float16)(O[d][v] * il);
 }
+#endif
