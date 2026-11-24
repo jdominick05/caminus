@@ -6,6 +6,8 @@ line's (those are tests/prefill/test_q35_prefill_ops.py's), over a chunk's rows,
              on random h, plus rows with a tie and a logit spread past fp32's exp range
   norm       q3p_add_rms16 over the 9 weighted slots == OP_OWN_ADD_RMS16 (Engine.own_add_rms16, slots 9, w), BITWISE
   embedding  q35mp_emb_bf16 == OP_OWN_EMB on the BF16 table (Engine.own_emb), BITWISE
+  yarn rope  pf_qk_nr of prefill_attn_q35_yarn (PF_QK_YARN) == OP_QK_NR's YaRN form on k3_q35_moe (the same table and
+             magnitude scale: engine.q35_moe.yarn_table, x4), BITWISE, k and q heads at positions past the native window
   kv q8      q35p_kv_append_q8 (the Q8 KV object, kernels/q35m_prefill_kvq8.hip) == OP_KV_APPEND on the Q8 decode module
              (k3_q35_moe_kvq8), BITWISE: a chunk's rows of rotated-looking fp32 K / V (an all-zero block among them) at a
              position offset; a non-finite value refuses its block (error bit 2), a row past the cache sets bit 1
@@ -132,6 +134,37 @@ def main():
     e2 = z(len(toks) * D)
     O.emb_bf16(embw, V, put(np.array(toks, dtype=np.int32)), e2, len(toks), D); torch.cuda.synchronize(dev)
     same('BF16 embedding rows', e2, e1); del Ee
+
+    # ---- the YaRN rope: the prefill's pf_qk_nr form == the decode op's ------------------------------------------------------
+    import ctypes
+    from caminus.engine.q35_moe import yarn_table
+    from caminus.prefill.attn import Attn
+    hd, nkv, nh = sh['hd'], sh['nkv'], sh['nh']
+    nrot = int(F.hp('rope.dimension_count'))
+    libm = ctypes.CDLL('libm.so.6'); libm.powf.restype = ctypes.c_float; libm.powf.argtypes = [ctypes.c_float, ctypes.c_float]
+    ts = libm.powf(float(F.hp('rope.freq_base')), -2.0 / nrot)
+    tab, ms = yarn_table(ts, nrot, 4.0, n_ctx=int(F.hp('context_length')))
+    yy = (put(tab), float(ms))
+    ia = min(int(n.split('.')[1]) for n in F.T if n.endswith('.attn_k_norm.weight'))   # (the first full-attention layer)
+    kn = torch.from_numpy(np.array(F.T[f'blk.{ia}.attn_k_norm.weight'].pread(0, hd * 4).view(np.float32))).to(dev)
+    TR, P0 = 7, 300_001                                    # (positions past the native 262,144: the YaRN-stretched window)
+    for what, heads, hs in (('k', nkv, hd), ('q (the gate half skipped)', nh, 2 * hd)):
+        xr = put((rng.standard_normal((TR * heads * hs,)) * 1.3).astype(np.float32))
+        Er = k3.Engine(module=MOD, T=1)
+        x1, o1, pr = z(heads * hs), z(heads * hd), z(1, dt=torch.int32)
+        Er.qk_nr(x1, hs, heads, hd, kn, pr, o1, nrot, ts, eps, yarn=yy); Er.build()
+        o_dec = z(TR, heads * hd)
+        for t in range(TR):
+            x1.copy_(xr[t * heads * hs:(t + 1) * heads * hs]); pr.fill_(P0 + t); Er.run(); o_dec[t].copy_(o1)
+        torch.cuda.synchronize(dev)
+        A = Attn(dev, name='prefill_attn_q35_yarn'); o_pf = z(TR * heads * hd)
+        A.qk_nr(xr, hs, heads, hd, kn, nrot, ts, eps, P0, o_pf, TR, yarn=yy); torch.cuda.synchronize(dev)
+        same(f'yarn rope: {what}, {TR} rows at positions {P0} ..', o_pf, o_dec)
+        del Er, A
+    try:
+        Attn(dev, name='prefill_attn_q35').qk_nr(xr, hd, 1, hd, kn, nrot, ts, eps, 0, o_pf, 1, yarn=yy); refused = False
+    except ValueError: refused = True
+    check(refused, 'yarn rope: the native object refuses a YaRN table (no PF_QK_YARN form)')
 
     # ---- the Q8 KV rows: the prefill's append == the decode module's --------------------------------------------------------
     nkv, hd = sh['nkv'], sh['hd']; M = nkv * hd; TK, P0, ROWS = 21, 5, 32

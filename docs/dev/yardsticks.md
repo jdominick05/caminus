@@ -167,7 +167,41 @@ What it says:
 - What the tiles leave on the table, against rocKE's design: one 16-column WMMA tile holds 2 positions x 6 heads (12 of
   16 columns used: GQA packing by absolute position pairs, which keeps the chunk geometry bit-exact); V^T is staged by
   scalar LDS writes; one LDS buffer (two barriers per 32 positions) where rocKE double-buffers and prefetches the next
-  tile into registers; scores exchanged through LDS between the pair. CK's gfx1100 FMHA is not measured.
+  tile into registers; scores exchanged through LDS between the pair. CK's gfx1100 FMHA is not measured. Qwen3.6-35B-A3B's
+  `q35mp_attn` (next section) takes the pipeline items; run at this geometry from its object it is 1.39 / 11.9 / 41.1 ms
+  (37-39 TF, 2.0x these tiles; the 12-of-16 columns stay). The dense line keeps `q35p_attn_wm` until its own gates rerun.
+
+## Prefill attention at depth (Qwen3.6-35B-A3B and Qwen3-30B-A3B geometry)
+
+`benchmarks/q35_prefill_attn.py` (`--heads 16 --kv-heads 2 --module q35m_prefill`, `--kv q8`; `--hd 128 --heads 32
+--kv-heads 4` for the 30B) and `benchmarks/rocke_attn.py --heads 16 --kv-heads 2 --prefill-only` (`--hd 128 --heads 32
+--kv-heads 4`), RX 7900 XT alone, one 2048-row chunk, the tables above's conventions. The 35B: 16 query heads over 2 kv
+heads, head dim 256, 8 query heads per kv head (all 16 WMMA columns used); the 30B: 32 over 4, head dim 128 (`q3p_attn`).
+
+| P0 | 35B before: `q35p_attn_wm` (F16 / Q8) | 35B now: `q35mp_attn` (F16 / Q8) | rocKE `wmma_fmha_fwd_v2` d256 | torch SDPA tiled |
+|---|---|---|---|---|
+| 0 | 1.49 / 1.57 ms (23.0 / 21.9 TF) | 0.80 / 0.78 ms (43.2 / 44.1 TF) | 0.64 ms (53.6 TF) | 1.63 ms (21.0 TF) |
+| 8,192 | 11.95 / 12.45 ms (25.9 / 24.8 TF) | 6.27 / 6.39 ms (49.4 / 48.4 TF) | 5.68 ms (54.4 TF) | 9.07 ms (34.1 TF) |
+| 30,720 | 41.30 / 43.00 ms (25.8 / 24.8 TF) | 20.95 / 22.10 ms (50.8 / 48.2 TF) | 19.60 ms (54.3 TF) | 29.08 ms (36.6 TF) |
+
+| P0 | 30B: `q3p_attn` | rocKE d128 (m128 n32) | torch SDPA tiled |
+|---|---|---|---|
+| 0 | 0.94 ms (36.6 TF) | 0.63 ms (54.8 TF) | 1.15 ms |
+| 8,192 | 7.11 ms (43.5 TF) | 5.39 ms (57.4 TF) | 6.46 ms |
+| 30,720 | 30.18 ms (35.3 TF, 4 launches) | 18.55 ms (57.4 TF) | 20.82 ms |
+
+What it says:
+- `q35mp_attn` (kernels/q35m_prefill.hip) is `q35p_attn_wm`'s absolute-position tiles with rocKE's pipeline: the next
+  tile's K / V in registers during the current one, two LDS-only barriers per tile (`__syncthreads` would wait for that
+  prefetch), V^T staged by 4-position runs, each wave reading only its partner's score partial, per-column lazy rescale.
+  1.9-2.0x the old kernel and 0.93x rocKE at 30K (F16), the same bits at every chunk geometry and launch split; 230 / 233
+  VGPRs (F16 / Q8), 0 spills, 53,760 B of LDS. Q8 decodes codes with packed fp16 math (the same bits as fp32
+  conversions; 44.8 -> 48.2 TF at 30K, interleaved).
+- The 35B end to end (prefill from empty, chunk 2048, median of 3, interleaved against the old attention):
+  F16 4,096 positions 787 -> 746 ms (5,203 -> 5,488 tok/s, 1.05x), 16,384 3.73 -> 3.30 s (1.13x), 32,768 9.03 -> 7.46 s
+  (3,630 -> 4,393 tok/s, 1.21x); Q8 4,096 811 -> 768 ms (1.06x), 16,384 3.85 -> 3.37 s (1.14x), 32,768 9.32 -> 7.58 s
+  (3,516 -> 4,322 tok/s, 1.23x). At 32K attention was ~37 % of the prefill, now ~23 %.
+- The 30B's head-dim-128 kernel is 1.6x behind rocKE at 30K (its launch split at 4 launches and no prefetch): not moved.
 
 ## Summary: where the outside kernels say we stand (XT)
 
@@ -178,3 +212,5 @@ What it says:
 | Verify attention (T 4), split pair, 32K | 1.29 ms / layer with the packed PART (1.52 ms before; T 1: 0.48 ms) | rocKE, GQA-packed: 0.22 ms | 5.9x (each row's arithmetic is still its own: decode's bits) |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
 | Prefill attention, chunk at 30K | 79.7 ms (964 ms before the tiles) | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.6 ms) | 2.8x (34x before) |
+| Prefill attention, 35B chunk at 30K | 20.95 ms (`q35mp_attn`; 41.3 ms before) | rocKE WMMA prefill: 19.60 ms | 1.07x (2.1x before) |
+| Prefill attention, 30B chunk at 30K | 30.18 ms (`q3p_attn`) | rocKE d128: 18.55 ms | 1.63x |

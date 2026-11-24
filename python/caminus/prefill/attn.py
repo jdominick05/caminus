@@ -37,7 +37,9 @@ from ..device.bufcheck import ALIGN, LaunchCheck, aligned, view_bytes   # noqa: 
 F32, F16, I32, U8 = torch.float32, torch.float16, torch.int32, torch.uint8
 _check = LaunchCheck('prefill_attn', align=4)   # every launch: each buffer stated once (fp32 / int32 pointers 4-byte aligned by default)
 ATTN_SS, ATTN_G, ATTN_D, ATTN_RS = 32, 12, 256, 260        # = kernels/prefill_attn.hip / k3_attn_split.h
-ATTN_G_OF = {'prefill_attn': 12, 'prefill_attn_q35': 8, 'prefill_attn_q35d': 6}    # query heads per kv head of each code object (prefill_attn_q35.hip)
+ATTN_G_OF = {'prefill_attn': 12, 'prefill_attn_q35': 8, 'prefill_attn_q35d': 6,     # query heads per kv head of each code object (prefill_attn_q35.hip)
+             'prefill_attn_q35_yarn': 8}                                         # (prefill_attn_q35 with pf_qk_nr's YaRN form)
+YARN_ATTN = ('prefill_attn_q35_yarn',)   # the objects whose pf_qk_nr takes the YaRN table (PF_QK_YARN): qk_nr(yarn=...) only there
 ROWS_PER_BLOCK = 64                                        # attention rows per record block (52 MiB of records at 65 splits)
 ERR_KV, ERR_ATTN, ERR_POOL = 1, 2, 4
 QSA_ROWB, QSA_TOPK, QSA_SELW, QSA_D, QSA_H = 136, 512, 516, 128, 4   # = kernels/k3_qsa_ops.h / caminus.engine.k3
@@ -170,16 +172,22 @@ class Attn:
             raise ValueError(f'{what}: the cache must be {dt} rows of {pb} B')
         return view_bytes(cache) // pb, pb, dt
 
-    def qk_nr(self, x, head_stride, heads, D, w, n_rot, theta_scale, eps, pos0, out, T):
+    def qk_nr(self, x, head_stride, heads, D, w, n_rot, theta_scale, eps, pos0, out, T, yarn=None):
         """out [T, heads, D] = RoPE(rms_norm(x head) * w) per (row, head) at position pos0 + row (OP_QK_NR); x [T, heads]
-        heads at head_stride floats"""
+        heads at head_stride floats. yarn: (the per-dim factor table fp32 [n_rot / 2] on the device, mscale): the qwen35moe
+        decode op's YaRN form, on a YARN_ATTN object only (and that object always needs it)"""
+        if (yarn is not None) != (self.name in YARN_ATTN):
+            raise ValueError(f'qk_nr: {self.name} ' + ('has no YaRN form' if yarn is not None else 'needs the YaRN table'))
         T, heads, D, hs = int(T), int(heads), int(D), int(head_stride)
         if T < 1 or heads < 1 or not 1 <= D <= 512 or hs < D or not 0 < int(n_rot) <= D or int(n_rot) % 2:
             raise ValueError(f'qk_nr: T {T}, heads {heads}, D {D}, head_stride {hs}, n_rot {n_rot}')
         nx = (T * heads - 1) * hs + D
-        _check(self.dev, 'qk_nr', dict(x=(x, F32, nx), w=(w, F32, D), out=(out, F32, T * heads * D)), ('out',))
+        bufs = dict(x=(x, F32, nx), w=(w, F32, D), out=(out, F32, T * heads * D))
+        if yarn is not None: bufs['mt'] = (yarn[0], F32, int(n_rot) // 2)
+        _check(self.dev, 'qk_nr', bufs, ('out',))
+        tail = () if yarn is None else (yarn[0], ctypes.c_float(float(yarn[1])))
         self._go('pf_qk_nr', T * heads, x, ctypes.c_int(hs), ctypes.c_int(heads), w, ctypes.c_int(D), ctypes.c_int(int(n_rot)),
-                 ctypes.c_float(theta_scale), ctypes.c_float(eps), ctypes.c_int(int(pos0)), out)
+                 ctypes.c_float(theta_scale), ctypes.c_float(eps), ctypes.c_int(int(pos0)), out, *tail)
 
     def hadamard(self, x, n, C, rpb=1):
         """in place: the orthonormal Walsh-Hadamard transform of C chunks of n values (n 64 / 128 / 256)"""

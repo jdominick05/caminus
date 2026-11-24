@@ -993,9 +993,9 @@ class Dense35(OneCard):
 class Q35MoE(OneCard):
     """qwen35moe (Qwen3.6-35B-A3B) on Caminus's own code: Moe35Own's tape on one card, T = 1 (kernels/k3_q35_moe.hip:
     the router, the BF16 embedding, the grouped Q2_0 expert tiles), the own reader and tokenizer. The prompt goes through
-    the own batched prefill (caminus.prefill.q35moe.Q35MoEPrefill, kernels/q35m_prefill.hip; --kv q8 adds
-    kernels/q35m_prefill_kvq8.hip's rows and attention) with the native rope; in the YaRN mode it runs as K3 passes
-    (KPassOnly: one decode pass a token, correct and slow) until that mode has a prefill. No drafter for this line yet."""
+    the own batched prefill (caminus.prefill.q35moe.Q35MoEPrefill, kernels/q35m_prefill.hip) in every mode: --kv q8 adds
+    kernels/q35m_prefill_kvq8.hip's rows and attention, the YaRN mode prefill_attn_q35_yarn's rope. No drafter for this
+    line yet."""
     engine = 'engine.q35_moe:Moe35Own'
     rope_facts = QWEN35_ROPE
     kv_formats = ('f16', 'q8')  # (the Q8 KV object: kernels/k3_q35_moe_kvq8.hip, half the bytes per position)
@@ -1004,27 +1004,21 @@ class Q35MoE(OneCard):
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)
     PREFILL_CHUNK = 2048       # (XT, from empty, 2,048 positions: chunk 2048 5,485 tok/s, 1024 4,759; 531 MiB at 2048)
 
-    def _batched(self, opt):
-        """the modes the own batched prefill takes: F16 or Q8 KV, the native rope"""
-        return self.rope_mode(opt) is None
-
     def build(self, opt, log=print, T=None):
         self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
         from .engine.q35_moe import Moe35Own
         from .prefill import q35moe
-        from .prefill.kpass import KPassOnly
         mode = self.rope_mode(opt)
-        batched = self._batched(opt)
-        extra = q35moe.buffer_need_mib(q35moe.shapes_of(opt['model']), self.PREFILL_CHUNK) + PREFILL_MODULES_MIB if batched else 0.0
+        extra = q35moe.buffer_need_mib(q35moe.shapes_of(opt['model']), self.PREFILL_CHUNK) + PREFILL_MODULES_MIB
         m = Moe35Own(opt['model'], device=0, max_ctx=int(opt['max_ctx']), yarn=None if mode is None else mode.factor,
                      q8=opt.get('kv') == 'q8', vram_extra_mib=extra)
-        return m, (q35moe.Q35MoEPrefill(m, chunk=self.PREFILL_CHUNK) if batched else KPassOnly(m)), None, None
+        return m, q35moe.Q35MoEPrefill(m, chunk=self.PREFILL_CHUNK), None, None
 
     def auto_need(self, opt, slots, cards=None):
         """max_ctx auto's projection: Moe35Own's own statics, not the ggml engine's. The inherited OneCard.auto_need builds
         Qwen35One's shape, which reads the embedding row on the host (this engine uploads the whole BF16 table) and counts
         a q8 cache (this one is F16 only): 2.0 GiB low at 4096 and 4.3 GiB at 262,144, so the default serve could place a
-        context the own build then refuses. The batched prefill's buffers (native rope; the same at F16 and Q8 KV) are
+        context the own build then refuses. The batched prefill's buffers (the same in every KV and rope mode) are
         counted as build allocates them."""
         self.kv_check(opt)
         from .engine.q35_moe import Moe35Own
@@ -1034,7 +1028,7 @@ class Q35MoE(OneCard):
         q8 = opt.get('kv') == 'q8'
         slot = (Moe35Own.recurrent_mib(path) + Moe35Own.kv_pos_mib(path, q8)) * 1.05 + 1.0   # (a checkpoint: states + tail rows)
         from .prefill import q35moe
-        pf = q35moe.buffer_need_mib(q35moe.shapes_of(path), self.PREFILL_CHUNK) + PREFILL_MODULES_MIB if self._batched(opt) else 0.0
+        pf = q35moe.buffer_need_mib(q35moe.shapes_of(path), self.PREFILL_CHUNK) + PREFILL_MODULES_MIB
         need = lambda c: [Moe35Own.projection_mib(path, c, q8=q8) + pf + (slots + 2) * slot]
         return n_ctx, [0], slot, need
 

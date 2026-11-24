@@ -53,9 +53,10 @@ DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35
 # The XTX's objects of the own decode modules: build.sh's <name>_w4 (a 4-workgroups-per-WGP grid, VGPR cap 192 instead of
 # the XT's 144: kernels/k3.hip K3_PER_WGP); caminus.engine.k3.card_object loads one on a card whose grid is 4 per WGP
 CARD_W4 = tuple(n + '_w4' for n in Q3_OWN if n.startswith('k3_q3m_'))
-# Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (the YaRN mode
-# keeps the same objects: its table is a buffer), the prefill's own object and its Q8 rows and attention
-Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8')
+# Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (their YaRN
+# mode is the same objects: the table is a buffer), the prefill's own object, its Q8 rows and attention, and the prefill
+# attention object's YaRN build (pf_qk_nr's table)
+Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn')
 RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + CARD_W4 + Q35MOE_OWN + ('own_topk', 'smoke')
 
 
