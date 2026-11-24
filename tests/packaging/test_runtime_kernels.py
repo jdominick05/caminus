@@ -255,8 +255,12 @@ class RuntimeKernels(unittest.TestCase):
         for fmt in ('Q4_K', 'Q6_K') + tuple(q3m_ops.IQ_KERNEL):
             with self.subTest(fmt=fmt):
                 names = self.q3_prefill(fmt)
-                self.assertEqual(names, [q3m_ops.IQ_MODULE if fmt in q3m_ops.IQ_KERNEL else 'q3m_prefill'])
+                # (q3m_prefill's wide GEMM tiles are their own object: the IQ study object runs the narrow tiles)
+                self.assertEqual(names, [q3m_ops.IQ_MODULE] if fmt in q3m_ops.IQ_KERNEL else ['q3m_prefill', q3m_ops.WIDE_MODULE])
                 self.require_runtime(names)
+        without = tuple(n for n in kernels.RUNTIME_SET if n != q3m_ops.WIDE_MODULE)
+        with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+            self.require_runtime(self.q3_prefill('Q4_K'))
         for fmt in q3moe_one.MODULE_RS:
             with self.subTest(fmt=fmt), self.assertRaises(ValueError):
                 self.q3_prefill(fmt)
@@ -302,7 +306,7 @@ class RuntimeKernels(unittest.TestCase):
         self.assertEqual(tp, 'k3_q3m_lean_tp_kvq8')
         self.assertEqual(q3_engine().module, q3moe_one.MODULE_LEAN)   # (the F16 default unchanged)
         names1 = self.q3_prefill('Q4_K', q8=True)
-        self.assertEqual(sorted(set(names1)), ['q3m_prefill', 'q3m_prefill_kvq8'])
+        self.assertEqual(sorted(set(names1)), ['q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_mm'])
         names2 = self.q3_prefill_tp(q8=True)
         self.assertEqual(sorted(set(names2)), ['prefill_tp', 'q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_tp'])
         self.assertEqual(names2.count('q3m_prefill_kvq8'), 2)   # (one per card)
@@ -332,7 +336,8 @@ class RuntimeKernels(unittest.TestCase):
                 start = len(self.loads)
                 q3m.Q3MPrefill(m, chunk=16, check=False)
                 names = self.loads[start:]
-                want = ['q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_kvq8_yarn'] if q8_ else ['q3m_prefill', 'q3m_prefill_yarn']
+                want = (['q3m_prefill', 'q3m_prefill_mm', 'q3m_prefill_kvq8', 'q3m_prefill_kvq8_yarn'] if q8_
+                        else ['q3m_prefill', 'q3m_prefill_mm', 'q3m_prefill_yarn'])
                 self.assertEqual(names, want)
                 self.require_runtime(names)
         self.require_runtime([one, q8] + tps)

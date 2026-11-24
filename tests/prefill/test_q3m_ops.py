@@ -6,7 +6,9 @@ against the card's guard line before the first transfer).
             Q6_K experts (blk.0 down) through q3p_group's work items, token counts that leave partial tiles: max and
             mean |y - ref| / rms(ref) within fp32-accumulation bounds (the weights are exact in the B operand); Q4_K with
             tokens whose sub-block sums pass fp16's range (the min term's fallback): finite, the same bound, and every
-            other token bitwise its rows without them
+            other token bitwise its rows without them. Each GEMM runs on the wide tiles (kernels/q3m_prefill_mm.hip, what
+            the one-card prefill launches) and again on the narrow ones (Ops.wide False): every output bitwise; the
+            fused gate | up (q3p_mm_q4k_gu) bitwise the narrow gate and up GEMMs and q3p_swiglu
   glue      q3p_emb bitwise caminus.own_dequant's rows; add_rms16, router, swiglu vs float64; topk's ids equal numpy's
             ranking of the same float32 probabilities and its weights within float32 rounding
   attention q3p_qk_rope vs float64 (norm + RoPE; the cache rows) and q3mp_attn vs float64 causal attention over random
@@ -31,7 +33,7 @@ print(torch.cuda.get_device_name(0), flush=True)
 # every model tensor this test puts on the card (each stays cached by the allocator after its section), the test's own
 # buffers (the largest: the experts' fp32 output, 1,200 x 2,048) and the HIP context
 TENSORS = ('blk.0.attn_q.weight', 'blk.0.attn_v.weight', 'blk.1.attn_k.weight', 'blk.0.ffn_gate_exps.weight',
-           'blk.0.ffn_down_exps.weight', 'token_embd.weight', 'blk.3.ffn_gate_inp.weight')
+           'blk.0.ffn_down_exps.weight', 'blk.0.ffn_up_exps.weight', 'token_embd.weight', 'blk.3.ffn_gate_inp.weight')
 WORK_MIB, CONTEXT_MIB = 96, 256
 need_mib = sum(F.T[name].n_bytes for name in TENSORS) / 2 ** 20 + WORK_MIB + CONTEXT_MIB
 capacity.check([0], [need_mib], f'test_q3m_ops ({need_mib:.0f} MiB projected)')
@@ -52,6 +54,19 @@ def W(name):
     return (t.type, int(t.shape[1]), K, torch.from_numpy(np.ascontiguousarray(b)).to(dev)), t
 
 
+def narrow(launch, like):
+    """the same launch on the narrow tiles (Ops.wide False) into a NaN-filled twin of `like`"""
+    out = torch.full_like(like, np.nan)
+    O.wide = False
+    try: launch(out); torch.cuda.synchronize()
+    finally: O.wide = True
+    return out
+
+
+def bitwise(a, b):
+    return torch.equal(a.view(torch.int32 if a.dtype == torch.float32 else torch.int16), b.view(torch.int32 if b.dtype == torch.float32 else torch.int16))
+
+
 def rel(y, ref):
     r = np.sqrt((ref ** 2).mean()); e = np.abs(y - ref) / r
     return float(e.max()), float(e.mean())
@@ -62,10 +77,12 @@ for name, n in (('blk.0.attn_q.weight', 100), ('blk.0.attn_v.weight', 77), ('blk
     w, t = W(name); fmt, R, K, _ = w
     x = (g.standard_normal((n, K)) * 0.7).astype(np.float16)
     y = torch.full((n, R), np.nan, dtype=torch.float32, device=dev)
-    O.mm(w, torch.from_numpy(x).to(dev), K, y, R, n=n); torch.cuda.synchronize()
+    xd = torch.from_numpy(x).to(dev)
+    O.mm(w, xd, K, y, R, n=n); torch.cuda.synchronize()
     ref = x.astype(np.float64) @ own_dequant.rows(t, 0, R).astype(np.float64).T
     mx, mn = rel(y.cpu().numpy(), ref)
     check(np.isfinite(y.cpu().numpy()).all() and mx < 2e-5 and mn < 2e-6, f'mm {fmt} dense {name} n {n}: max {mx:.2e}, mean {mn:.2e} of rms')
+    check(bitwise(y, narrow(lambda o: O.mm(w, xd, K, o, R, n=n), y)), f'mm {fmt} dense {name} n {n}: the wide tile bitwise the narrow one')
 
 # ---- the Q4_K min term past fp16's range: a token whose 32-value sums of x pass 65,504 takes the kernel's / 64 fallback
 # (its min term as dmin MS / 64 on the ordinary path plus 63 dmin MS / 64 in the rare branch). Against its twin (the same
@@ -95,7 +112,9 @@ for tk, tw in twin.items():
     xb[tw] = (xb[tk].astype(np.float32) / 64).astype(np.float16)
     assert np.array_equal(xb[tw].astype(np.float32) * 64, xb[tk].astype(np.float32))
 y1 = torch.full((n, R), np.nan, dtype=torch.float32, device=dev)
-O.mm(w, torch.from_numpy(xb).to(dev), K, y1, R, n=n); torch.cuda.synchronize()
+xbd = torch.from_numpy(xb).to(dev)
+O.mm(w, xbd, K, y1, R, n=n); torch.cuda.synchronize()
+check(bitwise(y1, narrow(lambda o: O.mm(w, xbd, K, o, R, n=n), y1)), 'mm Q4_K min-term fallback: the wide tile bitwise the narrow one')
 y0n, y1n = y0.cpu().numpy(), y1.cpu().numpy()
 moved = set(big) | set(twin.values())
 others = [p for p in range(n) if p not in moved]
@@ -134,7 +153,9 @@ for name in ('blk.0.ffn_gate_exps.weight', 'blk.0.ffn_down_exps.weight'):
     x = (g.standard_normal((n * k if 'down' in name else n, K)) * 0.7).astype(np.float16)
     y = torch.full((n * k, R), np.nan, dtype=torch.float32, device=dev)
     wk = work if 'down' not in name else (items, nitems, bound, yd, yd)
-    O.mm(w, torch.from_numpy(x).to(dev), K, y, R, work=wk); torch.cuda.synchronize()
+    xd = torch.from_numpy(x).to(dev)
+    O.mm(w, xd, K, y, R, work=wk); torch.cuda.synchronize()
+    check(bitwise(y, narrow(lambda o: O.mm(w, xd, K, o, R, work=wk), y)), f'mm {fmt} experts {name}: the wide tile bitwise the narrow one')
     yn = y.cpu().numpy(); ref = np.zeros_like(yn, dtype=np.float64)
     deq = {int(e): own_dequant.rows(t, int(e) * R, int(e) * R + R).astype(np.float64) for e in use}
     for p in range(n * k):
@@ -142,6 +163,19 @@ for name in ('blk.0.ffn_gate_exps.weight', 'blk.0.ffn_down_exps.weight'):
         ref[p] = deq[int(ids_np.reshape(-1)[p])] @ xr.astype(np.float64)
     mx, mn = rel(yn, ref)
     check(np.isfinite(yn).all() and mx < 2e-5 and mn < 2e-6, f'mm {fmt} experts {name} ({n} tokens x {k}): max {mx:.2e}, mean {mn:.2e} of rms')
+
+# ---- the fused gate | up (q3p_mm_q4k_gu: both GEMMs and swiglu in one launch) against the narrow gate and up GEMMs and
+# q3p_swiglu, on the same work items: bitwise
+wg_, _ = W('blk.0.ffn_gate_exps.weight'); wu_, _ = W('blk.0.ffn_up_exps.weight'); R, K = wg_[1], wg_[2]
+xd = torch.from_numpy((g.standard_normal((n, K)) * 0.7).astype(np.float16)).to(dev)
+a16 = torch.full((n * k, R), np.nan, dtype=torch.float16, device=dev)
+O.mm_gu(wg_, wu_, xd, K, a16, R, work); torch.cuda.synchronize()
+gq = narrow(lambda o: O.mm(wg_, xd, K, o, R, work=work), torch.empty(n * k, R, device=dev))
+uq = narrow(lambda o: O.mm(wu_, xd, K, o, R, work=work), gq)
+s16 = torch.full_like(a16, np.nan)
+O.swiglu(gq, uq, s16, n * k * R); torch.cuda.synchronize()
+check(bool(torch.isfinite(a16).all()) and bitwise(a16, s16), f'mm_gu ({n} tokens x {k}): bitwise the narrow gate, up and swiglu')
+del wg_, wu_, gq, uq, a16, s16
 
 # ---- glue
 te = F.T['token_embd.weight']; R_, rb = te.rows(); D = int(te.shape[0])
