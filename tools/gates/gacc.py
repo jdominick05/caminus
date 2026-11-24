@@ -1,6 +1,6 @@
 """docs/specs/spec-own-quant.md's G-acc: the pieces its harnesses share (tests/engine/test_k3_gguf_gsq.py (e),
 benchmarks/q36_gacc.py, benchmarks/q35_mtp_gacc.py; the block cuts also tests/engine/test_own_q2_0.py).
-Nothing here launches on import; the device helpers take the caller's Module (build/gg_mv_ref.hsaco, build/own_mv.hsaco)."""
+Nothing here launches on import; the device helpers take the caller's Module (build/ref_gg_mv.hsaco, build/bench_own_mv.hsaco)."""
 import ctypes
 import numpy as np
 
@@ -22,7 +22,7 @@ def kcols(raw, ranges, bs, ts):
 
 
 def ref_q8_1(gg, x32):
-    """x fp32 [n] (cuda) -> q8_1 blocks with gg_mv_ref's quantizer (module gg). It writes a block for every launched lane
+    """x fp32 [n] (cuda) -> q8_1 blocks with ref_gg_mv's quantizer (module gg). It writes a block for every launched lane
     (ng * 8 blocks), so the buffer holds them all and the first ceil(n / 32) are returned"""
     import torch
     n = x32.numel(); nb = (n + 31) // 32; ng = (nb * 32 + 255) // 256
@@ -32,7 +32,7 @@ def ref_q8_1(gg, x32):
 
 
 def own_read(rd, w, sink, nbytes=None):
-    """the plain read of the first nbytes (default all) of w (uint8, cuda, 16-byte aligned) with own_mv's own_read
+    """the plain read of the first nbytes (default all) of w (uint8, cuda, 16-byte aligned) with bench_own_mv's own_read
     (module rd): the bandwidth ceiling a matvec over the same bytes is compared with"""
     n16 = (w.numel() if nbytes is None else nbytes) // 16
     rd.own_read((min(4096, (n16 + 255) // 256),), (256,), w, ctypes.c_long(n16), sink)

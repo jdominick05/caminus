@@ -1,4 +1,4 @@
-"""Caminus's own quantized matvec (kernels/own_mv.hip) against llama.cpp's (the gg_mv_* standalone kernels, ggml-cuda's
+"""Caminus's own quantized matvec (kernels/bench_own_mv.hip) against llama.cpp's (the gg_mv_* standalone kernels, ggml-cuda's
 vec_dot), standalone, on real tensors (docs/specs/spec-own-quant.md, order of work step 3):
   accuracy  per variant, |y - y_ref| / rms(y_ref) over 256 sampled rows of the first tensor of each set, y_ref the fp64
             dot of gguf-py's dequantized rows with the fp32 activation (mean and p99 over rows x vectors); activations:
@@ -27,7 +27,7 @@ ap.add_argument('--nvec', type=int, default=8)
 A = ap.parse_args()
 dev = torch.device('cuda:0')
 rng = np.random.default_rng(0)
-OWN = Module('own_mv')
+OWN = Module('bench_own_mv')
 FMTS = {'Q6_K': 'q6_k', 'Q4_K': 'q4_k', 'Q8_0': 'q8_0'}
 
 
@@ -72,7 +72,7 @@ def variants(fmt, K):
         qt = quants.GGMLQuantizationType[fmt]
         def prep(x32): return G.quantize_q8_1(x32)
         def run(w, n, yq, out):
-            getattr(G._m('k3_gguf_q35h' if qt in G.MV_Q35H else 'k3_gguf_gsq' if qt in G.MV_GSQ else 'k3_gguf'), G.MV[qt])(
+            getattr(G._m('dec_q35m_hh' if qt in G.MV_Q35H else 'dec_q4x_gsq' if qt in G.MV_GSQ else 'dec_q4x_gg'), G.MV[qt])(
                 ((n + 3) // 4,), (32, 4), w, yq, out, ctypes.c_int(n), ctypes.c_int(K))
         return prep, run
     return {'llama.cpp q8_1': llama(), 'own a8': own('a8'), 'own a16': own('a16'), 'own a16f': own('a16f'), 'own a32': own('a32')}

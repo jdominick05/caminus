@@ -24,7 +24,7 @@ int main(int argc, char ** argv) {
     hipStream_t s; HIP_CHECK(hipStreamCreate(&s));
     rocblas_handle blas; BLAS_CHECK(rocblas_create_handle(&blas)); BLAS_CHECK(rocblas_set_stream(blas, s));
     char ver[64]; rocblas_get_version_string(ver, sizeof(ver)); printf("rocBLAS %s\n", ver);
-    Module core, actq; core.load("core"); actq.load("actq");
+    Module core, actq; core.load("train_core"); actq.load("train_actq");
 
     const Tensor & tok = G["tokens"]; const int T = (int)tok.numel(), D = 896;
     {   // embedding

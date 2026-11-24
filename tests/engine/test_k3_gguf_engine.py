@@ -1,4 +1,4 @@
-"""GGUF ops in the persistent K3 engine (build/k3_gguf.hsaco): on real Flash-Next REAP-308-UI layer-0 tensors, the
+"""GGUF ops in the persistent K3 engine (build/dec_q4x_gg.hsaco): on real Flash-Next REAP-308-UI layer-0 tensors, the
 engine's q8_1 bytes and matvec outputs (IQ3_XXS gate/up and IQ4_NL down of 10 experts, Q6_K attn_qkv, Q8_0 hc_attn_down)
 are bitwise equal to the standalone kernels, independent and chained; then the speed of a chained expert tape that
 reads distinct experts (~22 MB per pseudo-layer, beyond the Infinity Cache).
@@ -29,7 +29,7 @@ X = {k: torch.randn(n, device='cuda') * 0.5 for k, n in (('d', 2560), ('f', 640)
 need = {'gate': 'd', 'up': 'd', 'qkv': 'd', 'down': 'f', 'hc': 'h'}
 
 for chained in (False, True):
-    e = k3.Engine(module='k3_gguf'); yq, outs = {}, {}; prev = -1
+    e = k3.Engine(module='dec_q4x_gg'); yq, outs = {}, {}; prev = -1
     for k, x in X.items():
         yq[k] = torch.empty((x.numel() + 31) // 32 * 36, dtype=torch.uint8, device='cuda')
         prev = e.gg_q8_1(x, yq[k], dep=prev if chained else -1)
@@ -44,7 +44,7 @@ for chained in (False, True):
     print(f'{"chained" if chained else "independent"}: q8_1 bytes {"equal" if qok else "DIFFER"}; {len(W) - len(bad)}/{len(W)} matvecs bitwise equal{" " + str(bad) if bad else ""}')
 
 # speed: 30 pseudo-layers x [q8_1 -> 20 gate/up -> q8_1 -> 10 down], distinct experts per pseudo-layer
-L = 30; e = k3.Engine(module='k3_gguf'); prev = -1; byts = 0
+L = 30; e = k3.Engine(module='dec_q4x_gg'); prev = -1; byts = 0
 ws = {}
 for l in range(L):
     for kind in ('gate', 'up', 'down'):

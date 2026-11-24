@@ -192,12 +192,12 @@ class ToolRoundTrip(unittest.TestCase):
 
 class KvObjects(unittest.TestCase):
     """kv_objects: the --kv check on /props caminus.code_objects (the F16 lists are the ones served Qwen3-30B-A3B
-    smokes recorded; the Q8 lists swap in the Q8 decode module and add q3m_prefill_kvq8, which the prefill loads beside
-    q3m_prefill)"""
-    F16_1 = ['k3_q3m_lean', 'q3m_prefill', 'own_topk']
-    F16_2 = ['k3_q3m_lean_tp', 'q3m_prefill', 'q3m_prefill_tp', 'prefill_tp', 'own_topk']
-    Q8_1 = ['k3_q3m_lean_kvq8', 'q3m_prefill', 'q3m_prefill_kvq8', 'own_topk']
-    Q8_2 = ['k3_q3m_lean_tp_kvq8', 'q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_tp', 'prefill_tp', 'own_topk']
+    smokes recorded; the Q8 lists swap in the Q8 decode module and add pf_q3m_kvq8, which the prefill loads beside
+    pf_q3m)"""
+    F16_1 = ['dec_q3m', 'pf_q3m', 'samp_topk']
+    F16_2 = ['dec_q3m_tp', 'pf_q3m', 'pf_q3m_tp', 'pf_tp', 'samp_topk']
+    Q8_1 = ['dec_q3m_kvq8', 'pf_q3m', 'pf_q3m_kvq8', 'samp_topk']
+    Q8_2 = ['dec_q3m_tp_kvq8', 'pf_q3m', 'pf_q3m_kvq8', 'pf_q3m_tp', 'pf_tp', 'samp_topk']
 
     def ok(self, objs, kv):
         return smoke.kv_objects(objs, kv)[0]
@@ -211,18 +211,18 @@ class KvObjects(unittest.TestCase):
             self.assertFalse(self.ok(objs, 'f16'), objs)
 
     def test_q8_refuses_its_f16_base_or_a_missing_q8_prefill(self):
-        self.assertFalse(self.ok(['k3_q3m_lean'] + self.Q8_1, 'q8'))                     # (the F16 decode module beside it)
-        self.assertFalse(self.ok(['k3_q3m_lean_tp'] + self.Q8_2, 'q8'))
-        self.assertFalse(self.ok([o for o in self.Q8_1 if o != 'q3m_prefill_kvq8'], 'q8'))   # (the prefill on F16 rows)
-        self.assertFalse(self.ok([o for o in self.Q8_2 if o != 'q3m_prefill_kvq8'], 'q8'))
-        self.assertFalse(self.ok(self.F16_1 + ['q3m_prefill_kvq8'], 'q8'))               # (no Q8 decode module)
-        self.assertFalse(self.ok(self.F16_1 + ['q3m_prefill_kvq8'], 'f16'))              # (f16: no *_kvq8 object at all)
+        self.assertFalse(self.ok(['dec_q3m'] + self.Q8_1, 'q8'))                     # (the F16 decode module beside it)
+        self.assertFalse(self.ok(['dec_q3m_tp'] + self.Q8_2, 'q8'))
+        self.assertFalse(self.ok([o for o in self.Q8_1 if o != 'pf_q3m_kvq8'], 'q8'))   # (the prefill on F16 rows)
+        self.assertFalse(self.ok([o for o in self.Q8_2 if o != 'pf_q3m_kvq8'], 'q8'))
+        self.assertFalse(self.ok(self.F16_1 + ['pf_q3m_kvq8'], 'q8'))               # (no Q8 decode module)
+        self.assertFalse(self.ok(self.F16_1 + ['pf_q3m_kvq8'], 'f16'))              # (f16: no *_kvq8 object at all)
 
     def test_an_empty_or_missing_list_passes_neither(self):
         for objs in ([], None):
             self.assertFalse(self.ok(objs, 'q8'))
             self.assertFalse(self.ok(objs, 'f16'))
-        self.assertIn("'q3m_prefill_kvq8'", smoke.kv_objects(self.Q8_1, 'q8')[1])
+        self.assertIn("'pf_q3m_kvq8'", smoke.kv_objects(self.Q8_1, 'q8')[1])
 
 
 class ServerCommand(unittest.TestCase):

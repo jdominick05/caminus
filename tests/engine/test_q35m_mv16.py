@@ -1,6 +1,6 @@
-"""The qwen35moe decode module's Q8_0 matvecs (k3_q35_moe, OP_OWN_MV16) against float64, on Qwen3.6-35B-A3B's own weights:
+"""The qwen35moe decode module's Q8_0 matvecs (dec_q35m, OP_OWN_MV16) against float64, on Qwen3.6-35B-A3B's own weights:
 every Q8_0 tensor kind of the file (layer 0's and the first attention layer's, and the vocab head), random fp16
-activations, through both tiles the module holds: the wave-per-row tile (kernels/own_quant.h own_row_q8_0_w, Seg.pad1
+activations, through both tiles the module holds: the wave-per-row tile (kernels/quant.h own_row_q8_0_w, Seg.pad1
 bit 16: Q8_0 at K = 1024 n, rows in tasks of about one per workgroup as Moe35Own sizes them) and the 4-rows tile
 (own_rows_q8_0_1rt, rows_per_task 32). Per row |y - W x| / sum |w x| with W the blocks decoded on the host
 (caminus.own_dequant); the gate: within 1e-6 for both (fp32 sums of exact products: ~1e-8 measured; a layout bug is
@@ -37,7 +37,7 @@ def main():
     # alive at once, each arm's tape; checked before anything is allocated
     peak = max(t.n_bytes + int(t.shape[0]) * 2 + 4 * t.rows()[0] * 4 for t in kinds.values())
     capacity.check([torch.cuda.current_device()], [peak / 2 ** 20 + 16], 'test_q35m_mv16: one Q8_0 matrix, its activations and outputs')
-    grid = k3.Engine(module='k3_q35_moe').grid   # (the default grid: 4 workgroups per WGP)
+    grid = k3.Engine(module='dec_q35m').grid   # (the default grid: 4 workgroups per WGP)
     for kind, t in kinds.items():
         R, _ = t.rows(); K = int(t.shape[0])
         x = (rng.standard_normal(K) * 2).astype(np.float16); x16 = torch.from_numpy(x).cuda()
@@ -50,7 +50,7 @@ def main():
             arms += [('row', rpt, True), ('row', 8, True)]
         outs = []
         for name, rpt, row in arms:
-            E = k3.Engine(module='k3_q35_moe'); out = torch.zeros(R, device='cuda')
+            E = k3.Engine(module='dec_q35m'); out = torch.zeros(R, device='cuda')
             E.own_matvec16(w, 'Q8_0', R, K, x16, out, rows_per_task=rpt, row=row); E.build().run(); torch.cuda.synchronize()
             o = out.double().cpu().numpy(); outs.append(out.cpu())
             err = float((np.abs(o - ref) / den).max())

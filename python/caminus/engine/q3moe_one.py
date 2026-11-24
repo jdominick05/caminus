@@ -1,7 +1,7 @@
 """qwen3moe (Qwen3-30B-A3B) decode on one card, on Caminus's own code from the GGUF file to the logits: our reader
 (caminus.ggufio), our weight layout (engine/own_layout.py: Q6_K planes), our matvec tiles (OP_OWN_MV one-round-trip,
 the 8 experts of a layer grouped by device ids), the embedding row decoded on the device (OP_OWN_EMB, bitwise
-caminus.own_dequant), and the K3 engine's own norm / q-k norm + RoPE / KV append / decode attention / router ops; module k3_gguf_q3m_own. One token per
+caminus.own_dequant), and the K3 engine's own norm / q-k norm + RoPE / KV append / decode attention / router ops; module dec_q3m_gg. One token per
 pass (T = 1). The test oracle is caminus.ref_q3moe (float64, the same code path's math).
 
 Per layer (fp32 residual x; h16 = fp16 activations for the matvecs):
@@ -24,12 +24,12 @@ from . import k3
 from .k3 import GRID_WGS, card_per_wgp   # (the per-card grid lives with the module loader: it picks the object for it)
 from .own_layout import q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
 
-MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
-MODULE_LEAN = 'k3_q3m_lean'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
-MODULE_IQ = 'k3_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
-MODULE_RS = {'Q4_0': ('k3_q3m_rs4', 'RS4'), 'Q2_0': ('k3_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
-# the KV cache as Q8_0 rows (q8=True): kernels/own_kv_codec.h's blocks of the fp16 values the F16 cache holds, K (and q)
-# through the head's Walsh-Hadamard transform first (kernels/own_kv_rot128.h): a Q8 row is
+MODULE = 'dec_q3m_gg'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
+MODULE_LEAN = 'dec_q3m'   # the default tape's ops only: the module the engine decodes with (k3.Q3M_LEAN_OPS)
+MODULE_IQ = 'dec_q3m_iq'       # ... plus the codebook formats' tiles: a file with IQ tensors (docs/dev/iq-quant-study.md)
+MODULE_RS = {'Q4_0': ('dec_q3m_rs4', 'RS4'), 'Q2_0': ('dec_q3m_rs2', 'RS2')}   # ... or the row-scale study's: Q4_0 / Q2_0 tensors with one scale per row (docs/dev/row-scale-study.md)
+# the KV cache as Q8_0 rows (q8=True): kernels/kv_codec_ops.h's blocks of the fp16 values the F16 cache holds, K (and q)
+# through the head's Walsh-Hadamard transform first (kernels/kv_rot128.h): a Q8 row is
 # caminus.ref_kv.encode_q8_kv(ref_kv.hadamard128(K), V) of the F16 row's K and V; the lean decode form only, one card.
 # The engine key carries this id, so rows of another layout (the unrotated rows of an earlier draft) never restore here
 KV_FORMAT_Q8 = 'q8_0-v1:qk-hadamard128:f16-rounded-v1'
@@ -60,7 +60,7 @@ class Q3MoEOne:
     def __init__(self, path, device=0, max_ctx=4096, limit_us=200_000, module=None, fused=True, rpt=16, per_wgp='card', gu=True, attn_batched=True, attn_one=True,
                  attn_split=True, splits=None, lmin=ATS_LMIN, vram_check=True, vram_extra_mib=0.0, max_retries=8,
                  link_keepalive=True, q8=False, rope=None):
-        """q8: the KV cache as Q8_0 rows on k3_q3m_lean_kvq8 (KV_FORMAT_Q8; the lean tape form and a file without codebook
+        """q8: the KV cache as Q8_0 rows on dec_q3m_kvq8 (KV_FORMAT_Q8; the lean tape form and a file without codebook
         or row-scale tensors only; its batched prefill is Q3MPrefill's Q8 path). A refused encoding (a non-finite K / V
         value) raises caminus.errors.InvalidKVEncoding and leaves the engine broken: reset() keeps it.
         rope: None (the trained RoPE: max_ctx up to the file's context_length) or a caminus.rope.YarnMode (the long-context
@@ -180,7 +180,7 @@ class Q3MoEOne:
 
     def _module_base(self):
         lean = self.fused and self.gu and self.attn_one and self.attn_split
-        if getattr(self, 'q8', False):   # (the Q8 cache: k3_q3m_lean's Q8 build only; set explicitly or picked here)
+        if getattr(self, 'q8', False):   # (the Q8 cache: dec_q3m's Q8 build only; set explicitly or picked here)
             one = k3.Q3M_KV_Q8_OF[MODULE_LEAN]   # (the one-card Q8 module; its two-card build only when set by name: the
             #  one-card probe of that object, tests/engine/test_q3m_tp_probe.py --kv q8, as the F16 two-card module)
             if self._module not in (None, one, k3.Q3M_TP_OF[one]) or not lean or self.iq or self.rs:

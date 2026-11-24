@@ -75,7 +75,7 @@ class Q35OwnPrefillTP(PrefillDriver):
         if m.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)): bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q35OwnPrefillTP: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
         if m.D != 5120: raise ValueError(f'Q35OwnPrefillTP: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
-        attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
+        attn = {6: 'pf_gg_attn_q35', 8: 'pf_gg_attn_q35m'}.get(m.nh // m.nkv)
         if attn is None: raise ValueError(f'Q35OwnPrefillTP: {m.nh // m.nkv} query heads per kv head')
         T = self.chunk
         self.sh = [local_shapes(m, c) for c in (0, 1)]
@@ -88,7 +88,7 @@ class Q35OwnPrefillTP(PrefillDriver):
             f32, f16, i32 = layout(self.sh[c], T, export_h=self.export_h and c == 0, nfeat=nf if c == self.feature_card else 0)
             with torch.cuda.device(dev):
                 self.O.append(Ops(dev, module=MODULE_TCAP if self.tcap else MODULE))
-                self.Gl.append(Glue(dev, module='prefill_glue_q35d')); self.Gd.append(Gdn(dev, module='prefill_gdn_q35'))
+                self.Gl.append(Glue(dev, module='pf_gg_glue_q35')); self.Gd.append(Gdn(dev, module='pf_gg_gdn_q35'))
                 self.A.append(Attn(dev, name=attn))
                 b = {}
                 for n, k in f32.items(): b[n] = torch.zeros(k, dtype=torch.float32, device=dev)

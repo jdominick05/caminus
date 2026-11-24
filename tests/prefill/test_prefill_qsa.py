@@ -1,5 +1,5 @@
 """Gates of the batched prefill's QSA prompt path, per op (docs/specs/spec-prefill-cache.md M5 S7; caminus.prefill.attn's
-idx_pool / qsa_score / qsa_select / attend(sel=), kernels/prefill_attn.hip pf_idx_pool / pf_qsa_score / pf_qsa_select /
+idx_pool / qsa_score / qsa_select / attend(sel=), kernels/pf_gg_attn.hip pf_idx_pool / pf_qsa_score / pf_qsa_select /
 pf_attn_part_sel / pf_attn_comb_sel).
 
   tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_qsa.py CODER STAGE... [--kv q8|f16] [--small] [--tmax N] [--json OUT]
@@ -16,7 +16,7 @@ Stages:
          layer's QSA core on one card's shapes (12 query heads, 1 kv head, head dim 256; the indexer's 4 heads of 128),
          the Coder's real attention and indexer norm weights (layer 3), seeded random rows (some indexer queries zero: every
          score 0, the lowest pools win; repeated keys: tied scores at the threshold), positions 0 .. tmax - 1 (crossing
-         2051: nv 512 -> 513 .. tmax / 4). Reference: K3's own decode ops on the QSA module (k3_gguf_gsq_qsa, the QSA tape's
+         2051: nv 512 -> 513 .. tmax / 4). Reference: K3's own decode ops on the QSA module (dec_q4x_gsq_qsa, the QSA tape's
          ops: IDX_APPEND, QK_NR of the indexer query, QSA_SCORE, QSA_SELECT, the split pair with SEL, the KV chain), one
          token per pass. The prefill's chain over chunks (the IDXRAW rows by kv_append M = 64 as ChunkStack writes them, the
          pools by idx_pool, rows < 2051 dense, rows >= 2051 through scores in query sub-blocks, select, attend(sel=)):
@@ -205,7 +205,7 @@ class Guarded:
 
 
 class K3Qsa:
-    """the QSA tape's attention-layer core on one card's shapes as a K3 tape (k3_gguf_gsq_qsa, T = 1), one token per pass"""
+    """the QSA tape's attention-layer core on one card's shapes as a K3 tape (dec_q4x_gsq_qsa, T = 1), one token per pass"""
     def __init__(self, torch, dev, P, rows, q8=True):
         from caminus.engine import k3
         self.torch, self.k3, self.P, self.rows, self.q8 = torch, k3, P, rows, q8
@@ -219,7 +219,7 @@ class K3Qsa:
         self.score, self.sel = z(1, self.prow), z(SELW, dt=torch.int32)
         t = lambda a: torch.tensor(a, device=dev)
         self.qn, self.kn, self.iqn, self.ikn = t(P['qn']), t(P['kn']), t(P['iqn']), t(P['ikn'])
-        e = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1)
+        e = k3.Engine(module='dec_q4x_gsq', grid=k3.resident_grid('dec_q4x_gsq'), T=1)
         kd = e.qk_nr(self.kr, HD, 1, HD, self.kn, self.pos, self.ko, P['nrot'], P['theta'], EPS)
         if q8:
             kd = e.hadamard(self.ko, HD, dep=kd); vd = e.hadamard(self.vr, 64)

@@ -62,7 +62,7 @@ Applies to every change of quantized math. Pairs still on llama.cpp's math keep 
 **G-acc, per op.** For each (op, format) pair of every catalog model: at least 256 real rows per tensor and at least 64
 activation vectors recorded at that op site during a fixed decode (prompts in the gate tool), the activation exactly as
 the op receives it. Mean and p99 of |y - y_ref| / rms(y_ref) must not exceed llama.cpp's on the same inputs, measured
-with its own kernel on the GPU. Both numbers go in the pull request. The Coder's recording and llama.cpp's numbers per pair (kernels/gg_mv_ref.hip):
+with its own kernel on the GPU. Both numbers go in the pull request. The Coder's recording and llama.cpp's numbers per pair (kernels/ref_gg_mv.hip):
 tests/engine/test_k3_gguf_gsq.py, check (e).
 Qwen3.6's recording (Qwen35One under the same `K3_TEST_HOOKS=gacc-sites` hook) and the own Q2_0 tile against llama.cpp
 on it and on the Coder's Q2_0 down: benchmarks/q36_gacc.py; the tile's strict exact-dot check (every row, 1e-6 of

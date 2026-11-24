@@ -1,5 +1,5 @@
-"""GPU gate of the dense qwen35 drafter (engine/q35_mtp.py Mtp35: Swift 1.5 on kernels/k3_q35_swift_mtp.hip, ThinkingCap on
-k3_q35_tcap_mtp.hip, from the file), one card.
+"""GPU gate of the dense qwen35 drafter (engine/q35_mtp.py Mtp35: Swift 1.5 on kernels/dec_q35_swift_mtp.hip, ThinkingCap on
+dec_q35_tcap_mtp.hip, from the file), one card.
 
 The trunk (Dense35Own) runs teacher-forced over a fixed text of this tree (docs/dev/architecture.md), one token per pass,
 keeping its h per position; the block runs on the drafter module and, as the reference, in fp32 torch from the host

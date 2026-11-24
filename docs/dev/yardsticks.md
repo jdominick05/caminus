@@ -29,7 +29,7 @@ Floor = the KV bytes read once for all T rows at 952 GB/s.
 
 RX 7900 XT alone:
 
-| P | own (k3_q35_swift), T 1 | split f16 (k3_gguf_q35d), T 1 | split q8_0, T 1 | own, T 4 | split f16, T 4 | split q8_0, T 4 | floor f16 / q8_0 |
+| P | own (dec_q35_swift), T 1 | split f16 (dec_q35_arex), T 1 | split q8_0, T 1 | own, T 4 | split f16, T 4 | split q8_0, T 4 | floor f16 / q8_0 |
 |---|---|---|---|---|---|---|---|
 | 1,024 | 130.9 us | 33.6 | 34.5 | 145.8 | 66.5 | 68.8 | 4.4 / 2.3 |
 | 4,096 | 474.6 | 69.5 | 70.9 | 530.0 | 199.3 | 204.9 | 17.6 / 9.4 |
@@ -46,7 +46,7 @@ What it says:
   (`own_op_attn_dec`): 23-31x the bandwidth floor at every depth. On the XTX that is 64.3 ms of a token at 32K; Swift's
   measured decode step there is 84.4 ms against 24 ms at short context, so this one op is nearly all of the depth
   cost (same card).
-- Our own split pair (flash decoding, `kernels/k3_attn_split.h`, already in the AREX-2 / Coder / Qwen3.6 modules) runs
+- Our own split pair (flash decoding, `kernels/ops_attn_split.h`, already in the AREX-2 / Coder / Qwen3.6 modules) runs
   the same geometry on the same grid at 3.3-3.9x the floor from 4K up: 8.4x faster at 32K. Generalizing it into the Swift /
   ThinkingCap modules is a step of the dense-27B plan that had not been built; it is the next change (its own pull
   request, accuracy-gated: the split pair is not bitwise the one-head op).
@@ -77,7 +77,7 @@ What it says:
 
 `benchmarks/q35_prefill_gemm.py`, RX 7900 XT alone, testing 737df92. Each GEMM of one GDN block (blk.0) and one
 attention block (blk.3) at its real format and shape, M = 2048 tokens:
-- ours reads the GGUF blocks and dequantizes inside the WMMA GEMM (`kernels/q35_prefill.hip`), eager launches;
+- ours reads the GGUF blocks and dequantizes inside the WMMA GEMM (`kernels/pf_q35_swift.hip`), eager launches;
 - torch.matmul: dense fp16 operands (PyTorch's rocBLAS / hipBLASLt pick), eager;
 - FlyDSL (0.5.0): its RDNA3 fp16 GEMM (fp32 out) and int8 GEMM (int32 out) on their autotuned tiles, timed by replaying
   the launches from a captured HIP graph (its own tuner's method; through its Python dispatch an eager call costs
@@ -115,8 +115,8 @@ What it says:
 
 ### Where the tile's time goes (ablation builds)
 
-Measurement builds of `kernels/q35_prefill.hip` with `-DQ3P_ABL=N` (not built by build.sh since the study ended; wrong
-outputs by design) remove one part of the tiles each (kernels/q3m_prefill.hip `Q3P_ABL`): 1 the weight loads and decode (a
+Measurement builds of `kernels/pf_q35_swift.hip` with `-DQ3P_ABL=N` (not built by build.sh since the study ended; wrong
+outputs by design) remove one part of the tiles each (kernels/pf_q3m.hip `Q3P_ABL`): 1 the weight loads and decode (a
 constant B), 2 the X staging, 3 the per-block / per-sub-block scale step. `benchmarks/q35_prefill_gemm.py --module OBJECT`
 on such a build, Swift's shapes, M 2048, XT:
 
@@ -173,7 +173,7 @@ What it says:
 
 ## Prefill attention at depth (Qwen3.6-35B-A3B and Qwen3-30B-A3B geometry)
 
-`benchmarks/q35_prefill_attn.py` (`--heads 16 --kv-heads 2 --module q35m_prefill`, `--kv q8`; `--hd 128 --heads 32
+`benchmarks/q35_prefill_attn.py` (`--heads 16 --kv-heads 2 --module pf_q35m`, `--kv q8`; `--hd 128 --heads 32
 --kv-heads 4` for the 30B) and `benchmarks/rocke_attn.py --heads 16 --kv-heads 2 --prefill-only` (`--hd 128 --heads 32
 --kv-heads 4`), RX 7900 XT alone, one 2048-row chunk, the tables above's conventions. The 35B: 16 query heads over 2 kv
 heads, head dim 256, 8 query heads per kv head (all 16 WMMA columns used); the 30B: 32 over 4, head dim 128 (`q3mp_attn`;
@@ -192,7 +192,7 @@ heads, head dim 256, 8 query heads per kv head (all 16 WMMA columns used); the 3
 | 30,720 | 30.02 / 30.24 ms (35.5 / 35.2 TF, 4 launches) | 17.38 / 18.18 ms (61.3 / 58.6 TF) | 18.62 ms (57.2 TF) | 20.82 ms |
 
 What it says:
-- `q35mp_attn` (kernels/q35m_prefill.hip) is `q35p_attn_wm`'s absolute-position tiles with rocKE's pipeline: the next
+- `q35mp_attn` (kernels/pf_q35m.hip) is `q35p_attn_wm`'s absolute-position tiles with rocKE's pipeline: the next
   tile's K / V in registers during the current one, two LDS-only barriers per tile (`__syncthreads` would wait for that
   prefetch), V^T staged by 4-position runs, each wave reading only its partner's score partial, per-column lazy rescale.
   1.9-2.0x the old kernel and 0.93x rocKE at 30K (F16), the same bits at every chunk geometry and launch split; 230 / 233
@@ -202,7 +202,7 @@ What it says:
   F16 4,096 positions 787 -> 746 ms (5,203 -> 5,488 tok/s, 1.05x), 16,384 3.73 -> 3.30 s (1.13x), 32,768 9.03 -> 7.46 s
   (3,630 -> 4,393 tok/s, 1.21x); Q8 4,096 811 -> 768 ms (1.06x), 16,384 3.85 -> 3.37 s (1.14x), 32,768 9.32 -> 7.58 s
   (3,516 -> 4,322 tok/s, 1.23x). At 32K attention was ~37 % of the prefill, now ~23 %.
-- `q3mp_attn` (kernels/q3m_prefill.hip) is `q35mp_attn`'s source (`kernels/prefill_attn_g8.h`) at head dim 128: each
+- `q3mp_attn` (kernels/pf_q3m.hip) is `q35mp_attn`'s source (`kernels/pf_attn_g8.h`) at head dim 128: each
   wave holds its own query pair (no partner exchange), 16 positions a workgroup, 64-position tiles (the same 4 + 4
   staging chunks a thread as the 35B's 32 x 256); 227 / 239 VGPRs (F16 / Q8), 0 spills, 35,840 B of LDS (three
   workgroups per WGP by both). The old kernel run in one launch is 23.1 ms at 30K: the rest of the gain is the launch
@@ -228,7 +228,7 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
   and Q8), against the split pair within 2e-5 (F16) or the Q8 fp16-rounding bound the test prints per case; rows past
   the last cell NaN-poisoned; an exactly sized cache (its own allocation) read to its last byte.
 - Speed: `benchmarks/attn_bench.py --new [--kv q8] [--cold]`, the kernel and the split pair (`OP_ATTN_PART` +
-  `OP_ATTN_COMB` on `k3_q35_moe` / `k3_q35_moe_kvq8` at the engine's grid) interleaved, a queued batch of 8 launches per
+  `OP_ATTN_COMB` on `dec_q35m` / `dec_q35m_kvq8` at the engine's grid) interleaved, a queued batch of 8 launches per
   round. rocKE's split-KV decode measured on the XT at this geometry: 21.6 us (4K), 61.9 us (32K), 385 us (128K).
 
   XT, us per layer, batch 8, median of 15 rounds, the kernel and the pair interleaved; warm = the same rows each launch
@@ -310,7 +310,7 @@ What it says:
 - The bar is FlyDSL at the aggregate M: 1.76x ours on the 30B and 1.74x on the 35B. The experts are where ours trails
   most: 1.9-2.2x on the 30B's down GEMMs, 2.2-2.3x on the 35B's Q2_0.
 
-The 30B's wide tiles (`kernels/q3m_prefill_mm.hip`). Every step was measured interleaved against the one before, every
+The 30B's wide tiles (`kernels/pf_q3m_mm.hip`). Every step was measured interleaved against the one before, every
 output bitwise:
 
 | Step | GEMMs per chunk |
@@ -319,7 +319,7 @@ output bitwise:
 | the dense line's wide tile (two 16-row tiles per wave, 256 rows a workgroup) on every Q4_K / Q6_K GEMM, dense and grouped; the experts' gate and up in one launch with the swiglu epilogue (`q3p_mm_q4k_gu`) | 265.4 ms |
 | a partial item's empty 16-token tiles skip their WMMAs | 256.5 ms |
 | Q4_K weights one chunk ahead in a two-chunk register ring (48 registers where the whole block took 72) | 253.6 ms |
-| the three kernels in their own object under LLVM's max-ilp scheduler (`q3m_prefill` keeps its code: its `q3p_mm_q4k` and attention spill under it) | **243.4 ms** |
+| the three kernels in their own object under LLVM's max-ilp scheduler (`pf_q3m` keeps its code: its `q3p_mm_q4k` and attention spill under it) | **243.4 ms** |
 
 Registers (VGPRs, no spills; LDS): `q3p_mm_q4k_w` and `q3p_mm_q4k_gu` 239, 36,100 B; `q3p_mm_q6k_w` 253, 33,792 B (the
 narrow `q3p_mm_q4k` 191, `q3p_mm_q6k` 154).
@@ -327,7 +327,7 @@ narrow `q3p_mm_q4k` 191, `q3p_mm_q6k` 154).
 Tried and dropped:
 - weight prefetch of the next block's half (13-15 spills);
 - an A-operand ping-pong across token tiles and k-steps (48 spills by default, 51 under max-ilp);
-- max-ilp on the whole `q3m_prefill` object (`q3p_mm_q4k` 57 spills, `q3mp_attn` 198);
+- max-ilp on the whole `pf_q3m` object (`q3p_mm_q4k` 57 spills, `q3mp_attn` 198);
 - the max-memory-clause scheduler (no change);
 - the 30B's body on the dense line's objects (Swift's GEMMs 0.8 % slower: the dense line keeps its own tiles).
 
@@ -368,7 +368,7 @@ a chunk); attn_output's 64 ran faster (10.58 vs 11.51). With the rule, a 512-tok
 
 At 12K F16 (`--ops`), attention is 35.1 % of the prefill and the fused gate | up 22.0 %.
 
-The 35B's wide tiles (`kernels/q35m_prefill_mm.hip`, the 30B's skeleton from `kernels/prefill_mm_w.h` with the Q2_0
+The 35B's wide tiles (`kernels/pf_q35m_mm.hip`, the 30B's skeleton from `kernels/pf_mm_wide.h` with the Q2_0
 statements of `q35mp_mm_q2_0` per row). Each step was measured interleaved against the one before, every output bitwise;
 the times are the routed experts' GEMMs (gate | up and down) of one 2048-token chunk on the XT:
 
@@ -388,7 +388,7 @@ the times are the routed experts' GEMMs (gate | up and down) of one 2048-token c
   At 2048 tokens that moves the shared expert's gate / up and the k / v projections (512 x 2048): 12.97 -> 11.84 ms (Q8_0-only runs; 13.22 -> 12.11 in the full run below).
   At 512 tokens it moves ssm_out (9.91 -> 8.92) and the shared expert's down (1.47 -> 1.39) and leaves the 512 x 2048
   GEMMs narrow (16 workgroups: 4.23 narrow, 6.35 wide). The dense Q8_0 tile under max-ilp spills 18 VGPRs, so it stays
-  in `q35m_prefill`.
+  in `pf_q35m`.
 
 The 35B after, ms per chunk (one run on the final build: before = `Ops(wide=False)`, the narrow tiles and the dense line's
 rule, interleaved with the wide tiles, every output bitwise):

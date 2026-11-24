@@ -1,4 +1,4 @@
-"""QSA indexer host helpers and numpy references (docs/specs/spec-qsa.md; device ops: kernels/k3_qsa_ops.h, builders:
+"""QSA indexer host helpers and numpy references (docs/specs/spec-qsa.md; device ops: kernels/ops_qsa.h, builders:
 caminus.engine.k3.Engine.idx_append / qsa_score / qsa_select).
 
 - q8_0 rows exactly as llama.cpp's quantize_f32_q8_0_block (cpy-utils.cuh) and getrows' dequantize_q8_0, in numpy float32

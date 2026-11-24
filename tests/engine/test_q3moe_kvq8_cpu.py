@@ -1,18 +1,18 @@
 """The qwen3moe one-card engine's Q8 KV option without a card (caminus.engine.q3moe_one.Q3MoEOne(q8=True), its batched
 prefill caminus.prefill.q3m.Q3MPrefill and the registry entry), on stand-ins for the torch.cuda and HIP calls (every tensor
 in host memory; nothing is launched), with the tiny synthetic file (tests/engine/tiny_q3m.py).
-  - the module tables: k3_q3m_lean_kvq8 is k3_q3m_lean's Q8 build (same ops, pairs and lean dispatch check), its two-card
-    form k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py), no verify form, outside the dense line's Q8 table; in the installed runtime set with q3m_prefill_kvq8 (served: caminus serve --kv q8); its Engine has the error word after Sync
+  - the module tables: dec_q3m_kvq8 is dec_q3m's Q8 build (same ops, pairs and lean dispatch check), its two-card
+    form dec_q3m_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py), no verify form, outside the dense line's Q8 table; in the installed runtime set with pf_q3m_kvq8 (served: caminus serve --kv q8); its Engine has the error word after Sync
   - the wire layout the kernels index ([K blocks | V blocks], block (part, kv head g, block b) at (part M / 32 + 4 g + b)
     x 34 bytes): caminus.ref_kv.encode_q8_kv puts each block there, and a Q8 row is encode_q8_kv(hadamard128(K), V) of the
     F16 row's values (K decoded and rotated back within the blocks' rounding)
-  - the rotation (kernels/own_kv_rot128.h, its reference caminus.ref_kv.hadamard128): the float64 Sylvester Hadamard128
+  - the rotation (kernels/kv_rot128.h, its reference caminus.ref_kv.hadamard128): the float64 Sylvester Hadamard128
     over sqrt(128) is orthonormal, and on float64 vectors (H q) . (H k) = q . k to rounding; hadamard128 is within fp32
     rounding of it, its scale is the kernel header's literal; a lane-by-lane emulation of the kernel's statements (each
     wave's lanes holding dims l, l + 32, l + 64, l + 96, the shuffle stages h = 1 .. 16, then h = 32 and 64 in registers,
     the quarter select and the scale) gives hadamard128's bits; the scores of rotated decoded rows against rotated q
     match the unrotated float64 scores within the codec's error
-  - the engine: k3_q3m_lean_kvq8, the cache a uint8 tensor of (max_ctx + ATS_PAD) Q8 rows, the prompt cache's state views
+  - the engine: dec_q3m_kvq8, the cache a uint8 tensor of (max_ctx + ATS_PAD) Q8 rows, the prompt cache's state views
     max_ctx rows of bytes, every OP_OWN_ATTS segment on its layer's cache; the projection counts Q8 rows (equal to the
     engine's own check, and the F16 projection less exactly the row bytes saved); kv_format_id names the format
   - refusals: q8 not a bool; a Q8 cache on any other object or tape form; the Q8 object without q8; a float16 cache on the
@@ -108,17 +108,17 @@ class Rec:
 hip.Module = lambda name: Rec(name)
 
 # ---- the module tables -------------------------------------------------------------------------------------------------------
-Q8M = 'k3_q3m_lean_kvq8'
-check(k3.Q3M_KV_Q8_BASE[Q8M] == 'k3_q3m_lean' and k3.Q3M_KV_Q8_OF['k3_q3m_lean'] == Q8M and Q8M in k3.Q3M_LEAN_MODULES
-      and Q8M in k3.Q3M_MODULES and k3.MODULE_CAPS[Q8M] == k3.MODULE_CAPS['k3_q3m_lean'],
-      'k3_q3m_lean_kvq8: k3_q3m_lean\'s Q8 build, in the lean modules (the same ops whitelist and (op, format) pairs)')
-check(k3.Q3M_TP_OF.get(Q8M) == 'k3_q3m_lean_tp_kvq8' and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
-      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' in kernels.RUNTIME_SET,
-      'its two-card form is k3_q3m_lean_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py); no verify form, not in the dense Q8 '
-      'table; it and q3m_prefill_kvq8 in the installed runtime set (served: caminus serve --kv q8)')
+Q8M = 'dec_q3m_kvq8'
+check(k3.Q3M_KV_Q8_BASE[Q8M] == 'dec_q3m' and k3.Q3M_KV_Q8_OF['dec_q3m'] == Q8M and Q8M in k3.Q3M_LEAN_MODULES
+      and Q8M in k3.Q3M_MODULES and k3.MODULE_CAPS[Q8M] == k3.MODULE_CAPS['dec_q3m'],
+      'dec_q3m_kvq8: dec_q3m\'s Q8 build, in the lean modules (the same ops whitelist and (op, format) pairs)')
+check(k3.Q3M_TP_OF.get(Q8M) == 'dec_q3m_tp_kvq8' and Q8M not in k3.Q3M_TP_OF.values() and Q8M not in k3.Q3M_VER_MODULES
+      and Q8M not in k3.Q35_KV_Q8_BASE and Q8M in kernels.RUNTIME_SET and 'pf_q3m_kvq8' in kernels.RUNTIME_SET,
+      'its two-card form is dec_q3m_tp_kvq8 (tests/engine/test_q3moe_tp_kvq8_cpu.py); no verify form, not in the dense Q8 '
+      'table; it and pf_q3m_kvq8 in the installed runtime set (served: caminus serve --kv q8)')
 E = k3.Engine(module=Q8M, grid=8, T=1)
 check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
-      and k3.Engine(module='k3_q3m_lean', grid=8).kv_error is None,
+      and k3.Engine(module='dec_q3m', grid=8).kv_error is None,
       'its Engine: one int32 error word after Sync (the F16 module\'s Engine has none)')
 check(raises(lambda: k3.Engine(module=Q8M, grid=8, T=2)), 'its Engine refuses T = 2 (decode only)')
 
@@ -134,7 +134,7 @@ good = True
 for part, x in ((0, kf[0]), (1, vf[0])):
     for g in range(nkv):
         for b in range(hd // 32):
-            o = (part * (nkv * hd // 32) + g * 4 + b) * 34   # (kernels/k3_own_atts.h, q3m_prefill.hip: the block's offset)
+            o = (part * (nkv * hd // 32) + g * 4 + b) * 34   # (kernels/ops_own_atts.h, pf_q3m.hip: the block's offset)
             one = ref_kv.encode_q8_kv(x[g, 32 * b:32 * b + 32].reshape(1, 1, 32), np.zeros((1, 1, 32), np.float32), ref_kv.Q8KVLayout(1, 32))[0][:34]
             good &= bytes(row[o:o + 34]) == bytes(one)
             good &= o % 4 == 2 * (b & 1)                     # (the dword parity the kernels' loads assume)
@@ -150,7 +150,7 @@ check(bool((err <= amax / 127 * (0.5 + 127 * 2 ** -11) + 1e-12).all()) and float
       f'a Q8 row is encode_q8_kv(hadamard128(K), V) of the F16 row\'s values: decoded within half a step (+ the half scale\'s rounding) of '
       f'each block (max {float((err / (amax / 127)).max()):.3f} steps); K rotated back within {float(np.abs(back - kf).max()):.4f}; V blocks unrotated')
 
-# ---- the rotation: kernels/own_kv_rot128.h against caminus.ref_kv.hadamard128 and the float64 transform ----------------------
+# ---- the rotation: kernels/kv_rot128.h against caminus.ref_kv.hadamard128 and the float64 transform ----------------------
 H = np.array([[1.0]])
 for _ in range(7): H = np.block([[H, H], [H, -H]])
 H /= np.sqrt(128)
@@ -160,7 +160,7 @@ s0, s1 = (qa * ka).sum(1), ((qa @ H.T) * (ka @ H.T)).sum(1)
 check(float(np.abs(H @ H.T - np.eye(128)).max()) < 1e-14 and np.allclose(H, H.T) and float(np.abs(s1 - s0).max()) < 1e-12 * float(np.abs(s0).max() + 1),
       f'H128 / sqrt(128) (float64 Sylvester) is orthonormal (|H H^T - I| {float(np.abs(H @ H.T - np.eye(128)).max()):.1e}) and symmetric; on float64 '
       f'vectors (H q) . (H k) = q . k (max diff {float(np.abs(s1 - s0).max()):.1e} for scores up to {float(np.abs(s0).max()):.0f})')
-hdr = open(os.path.join(HERE, '..', '..', 'kernels', 'own_kv_rot128.h')).read()
+hdr = open(os.path.join(HERE, '..', '..', 'kernels', 'kv_rot128.h')).read()
 lit = [ln.split()[2] for ln in hdr.splitlines() if ln.startswith('#define OWN_KV_ROT128_SCALE')]
 xs = np.concatenate([rq.standard_normal((40, 128)), rq.standard_normal((8, 128)) * 1e3, np.eye(128)[:8] * 65504,
                      rq.standard_normal((8, 128)) * np.where(np.arange(128) % 17 == 0, 60.0, 0.1)]).astype(np.float32)
@@ -174,7 +174,7 @@ check(len(lit) == 1 and np.float32(float.fromhex(lit[0].rstrip('f'))) == ref_kv.
 
 
 def emu_kernel(x):
-    """kernels/own_kv_rot128.h lane by lane in float32: wave qw (0 .. 3) of a head, lane l holds u_m = x[l + 32 m]; the
+    """kernels/kv_rot128.h lane by lane in float32: wave qw (0 .. 3) of a head, lane l holds u_m = x[l + 32 m]; the
     shuffle stages (partner = lane ^ h: own + partner, or partner - own when lane has bit h), then h = 32 and 64 in
     registers, the select of quarter qw, the scale; dim 32 qw + l gets that wave's lane l result"""
     f = np.float32
@@ -214,9 +214,9 @@ MC = 64
 m = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
 f = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False)
 M = m.nkv * m.hd; rb = k3.kv_pos_bytes(M, True)
-check(m.module == Q8M and m.E.module == Q8M and f.module == 'k3_q3m_lean' and m.kv_format_id == q3moe_one.KV_FORMAT_Q8
+check(m.module == Q8M and m.E.module == Q8M and f.module == 'dec_q3m' and m.kv_format_id == q3moe_one.KV_FORMAT_Q8
       and not hasattr(f, 'kv_format_id'),
-      f'Q3MoEOne(q8=True) decodes on {Q8M} with kv_format_id {m.kv_format_id!r}; the F16 engine keeps k3_q3m_lean and has none')
+      f'Q3MoEOne(q8=True) decodes on {Q8M} with kv_format_id {m.kv_format_id!r}; the F16 engine keeps dec_q3m and has none')
 ats = [sg for sg in m.E.segs if sg.op == k3.OP_OWN_ATTS]
 check(all(d['cache'].dtype == torch.uint8 and d['cache'].numel() == (MC + k3.Engine.ATS_PAD) * rb for d in m.L)
       and all(m.state[(0, il, 'kv')].numel() == MC * rb and m.state[(0, il, 'kv')].dtype == torch.uint8 for il in range(m.nl))
@@ -233,7 +233,7 @@ check(abs(m.vram_mib - Q3MoEOne.projection_mib(P, MC, splits=m.splits, q8=True))
 
 # ---- refusals ---------------------------------------------------------------------------------------------------------------------
 check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=1)), 'q8=1 (not a bool) is refused')
-check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, module='k3_q3m_lean')),
+check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, module='dec_q3m')),
       'a Q8 cache on the F16 module is refused')
 check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, attn_split=False)),
       'a Q8 cache on another tape form is refused (the lean form only)')
@@ -243,7 +243,7 @@ B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt)
 args = lambda cache: (B(m.nh * 128 + 2 * M), B(k3.Engine.atts_scratch_floats(m.nkv, 8)), B(258), cache, B(1, torch.int32),
                       B(m.nh * 128, torch.float16), m.nh, m.nkv, 128, 0.1)
 check(raises(lambda: E2.own_atts(*args(B((MC + 64) * 2 * M, torch.float16)), splits=8))
-      and raises(lambda: k3.Engine(module='k3_q3m_lean', grid=8).own_atts(*args(B((MC + 64) * rb, torch.uint8)), splits=8))
+      and raises(lambda: k3.Engine(module='dec_q3m', grid=8).own_atts(*args(B((MC + 64) * rb, torch.uint8)), splits=8))
       and not raises(lambda: E2.own_atts(*args(B((MC + 64) * rb, torch.uint8)), splits=8)),
       'own_atts: a float16 cache on the Q8 module and a uint8 cache on the F16 module are refused; a Q8 cache on the Q8 module builds')
 check(raises(lambda: Q3MoEVerify(m, 2, vram_check=False)), 'the verify engine refuses a Q8 engine (its module reads F16 rows)')
@@ -251,7 +251,7 @@ check(raises(lambda: q3m.Q3MPrefill(m, chunk=64, check=False, module=q3m_ops.IQ_
 
 # ---- a refused encoding --------------------------------------------------------------------------------------------------------
 check(E.status_words().numel() == k3.STATUS_WORDS + 1 and E.status_words()[k3.STATUS_WORDS:].data_ptr() == E.kv_error.data_ptr()
-      and k3.Engine(module='k3_q3m_lean', grid=8).status_words().numel() == k3.STATUS_WORDS,
+      and k3.Engine(module='dec_q3m', grid=8).status_words().numel() == k3.STATUS_WORDS,
       'Engine.status_words: the 8 status words, + the error word right after them on the Q8 module (one copy brings both)')
 mm = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
 check(mm.h_st.numel() == k3.STATUS_WORDS + 1 and f.h_st.numel() == k3.STATUS_WORDS,
@@ -281,15 +281,15 @@ check(raises(lambda: ms.step(3), errors.InvalidKVEncoding) and ms.broken and ms.
 # ---- the prefill on a Q8 engine -------------------------------------------------------------------------------------------------
 mp = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
 pf = q3m.Q3MPrefill(mp, chunk=64, check=False)
-check(pf.q8 and pf.ops.q8 and pf.ops.module == 'q3m_prefill' and pf.ops.kvmod.name == 'q3m_prefill_kvq8'
+check(pf.q8 and pf.ops.q8 and pf.ops.module == 'pf_q3m' and pf.ops.kvmod.name == 'pf_q3m_kvq8'
       and pf.numerics().get('kv') == 'q8_0' and 'kv' not in q3m.Q3MPrefill(f, chunk=64, check=False).numerics(),
-      'Q3MPrefill on a Q8 engine: q3m_prefill for the GEMMs and glue, q3m_prefill_kvq8 for the rows and attention; numerics name the cache')
+      'Q3MPrefill on a Q8 engine: pf_q3m for the GEMMs and glue, pf_q3m_kvq8 for the rows and attention; numerics name the cache')
 LOG.clear()
 toks = list(range(1, 41))
 pf._chunk(toks, 0, 40)
 rope = [e for e in LOG if e[1].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[1].startswith('q3mp_attn')]
-check(rope and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3p_qk_rope_q8' and e[3][-1] is pf.kverr for e in rope)
-      and att and all(e[0] == 'q3m_prefill_kvq8' and e[1] == 'q3mp_attn_q8' for e in att)
+check(rope and all(e[0] == 'pf_q3m_kvq8' and e[1] == 'q3p_qk_rope_q8' and e[3][-1] is pf.kverr for e in rope)
+      and att and all(e[0] == 'pf_q3m_kvq8' and e[1] == 'q3mp_attn_q8' for e in att)
       and len(rope) == mp.nl and not any(e[1] in ('q3p_qk_rope', 'q3mp_attn') for e in LOG),
       f'a chunk: {len(rope)} q3p_qk_rope_q8 (with the KV error word) and {len(att)} q3mp_attn_q8 launches; no F16 row kernel')
 check(raises(lambda: pf.ops.qk_rope(pf.qkv, 512, mp.nh, mp.nkv, mp.L[0]['qk_par'], 0, pf.q16, mp.L[0]['cache'], 4))
@@ -306,7 +306,7 @@ Lq, Lf = prompt.Layout(m), prompt.Layout(f)
 check(Lq.pb == [rb] and Lf.pb == [4 * M] and Lq.kv_rows == MC, f'checkpoint layout: a Q8 row of {rb} B per layer (F16 {4 * M} B)')
 pfk = NS(numerics=lambda: dict(q='x'), crossover=8)
 kq, kf_ = prompt.engine_key(m, pfk, build='fixture'), prompt.engine_key(f, pfk, build='fixture')
-check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and 'kv' not in kf_['tp'] and kq['module'] == Q8M and kf_['module'] == 'k3_q3m_lean'
+check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and 'kv' not in kf_['tp'] and kq['module'] == Q8M and kf_['module'] == 'dec_q3m'
       and prompt.key_hash(kq) != prompt.key_hash(kf_),
       'engine key: the Q8 engine\'s carries its KV format and module (an F16 key has no kv entry: unchanged), so neither restores into the other')
 OLD_ID = 'q8_0-v1:unrotated:f16-rounded-v1'   # (the earlier draft's rows: K unrotated)

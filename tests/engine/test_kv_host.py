@@ -1,5 +1,5 @@
 """The KV cache in host memory (caminus.device.hip.host_mapped: pinned, mapped into every card; the opt-in long-context mode,
-FlashNextTP(kv_host=True)) on ONE card (run it on the XT first: HIP_VISIBLE_DEVICES=1), module k3_gguf_gsq, the TP card's
+FlashNextTP(kv_host=True)) on ONE card (run it on the XT first: HIP_VISIBLE_DEVICES=1), module dec_q4x_gsq, the TP card's
 geometry (12 query heads over 1 kv head of 256, q8_0):
   alloc     host_mapped returns exactly the bytes asked, zeroed, inside the registry; bufcheck accepts it and refuses a
             plain CPU tensor
@@ -16,7 +16,7 @@ from caminus.device import hip, bufcheck, capacity
 
 a = sys.argv[1:]
 END = int(a[a.index('--end') + 1]) if '--end' in a else 2200
-MOD, D, H, NKV = 'k3_gguf_gsq', 256, 12, 1
+MOD, D, H, NKV = 'dec_q4x_gsq', 256, 12, 1
 fails = []
 def ok(name, cond, info=''):
     print(f'{"ok  " if cond else "FAIL"} {name} {info}', flush=True)

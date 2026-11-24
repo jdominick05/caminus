@@ -1,4 +1,4 @@
-"""The S1 adaptive head's log q(id) (s1.py AdaptiveHead.logq) with fused row kernels (kernels/headloss.hip).
+"""The S1 adaptive head's log q(id) (s1.py AdaptiveHead.logq) with fused row kernels (kernels/train_headloss.hip).
 
 Same math as the reference: hot logits L = bf16(h @ w^T) over the H hot rows + the escape row; a hot id's log q is
 L[id] - lse(L); a tail id's is (L[escape] - lse(L)) + Z[t] - lse(Z) with Z = bf16(p(h) @ e^T) over the tail rows,
@@ -18,7 +18,7 @@ ALL_ROWS = [False]   # AdaptiveCE: run the tail pass on every row (no nonzero() 
 
 def _m():
     dev = torch.cuda.current_device()
-    if dev not in _mod: _mod[dev] = Module('headloss')
+    if dev not in _mod: _mod[dev] = Module('train_headloss')
     return _mod[dev]
 
 

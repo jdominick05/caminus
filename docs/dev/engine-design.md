@@ -39,7 +39,7 @@ before prefetch-before-wait, chunked claims and more rows per task. **Kill rule:
 row vs int8 per row; Sec. 3.9) is a real constraint: raised with the user 2026-10-31, needed before M4.
 
 ### M1 engine skeleton, measured (2026-10-31, XTX at gpu-high, commits 17f2518 -> 5d5ad7d)
-`kernels/k3.hip` runs a tape of segments in one persistent launch, with claim/done counters, prefetch-before-wait, a
+`kernels/dec_core.hip` runs a tape of segments in one persistent launch, with claim/done counters, prefetch-before-wait, a
 sticky status word and reset by the last workgroup. `tests/engine/test_k3_engine.py`:
 - The matvec op is **bitwise** equal to gemm_tn_iu4g on all 7 S1 shapes × 5 task sizes, including partial last tasks.
 - A 400-segment chain and dependent matvecs pass at **1x, 3x and 5x oversubscribed** grids; the status word is never set.
@@ -181,27 +181,27 @@ Test levels:
 
 | Op | Reference | Class | Test |
 |---|---|---|---|
-| Embedding gather (fp32 row) | `embedding_f32` (core.hip:23-28) | bitwise | L1 memcmp |
-| Block-entry RMSNorm (eps 1e-6) | `block_entry_fwd` order (actq.hip:239-273). `ss = fmaf(x,x,ss)` strided by 256, wave xor 16..1, 8 wave sums in order, `rsqrtf(ss/896+eps)`, `(x*rstd)*w` | bitwise vs E; <= 1 fp32 ulp vs torch (stack F) | L1 vs the FUSEENTRY row kernel |
-| Activation quant (FWHT-128, row amax, int4 codes) | `actq_fwd_src` (actq.hip:97-132). bf16 input; butterflies at distance 1, 2, 4..64 in order; `u = bf16(fwht*0.08837890625)`; `s = max(amax/7, 1e-8)` by IEEE division; `rintf(u/s)` clamped to [-8, 7] | bitwise | L1 codes and scales memcmp on random and golden rows (896, 2048, 768) |
-| GDN a/b projections (bf16 [7,896]) | block_entry's a/b order (actq.hip:256-273) | bitwise vs E; <= 1 bf16 ulp vs rocBLAS (F) | L1 |
-| **int4 g128 matvec** | `gemm_tn_iu4g` (gemm.hip:244-350). Exact int32 `P_g` per 128-group; `acc = fmaf((float)P_g, gs[n*G+g], acc)` for g = 0..G-1 in order; `*s_x`; bf16 RNE | **bitwise for every element at any N, M, tile or concatenation** | L1: pad M to 64 with copies of the row and run the GEMM. Every S1 shape: N 7680/5248/896/1536, K 896/2048/768 |
-| MLP silu*mul | `silu_mul_bf16` / `silu_mul_actq_fwd` (core.hip:48-55, actq.hip:307): `bf16(bf16(g/(1+exp(-g)))*u)` | bitwise | L1 |
-| Residual | `residual_slices_fwd` (fuse.hip:19-32): `((x+m)+mlp)+(routed ? ys : 0)` in fp32 | bitwise | L1 |
-| RoPE at position p | `rope_pair` (attn.hip:99-122); every product and sum rounded to bf16 | bitwise | L1 |
+| Embedding gather (fp32 row) | `embedding_f32` (train_core.hip:23-28) | bitwise | L1 memcmp |
+| Block-entry RMSNorm (eps 1e-6) | `block_entry_fwd` order (train_actq.hip:239-273). `ss = fmaf(x,x,ss)` strided by 256, wave xor 16..1, 8 wave sums in order, `rsqrtf(ss/896+eps)`, `(x*rstd)*w` | bitwise vs E; <= 1 fp32 ulp vs torch (stack F) | L1 vs the FUSEENTRY row kernel |
+| Activation quant (FWHT-128, row amax, int4 codes) | `actq_fwd_src` (train_actq.hip:97-132). bf16 input; butterflies at distance 1, 2, 4..64 in order; `u = bf16(fwht*0.08837890625)`; `s = max(amax/7, 1e-8)` by IEEE division; `rintf(u/s)` clamped to [-8, 7] | bitwise | L1 codes and scales memcmp on random and golden rows (896, 2048, 768) |
+| GDN a/b projections (bf16 [7,896]) | block_entry's a/b order (train_actq.hip:256-273) | bitwise vs E; <= 1 bf16 ulp vs rocBLAS (F) | L1 |
+| **int4 g128 matvec** | `gemm_tn_iu4g` (pf_gemm.hip:244-350). Exact int32 `P_g` per 128-group; `acc = fmaf((float)P_g, gs[n*G+g], acc)` for g = 0..G-1 in order; `*s_x`; bf16 RNE | **bitwise for every element at any N, M, tile or concatenation** | L1: pad M to 64 with copies of the row and run the GEMM. Every S1 shape: N 7680/5248/896/1536, K 896/2048/768 |
+| MLP silu*mul | `silu_mul_bf16` / `silu_mul_actq_fwd` (train_core.hip:48-55, train_actq.hip:307): `bf16(bf16(g/(1+exp(-g)))*u)` | bitwise | L1 |
+| Residual | `residual_slices_fwd` (train_fuse.hip:19-32): `((x+m)+mlp)+(routed ? ys : 0)` in fp32 | bitwise | L1 |
+| RoPE at position p | `rope_pair` (train_attn.hip:99-122); every product and sum rounded to bf16 | bitwise | L1 |
 | Short conv + silu (W = 4, the 2688 q\|k\|v channels) | captured `causal_conv1d_fwd_kernel` code object, prefill path. The taps are probably FMA-contracted (74 v_fmac + 64 v_fma); this is **not** fla's `causal_conv1d_update`, which sums with tl.sum | target bitwise; fall back to <= 1 bf16 ulp, documented | L1 against the code object on [3 history + current] |
 | L2 norm of q/k (eps 1e-6), beta = sigmoid(b), g = -exp(A_log)*softplus(a+dt_bias) | captured chunk-path Triton kernels. **q-hat and k-hat rounded to bf16, as training does** (math recommendation) | target bitwise; <= 1 ulp if the tl.sum or libm lowering differs | L1 against the code objects; record any ulp diff |
 | **GDN recurrent step** | fla `fused_recurrent` order: `S *= exp(g)`; `v' = beta*(v - S k-hat)`; `S += v' k-hat^T`; `o = S (q-hat*128^-0.5)`; o stored bf16; fp32 state [v][k] | bitwise vs M0 (same device function). Within <= 4 fp32 ulp (est) of fla fused_recurrent **fed the same bf16 q-hat/k-hat with `use_qk_l2norm_in_kernel=False`** (fused_recurrent.py:197), so only the tl.sum order differs. **Statistical** vs the chunk path | L1 vs that oracle (state and o, 1 and 2048 steps). Report separately the drift against fused_recurrent with its own fp32 in-kernel L2 norm. L3 teacher-forced vs `gdn_fwd_h` with h0/ht |
 | Gated output norm (eps 1e-5, swish gate) | captured `layer_norm_gated`: `y = (o*rstd)*w; y = (y*g)*sigmoid(g)`, bf16 | target bitwise; <= 1 ulp | L1 |
-| Attention decode (14 q / 2 kv heads x 64, window 2048, scale 0.125) | an engine-defined split: 16 chunks of 128 keys per kv group give partials (m, l, o[64]) in fp32, merged in chunk order by the last finisher; o bf16 | bitwise vs M0 (same split). vs training (AOTriton rounds P to bf16): 1.1-1.3e-3 relative (measured for attn.hip) | L1 vs `attn_causal_bf16` within tolerance; L2 bitwise |
+| Attention decode (14 q / 2 kv heads x 64, window 2048, scale 0.125) | an engine-defined split: 16 chunks of 128 keys per kv group give partials (m, l, o[64]) in fp32, merged in chunk order by the last finisher; o bf16 | bitwise vs M0 (same split). vs training (AOTriton rounds P to bf16): 1.1-1.3e-3 relative (measured for train_attn.hip) | L1 vs `attn_causal_bf16` within tolerance; L2 bitwise |
 | Slices (gu, silu*mul, down) | training used bf16 proxy GEMMs whose order depends on the batch's row count (s1_patches.py:490-520). Decode uses **iu4g** | bitwise vs M0; statistical vs training | L3. Open: switch training to iu4g by padding slice rows to 64 |
-| Final RMSNorm | `rmsnorm_f32` order (core.hip:30-46) | bitwise vs that kernel; <= 1 ulp vs torch | L1 |
+| Final RMSNorm | `rmsnorm_f32` order (train_core.hip:30-46) | bitwise vs that kernel; <= 1 ulp vs torch | L1 |
 | Hot head (int4 per row) | engine-defined: `L = bf16(rs_n * sum(code * bf16(h)))` with a fixed reduction order (W4A16 by `v_dot2_f32_bf16`; int4 to bf16 is exact) | bitwise vs M0. **Deviation from the trained bf16 head** | L3: delta soft CE <= 0.02 vs the bf16 head (M0 also runs a bf16 head); copy gate >= 99% |
 | Argmax / top-1 | 64-bit key `orderable(L) << 32 \| ~idx`; ties go to the lower index (torch.max's documented rule; not verified on ROCm) | bitwise | L1 with forced ties |
 | Escape and tail | `tail_lq = (L_esc + tv) - lse(z)`; tail wins only if `tail_lq > hv` (strict). Skip the tail when `L_esc < hv`. That is exact: `lse >= max`, and a bf16 gap far exceeds one fp32 rounding (math derivation) | bitwise vs M0; exact skip rule | L1 with forced escapes; count the fire rate |
 
 Rules that keep this true:
-1. **No implicit FMA contraction anywhere.** `k3.hip` and the shared headers build with `-ffp-contract=off`. Where a
+1. **No implicit FMA contraction anywhere.** `dec_core.hip` and the shared headers build with `-ffp-contract=off`. Where a
    reference fuses (block_entry's `ss += x*x` under HIP's default contraction, the conv taps), the shared header writes
    `__builtin_fmaf` explicitly. M0 rebuilds the *training* kernels from the same headers, and they must give the same
    bits as today's code objects. This removes the class of failure behind ignite's untaken-branch KLD change and its
@@ -339,9 +339,9 @@ head      adaptive(hot=24576+esc int4_row, tail=223744x112 bf16 cold, p=112 iu4g
 **Dispatch.**
 - A uniform scalar `switch(op)` at each task boundary.
 - Op bodies are templates over compile-time parameters: groups held in registers, rows per wave-pass, T, and flags.
-  The planner writes `build/k3_variants.h`, the instantiation list for the model, and `build.sh` compiles `k3.hip`
+  The planner writes `build/k3_variants.h`, the instantiation list for the model, and `build.sh` compiles `dec_core.hip`
   against it.
-- A new model rebuilds `k3.hsaco` in seconds. Hand-written device code is needed only for a new op.
+- A new model rebuilds `dec_core.hsaco` in seconds. Hand-written device code is needed only for a new op.
 - This is the prior investigation's "data-driven loop over layer descriptors", widened to a fixed op table (C16).
 
 **S1 tape for one GDN block** (claim order; 64-row tasks = 8 waves x 8 rows):
@@ -514,7 +514,7 @@ different things.
   tasks with no dependencies. Under lag-1 it stalls the boundary token.
 - **Open:** the MALL replacement policy is not LRU (gradual falloff over 96-160 MB). Whether staging next to NT streams
   keeps the trunk resident is unmeasured (sparse Sec. 4 Q4), and M7 measures it.
-- **Measured (qwen35moe decode, RX 7900 XT, 80 MB):** `OP_PREFETCH` (`kernels/k3_q35_ops.h`) is a `STAGE` op. From
+- **Measured (qwen35moe decode, RX 7900 XT, 80 MB):** `OP_PREFETCH` (`kernels/ops_q35.h`) is a `STAGE` op. From
   each block's first norm, 16 workgroups with 16 loading threads each touch that block's router and shared expert,
   then the next block's trunk matrices. The Q8_0 row tile loads nontemporally, so the 515 MB head leaves the staged
   lines in place. Result: 5.88 -> 5.04 ms per token at short context (32K 7.73 -> 7.34, Q8 KV 128K 13.81 -> 13.53),
@@ -582,19 +582,19 @@ barriers (`mk-barrier.cpp` barrier mode), and the mk_seq single-block executor.
 ### From this repository's training stack and a private lab repository
 | What | Where | How |
 |---|---|---|
-| `fwht128`, `actq_fwd_src`, `row_rstd`, `block_entry_fwd`, `silu_bf`, `silu_mul_actq_fwd` | `kernels/actq.hip`:40-53, 97-132, 239-273, 88, 307 | move into `kernels/common/actq.h`; training kernels and K3 both include it (rule 1) |
-| iu4g epilogue order (reference) | `kernels/gemm.hip`:244-350 (chain at 294-336) | the matvec's chain; the L1 reference by M = 64 padding |
-| `rope_pair`, attention math | `kernels/attn.hip`:99-122, 124-156 | `common/attn.h`; `attn_causal_bf16` is the tolerance reference |
-| embedding, `rmsnorm_f32`, `silu_mul_bf16`, `residual3` | `kernels/core.hip`:23-61 | `common/core.h` |
-| `residual_slices_fwd` add order | `kernels/fuse.hip`:19-32 | the S2 epilogue |
-| `gdn_fwd_h` with h0 / ht | `kernels/gdn.hip`:1-20, 51 | the prefill-state handoff for teacher-forced L3 tests |
+| `fwht128`, `actq_fwd_src`, `row_rstd`, `block_entry_fwd`, `silu_bf`, `silu_mul_actq_fwd` | `kernels/train_actq.hip`:40-53, 97-132, 239-273, 88, 307 | move into `kernels/common/actq.h`; training kernels and K3 both include it (rule 1) |
+| iu4g epilogue order (reference) | `kernels/pf_gemm.hip`:244-350 (chain at 294-336) | the matvec's chain; the L1 reference by M = 64 padding |
+| `rope_pair`, attention math | `kernels/train_attn.hip`:99-122, 124-156 | `common/attn.h`; `attn_causal_bf16` is the tolerance reference |
+| embedding, `rmsnorm_f32`, `silu_mul_bf16`, `residual3` | `kernels/train_core.hip`:23-61 | `common/core.h` |
+| `residual_slices_fwd` add order | `kernels/train_fuse.hip`:19-32 | the S2 epilogue |
+| `gdn_fwd_h` with h0 / ht | `kernels/train_gdn.hip`:1-20, 51 | the prefill-state handoff for teacher-forced L3 tests |
 | Module / Args / launch; TritonManifest | `runtime/rt.h`:55-70; `runtime/rt.cpp`:80-124 | K3 is an `extern "C"` code-object kernel; captured Triton kernels are the L1 oracles |
 | Golden and scoring tools | `training/tools/dump_golden.py`:88-96, `training/tools/score_hidden.py`, `training/tools/capture_triton.py`, `runtime/test_gdn.cpp` | export `b._ccat` codes and fp32 scales plus head buffers; L3 scoring; new captures (conv, l2norm, gate, gated norm, fwd_h with h0/ht) |
 | dot4 unpack, x-sum zero point | the K0 matvec prototype (a private lab repository), lines 29-79 | grows into K0b (b128 SoA, S1 tiles, 80-92 MiB) |
 | Reeder megakernels (MIT) | github.com/SamuelReeder/megakernels | ideas only: epoch-tagged words, the conv ring, a multi-step loop |
 
 ### New
-`runtime/k3/` (ModelDesc, planner, tape, residency map, engine launcher, status reader), `kernels/k3.hip` (engine
+`runtime/k3/` (ModelDesc, planner, tape, residency map, engine launcher, status reader), `kernels/dec_core.hip` (engine
 loop plus op bodies), `kernels/common/*.h` (the shared numerics), `runtime/s1_decode.cpp` (the M0 per-node
 reference), `runtime/test_k3.cpp` (L1/L2 harness with OVERSUB and multi-thousand-step shadow compare),
 `tools/k3_price.py` (cost model), deferred-replay verify, the escape tape, and the b128 SoA weight repacker.
@@ -705,7 +705,7 @@ The GDN chain grows by T x 0.1-0.15 us per layer.
 | M | Deliverable | Gate (bitwise or tolerance) | Measurement |
 |---|---|---|---|
 | **M0** decode reference (2 d) | (1) Shared numerics headers `kernels/common/*.h`; the training kernels rebuilt from them. (2) `dump_golden.py` exports `b._ccat` codes + fp32 g128 scales, the int4 head (+bf16 head), tail, conv, a/b, A_log, dt_bias. (3) New Triton captures: conv, l2norm, gate, gated norm, `fwd_h` with h0/ht. (4) `runtime/s1_decode.cpp`: per-node, stateful (GDN, conv ring, KV ring, positions, slices, adaptive head + escape), on the shared op bodies | (a) Rebuilt training kernels are **bitwise** equal to today's code objects. (b) L1 bitwise for embedding, entry, actq, iu4g (M = 64 pad), silu*mul, residual, RoPE, conv / l2 / gate / gated norm (or a documented <= 1 ulp). (c) GDN step within 4 fp32 ulp of fused_recurrent after 1 step; drift reported over 2,048 steps. (d) L3: with the bf16 head, the decode golden-window soft CE and top-1 lie inside the measured band, and teacher-forced decode agrees with chunked prefill statistically. (e) The int4 head is within +0.02 nats; copy gate >= 99% | reference us/token (per node, about 1 ms est); escape fire rate on the golden window and on hash/base64 spans |
-| **M1** engine skeleton + sync + matvec + cost-model microbenchmark (2 d) | `kernels/k3.hip` loop, segment table, claim, epochs, wait/signal/last-of, status word, OVERSUB, SPLIT mode; the b128 SoA repacker; `MV_ROWS` / `MV_ROWGROUP`; `k3_bench`; K0 correctness rerun | **Bitwise** vs `gemm_tn_iu4g` for every S1 shape, the head variant vs M0. A 1,000-segment synthetic tape passes OVERSUB 3-5x on both cards. A forced timeout surfaces err through the status word inside a graph | `t_hop` idle and under load at 1/2/4/8 WGs per WGP; poll variants (acquire-per-poll, relaxed+fence, scalar); `t_claim` and throughput; `BW_cache` b128 at 32/64/80/88/92 MiB; `BW_vram_nt`; module-API occupancy; graph capture of the module launch; `v_dot2_f32_bf16` emitted for the head variant (disassembly). **Kill rule (Sec. 7)** |
+| **M1** engine skeleton + sync + matvec + cost-model microbenchmark (2 d) | `kernels/dec_core.hip` loop, segment table, claim, epochs, wait/signal/last-of, status word, OVERSUB, SPLIT mode; the b128 SoA repacker; `MV_ROWS` / `MV_ROWGROUP`; `k3_bench`; K0 correctness rerun | **Bitwise** vs `gemm_tn_iu4g` for every S1 shape, the head variant vs M0. A 1,000-segment synthetic tape passes OVERSUB 3-5x on both cards. A forced timeout surfaces err through the status word inside a graph | `t_hop` idle and under load at 1/2/4/8 WGs per WGP; poll variants (acquire-per-poll, relaxed+fence, scalar); `t_claim` and throughput; `BW_cache` b128 at 32/64/80/88/92 MiB; `BW_vram_nt`; module-API occupancy; graph capture of the module launch; `v_dot2_f32_bf16` emitted for the head variant (disassembly). **Kill rule (Sec. 7)** |
 | **M2** row ops + GDN block (2 d) | `ENTRY`, `GDN_STEP` (A2 and A1), the conv-ring epilogue, S2 rowgroup with gated norm + residual; one GDN block in the engine | L1 bitwise vs M0 for every op. L2: block output, state and ring **bitwise** vs M0 for 4,096 steps, normal and OVERSUB, both cards | R chain vs P fetch (**decides schedule A or B**); `t_gdn` vs tasks per head; `t_entry` |
 | **M3** attention block (1-2 d) | q\|kv rows with a RoPE + KV-append epilogue; `ATTN_DECODE` with a last-finisher merge | L2 bitwise vs M0 for positions 0-4,095 (crossing the window wrap); tolerance vs `attn_causal_bf16` (<= 1.3e-3 relative) | `t_attn(ctx)` for ctx 128-2,048, plus no-window up to 32k (the NoPE price) |
 | **M4** S1 end to end + head (2 d) | full tape, the head with argmax, the escape tape, device token feedback, slices via the descriptor | L2 **bitwise** vs M0 for >= 10k steps on the golden window, both cards, normal + OVERSUB, err = 0; forced-escape tests bitwise; L3 band (as in M0) | tok/s on the XTX vs the 15k target and the 6,960 gate; per-segment profile; **cost model within +-15%** of measured |

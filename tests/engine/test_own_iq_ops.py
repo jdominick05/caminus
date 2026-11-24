@@ -1,5 +1,5 @@
-"""The codebook formats' matvec tiles inside K3 (OP_OWN_MV on module k3_q3m_iq: IQ4_XS, IQ3_XXS, IQ3_S, IQ2_XXS, beside
-Q4_K and Q6_K) against their standalone kernels (own_mv), on a file's real expert tensors (docs/dev/iq-quant-study.md):
+"""The codebook formats' matvec tiles inside K3 (OP_OWN_MV on module dec_q3m_iq: IQ4_XS, IQ3_XXS, IQ3_S, IQ2_XXS, beside
+Q4_K and Q6_K) against their standalone kernels (bench_own_mv), on a file's real expert tensors (docs/dev/iq-quant-study.md):
   host    the engine's refusals, no launch: a grid format on the shipped module; a tape with grid formats that does not
           start with the embedding (its segment carries the grids to stage); IQ2_XXS and an IQ3 format on one tape;
           the stage bits Engine.build derives from the tape's own segments; a router over more experts than the
@@ -30,7 +30,7 @@ ap.add_argument('gguf')
 ap.add_argument('--experts', type=int, default=16, help='experts of each tensor on the device')
 ap.add_argument('--layers', default='first', choices=('first', 'all'))
 A = ap.parse_args()
-MOD, LEAN = 'k3_q3m_iq', 'k3_q3m_lean'
+MOD, LEAN = 'dec_q3m_iq', 'dec_q3m'
 F = ggufio.GGUFFile(A.gguf)
 NL, KU, NE = int(F.hp('block_count')), int(F.hp('expert_used_count')), int(F.hp('expert_count'))
 EL = min(A.experts, NE)
@@ -97,7 +97,7 @@ check(raises(lambda: k3.Engine(module=MOD, grid=8).router(lg[:256], 8, ri, rw)) 
       raises(lambda: k3.Engine(module=LEAN, grid=8).router(lg, 8, ri, rw)) is None, f'host: 256 experts are accepted on {MOD}, 257 on {LEAN}')
 
 # ---- device: each case's buffers and its standalone reference ----------------------------------------------------------------
-OWN = Module('own_mv')
+OWN = Module('bench_own_mv')
 C = []
 for (role, fmt, _), il in sorted(cases.items()):
     t = F.T[f'blk.{il}.{role}.weight']; rows, K = int(t.shape[1]), int(t.shape[0])

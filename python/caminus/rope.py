@@ -1,6 +1,6 @@
 """YaRN RoPE scaling (the long-context mode of Qwen3-30B-A3B, caminus serve --long-context): the per-pair frequency table and
-the attention factor the YaRN decode modules (kernels/k3_q3m_lean*_yarn.hip: OP_OWN_ATTS under K3_Q3M_YARN) and the
-prefill's q3p_qk_rope (q3m_prefill*_yarn: Q3P_YARN) read from the end of their par block. Both kernels compute
+the attention factor the YaRN decode modules (kernels/dec_q3m*_yarn.hip: OP_OWN_ATTS under K3_Q3M_YARN) and the
+prefill's q3p_qk_rope (pf_q3m*_yarn: Q3P_YARN) read from the end of their par block. Both kernels compute
 theta = (float)pos * freq[j] and cos(theta) * mscale, sin(theta) * mscale with the same statements on the same table, so
 decode and prefill agree bit for bit; the table is made once on the host, in float64, rounded to fp32.
 

@@ -29,7 +29,7 @@ tasks (matrix-vector products, attention, norms, routing) with their dependencie
 on each other through counters in memory, each wait bounded in time. One launch per pass removes the launch overhead
 that dominates small-batch decoding.
 
-- **One model, many builds:** the `kernels/k3_gguf*.hip` files are one engine compiled with different sets of operations
+- **One model, many builds:** the builds of `kernels/dec_q4x_gg.hip` are one engine compiled with different sets of operations
   and weight formats. A persistent kernel has one register budget for every operation it contains (96 registers, no
   spills), so each model loads only what it needs. `MODULE_CAPS` in `engine/k3.py` says what each build contains, and the
   host refuses anything else.

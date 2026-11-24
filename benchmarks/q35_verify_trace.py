@@ -4,7 +4,7 @@ workgroup past the wait -> its last publish), medians over --passes traced passe
 T = 4 adds over T = 1 per kind (the T-token tiles' extra cost per token is arithmetic, not bytes). Every pass at position
 --depth with commit 0 (the state the steps before it left: no replay).
   tools/guard.sh LOG 1200 python -I benchmarks/q35_verify_trace.py GGUF [--depth 512] [--passes 7]
-Swift's module is k3_q35_swift_ver_trace, ThinkingCap's k3_q35_tcap_ver_trace (chosen from the file).
+Swift's module is dec_q35_swift_ver_trace, ThinkingCap's dec_q35_tcap_ver_trace (chosen from the file).
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -21,7 +21,7 @@ A = ap.parse_args()
 OPN = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int)}
 mc = A.depth + 16
 eng = Dense35Own(A.gguf, max_ctx=mc, spec_T=4, vram_extra_mib=2 * Dense35Verify.need_mib(4, max_ctx=mc) + 64)
-mod = 'k3_q35_tcap_ver_trace' if eng.tcap else 'k3_q35_swift_ver_trace'
+mod = 'dec_q35_tcap_ver_trace' if eng.tcap else 'dec_q35_swift_ver_trace'
 print(torch.cuda.get_device_name(0), eng.module, '->', mod, flush=True)
 toks = [(7 * i + 3) % 5000 + 100 for i in range(mc)]
 for p in range(A.depth): eng.verify(toks, p, 0 if p == 0 else 1)   # (decode steps up to the depth: the state every pass reads)

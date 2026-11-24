@@ -180,7 +180,7 @@ What the table says:
 
 Written while the accuracy window runs: no row-scale tile has run on a card yet, and nothing below was timed.
 
-**The tile** (`kernels/own_quant_rs.h`, modules `k3_q3m_rs4` and `k3_q3m_rs2`: the lean decode module plus one code
+**The tile** (`kernels/quant_rs.h`, modules `dec_q3m_rs4` and `dec_q3m_rs2`: the lean decode module plus one code
 width each, so the shipped module's object does not change). The engine makes its planes at load
 (`engine.own_layout.rs_planes`): the codes alone, K x bits / 8 bytes per row, and one fp32 scale per row in a buffer
 of its own. A lane owns 32 values per pass, as in the Q4_K tile: one 16-byte load (4 bits) or 8-byte load (2 bits)
@@ -207,7 +207,7 @@ From the bytes, a loads-only token of W4r should be about 4.39 ms and of W2r abo
 
 | | Prediction (RX 7900 XT, depth 8, ms per token) | Fails if |
 |---|---|---|
-| S1: the modules' own cost | the official file is 0.03 to 0.15 slower on `k3_q3m_rs4` / `_rs2` than on the lean module | more than 0.15 slower: the 13 extra spilled scalars cost more than a 4-bit tile can win back |
+| S1: the modules' own cost | the official file is 0.03 to 0.15 slower on `dec_q3m_rs4` / `_rs2` than on the lean module | more than 0.15 slower: the 13 extra spilled scalars cost more than a 4-bit tile can win back |
 | S2: the tile decodes for less than Q4_K | W4r's and W2r's full minus loads-only is 0.20 to 0.40, the same for both widths (the arithmetic is per weight, not per byte), and below the official file's on the same module | either above the official file's |
 | S3: 4 bits, net | W4r is 0.10 to 0.30 faster than the official file on the same module | less than 0.05 faster (below what this repository calls a speed difference) |
 | S4: 2 bits, net | W2r is 0.45 to 0.70 faster than the official file on the same module, and at least 0.30 faster than the official file on the lean module | less than 0.30 faster on the same module |
@@ -240,10 +240,10 @@ loads-only builds interleaved in one process. The widest spread of one build acr
 |---|---|---|---|---|
 | Official file, lean module (as shipped) | 4.840 (206.6) | 5.660 (176.7) | 4.053 (246.7) | 4.705 (212.5) |
 | Official file, row-scale module | 4.914 / 4.920 | 5.734 / 5.746 | 4.125 / 4.125 | 4.802 / 4.815 |
-| **W4r** (`k3_q3m_rs4`) | **4.697 (212.9)** | 5.551 (180.1) | **3.972 (251.8)** | 4.653 (214.9) |
-| **W2r** (`k3_q3m_rs2`) | **4.394 (227.6)** | 5.257 (190.2) | **3.716 (269.1)** | 4.408 (226.9) |
-| B, IQ4_XS (`k3_q3m_iq`) | 4.925 (203.0) | 5.750 (173.9) | 4.129 (242.2) | 4.864 (205.6) |
-| D, IQ2_XXS (`k3_q3m_iq`) | 5.115 (195.5) | 5.978 (167.3) | 4.128 (242.2) | 4.878 (205.0) |
+| **W4r** (`dec_q3m_rs4`) | **4.697 (212.9)** | 5.551 (180.1) | **3.972 (251.8)** | 4.653 (214.9) |
+| **W2r** (`dec_q3m_rs2`) | **4.394 (227.6)** | 5.257 (190.2) | **3.716 (269.1)** | 4.408 (226.9) |
+| B, IQ4_XS (`dec_q3m_iq`) | 4.925 (203.0) | 5.750 (173.9) | 4.129 (242.2) | 4.864 (205.6) |
+| D, IQ2_XXS (`dec_q3m_iq`) | 5.115 (195.5) | 5.978 (167.3) | 4.128 (242.2) | 4.878 (205.0) |
 | Loads only: official / W4r / W2r | 4.527 / 4.368 / 3.841 | 5.303 / 5.183 / 4.650 | 3.848 / 3.759 / 3.322 | 4.439 / 4.318 / 3.934 |
 | Loads only: B / D | 4.369 / 4.004 | 5.161 / 4.792 | 3.744 / 3.454 | 4.329 / 4.048 |
 
@@ -295,7 +295,7 @@ What the tables say:
 
 P4 held (8-bit activations cost a KLD of 0.0079 on Q8_0 experts), and the speed results bound what such a tile can
 win: the arithmetic W4r adds to its loads, 0.33 ms on the RX 7900 XT. Before anything is built for it, one
-measurement build says how much of that an integer tile would remove: `OWN_A8_PROBE` in `kernels/own_quant_rs.h`
+measurement build says how much of that an integer tile would remove: `OWN_A8_PROBE` in `kernels/quant_rs.h`
 reads a unit's 32 activations as 32 bytes of the activation buffer (half the bytes of fp16), multiplies them with the
 unit's codes through `sudot4` (8 instructions per unit and row where the fp16 form takes 16 `fdot2` and builds an
 fp16 pair for each), and scales the unit's integer sum once. Its sums are not the model's (the bytes are whatever the
@@ -348,7 +348,7 @@ object; medians of three passes, differences paired inside each process):
   every row shares.
 
 **The measurement builds.** A loads-only or probe object is a two-line source, `#define OWN_READONLY 1` (or
-`#define OWN_A8_PROBE 1`) followed by `#include "k3_q3m_rs4.hip"` (`_rs2`, `_lean`, `_iq`), compiled with its
+`#define OWN_A8_PROBE 1`) followed by `#include "dec_q3m_rs4.hip"` (`_rs2`, `_lean`, `_iq`), compiled with its
 module's own command from `build.sh` under the name `<module>_ro` (`<module>_a8p`).
 `benchmarks/q3moe_depth.py --arms NAME=<object>` gives an object named after a module that module's ops. Every
 object of one comparison is built from one tree into one directory (`CAMINUS_KERNEL_DIR`).

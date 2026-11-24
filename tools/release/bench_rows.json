@@ -1698,7 +1698,7 @@
    "id": "swift-dflash-vgpr",
    "doc_line": 291,
    "section": "Swift DFlash 2 served",
-   "what": "k3_q35_dflash: 88 VGPRs, 0 spills; every other object unchanged",
+   "what": "dec_q35_swift_dflash: 88 VGPRs, 0 spills; every other object unchanged",
    "model": "swift-1.5",
    "cards": "nd",
    "kind": "static",

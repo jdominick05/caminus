@@ -1,9 +1,9 @@
 """The own prefill's attention for one chunk at depth: a chunk of N rows at positions P0 .. P0 + N - 1 attends to the cache
 rows 0 .. its own position. Geometries: the dense qwen35 line by default (Swift 1.5 / ThinkingCap / AREX-2: 24 query heads
-over 4 kv heads, head dim 256, f16 KV cache); --heads 16 --kv-heads 2 --module q35m_prefill is Qwen3.6-35B-A3B's (its
-prefill object's q35mp_attn; --kv q8 its Q8_0 rows, q35mp_attn_q8); --hd 128 --heads 32 --kv-heads 4 is Qwen3-30B-A3B's (q3m_prefill q3mp_attn; --kv q8 q3mp_attn_q8).
+over 4 kv heads, head dim 256, f16 KV cache); --heads 16 --kv-heads 2 --module pf_q35m is Qwen3.6-35B-A3B's (its
+prefill object's q35mp_attn; --kv q8 its Q8_0 rows, q35mp_attn_q8); --hd 128 --heads 32 --kv-heads 4 is Qwen3-30B-A3B's (pf_q3m q3mp_attn; --kv q8 q3mp_attn_q8).
 Ours: the kernels the prefill drivers run, in their launch splits:
-  wm      prefill/q35own.py Ops.attn_wm (kernels/q35_prefill.hip q35p_attn_wm; the 35B's object: kernels/q35m_prefill.hip
+  wm      prefill/q35own.py Ops.attn_wm (kernels/pf_q35_swift.hip q35p_attn_wm; the 35B's object: kernels/pf_q35m.hip
           q35mp_attn, q35mp_attn_q8 over Q8 rows: WMMA tiles, a workgroup = 8 positions x one kv head's query heads, wave
           pairs over the 256 dims; launches of at most ATTN_WM_TP row-positions)
   attn16  Ops.attn16 (q35p_attn16: one workgroup per (row, query head) walks every position up to its own; the kernel wm
@@ -19,7 +19,7 @@ summed, the log-sum-exp merge of the two halves is not counted. Output checked a
 Prints each one's median time over REPS runs and TFLOPS (4 N (P0 + N / 2) heads D: the causal half counted once).
 A Q8 cache holds random codes under one small scale per block (valid rows; the time does not depend on the values).
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_attn.py [--n 2048] [--p0 0,8192,30720] [--reps 5]
-                 [--heads 24 --kv-heads 4 --hd 256] [--module q35_prefill] [--kv f16|q8] [--skip attn16,sdpa]
+                 [--heads 24 --kv-heads 4 --hd 256] [--module pf_q35_swift] [--kv f16|q8] [--skip attn16,sdpa]
 Run it on the XT alone first."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -40,7 +40,7 @@ H, NKV, D, N, Q8 = A.heads, A.kv_heads, A.hd, A.n, A.kv == 'q8'
 SKIP = set(v for v in A.skip.split(',') if v)
 if D == 128 and H != 8 * NKV: sys.exit('q35_prefill_attn: head dim 128 runs q3mp_attn (8 query heads per kv head)')
 dev = torch.device('cuda:0')
-if D == 128: ops = q3m_ops.Ops(dev, module=A.module or 'q3m_prefill', q8=Q8)
+if D == 128: ops = q3m_ops.Ops(dev, module=A.module or 'pf_q3m', q8=Q8)
 elif Q8 or A.module == q35moe.MODULE: ops = q35moe.Ops(dev, q8=Q8)
 else: ops = q35own.Ops(dev, module=A.module or q35own.MODULE)
 WM = ops.WM_KERNEL[Q8] if D == 256 else ('q3mp_attn_q8' if Q8 else 'q3mp_attn')

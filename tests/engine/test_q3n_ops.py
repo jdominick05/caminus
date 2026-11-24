@@ -1,7 +1,7 @@
-"""The qwen3next module's own behaviours (kernels/k3_gguf_q3n.hip, K3_Q3N) on ONE card (run it on the XT alone:
+"""The qwen3next module's own behaviours (kernels/dec_q3n.hip, K3_Q3N) on ONE card (run it on the XT alone:
 HIP_VISIBLE_DEVICES=1), a TP card's geometry:
-  gdn   the GDN chain FlashNextTP / Qwen3NextTP build (l2 -> gates -> step + save -> norm, lazy commit) on k3_gguf_q3n
-        (one token per pass) and k3_gguf_q3n_mt (T = 4) with 8 key heads and 16 value heads: the step's output and
+  gdn   the GDN chain FlashNextTP / Qwen3NextTP build (l2 -> gates -> step + save -> norm, lazy commit) on dec_q3n
+        (one token per pass) and dec_q3n_ver (T = 4) with 8 key heads and 16 value heads: the step's output and
         state and the norm's output vs a float64 reference of the gated delta rule with GROUPED heads (value head h reads
         key head h / 2, qwen3next's repeat-interleave) and the SiLU output gate, fed K3's own l2 / gates outputs (the
         unchanged ops); the tiled mapping (h % nk, Flash-Next's) and the sigmoid gate must NOT match (the defines are
@@ -21,7 +21,7 @@ from caminus.engine import k3
 from caminus.engine.flashnext import EPS
 from test_attn_split import kv_rand, ref_attn, cells_of, beq   # noqa: E402  (helpers only: its MOD / Pair are the Coder's)
 
-M1, MT = 'k3_gguf_q3n', 'k3_gguf_q3n_mt'
+M1, MT = 'dec_q3n', 'dec_q3n_ver'
 S, KC = 128, 8                    # the state size; key heads per card (Qwen3NextTP's default gdn_keys 8 / 8)
 H, CH = 2 * KC, 4 * S * KC        # value heads per card (2 per key head); qkv channels: q, k (S each per key head), 2 v
 D = 256

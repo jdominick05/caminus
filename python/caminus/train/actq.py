@@ -1,5 +1,5 @@
 """Fused activation fake-quant: actq(x) == qat.fq_act(qat.rotate(x, 128), bits, clip) under bf16 autocast.
-Forward and backward each run as one kernel (kernels/actq.hip); y is always bf16, dx has x's dtype."""
+Forward and backward each run as one kernel (kernels/train_actq.hip); y is always bf16, dx has x's dtype."""
 import ctypes
 import torch
 from ..device.hip import Module
@@ -9,7 +9,7 @@ _mod = {}
 
 def _m():
     dev = torch.cuda.current_device()
-    if dev not in _mod: _mod[dev] = Module('actq')
+    if dev not in _mod: _mod[dev] = Module('train_actq')
     return _mod[dev]
 
 

@@ -1,4 +1,4 @@
-"""The qwen3moe two-card engine on two cards (caminus.engine.q3moe_tp.Q3MoETP on k3_q3m_lean_tp, torch devices 0 and 1):
+"""The qwen3moe two-card engine on two cards (caminus.engine.q3moe_tp.Q3MoETP on dec_q3m_tp, torch devices 0 and 1):
 bitwise against its own one-token reference, since by design it is not bitwise to the one-card engine (the K-split down,
 the attn_output column split and the split count each change a summation order; its accuracy gate is
 tools/gates/q3moe_gmodel.py --cards 2).
@@ -19,9 +19,9 @@ the GGUF given (the catalog Qwen3-30B-A3B file: about 11,900 / 6,300 MiB on the 
 Both cards visible, card 0 first (the display card: run the tiny form first; every two-card run with CAMINUS_UPLOAD_LOG):
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 900 python -I tests/engine/test_q3moe_tp.py --tiny --scratch DIR
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_tp.py GGUF --npos 96 --scratch DIR
---kv q8: the engine with its KV caches as Q8_0 rows (Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8), every check above, plus in
+--kv q8: the engine with its KV caches as Q8_0 rows (Q3MoETP(q8=True) on dec_q3m_tp_kvq8), every check above, plus in
 the reference run each card's last-layer row at every position byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V)
-of the halves the F16 row kernel (q3m_prefill's q3p_qk_rope at that card's local shapes: OP_OWN_ATTS's norm + RoPE
+of the halves the F16 row kernel (pf_q3m's q3p_qk_rope at that card's local shapes: OP_OWN_ATTS's norm + RoPE
 statements) stores for that card's q | k | v of the last layer: the one-card Q8 rows' encoding of the same values.
 Run the op alone on the module first: HIP_VISIBLE_DEVICES=<XT> tests/engine/test_q3m_kvq8_atts.py --tp.
 --splits-cap N: the engine's attention splits cap (1 .. 128 on the two-card module; past 64 the merge's second load round
@@ -91,7 +91,7 @@ eng = Q3MoETP(P, devices=(0, 1), max_ctx=max_ctx, vram_extra_mib=[(len(GRIDS) + 
               splits_cap=SPLITS_CAP if A.splits_cap is None else A.splits_cap, q8=Q8)
 print(f'{os.path.basename(P)}: expert rows {eng.exp_rows}, kv heads {eng.kvc}, head rows {eng.vh} / {eng.vocab - eng.vh}, '
       f'module {eng.module}, grids {eng.per_wgp_c}, splits {eng.splits}, {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB', flush=True)
-MODN = 'k3_q3m_lean_tp_kvq8' if Q8 else 'k3_q3m_lean_tp'
+MODN = 'dec_q3m_tp_kvq8' if Q8 else 'dec_q3m_tp'
 check(eng.module == MODN and eng.E[0].module == eng.E[1].module == MODN
       and all(d[c]['cache'].dtype == (torch.uint8 if Q8 else torch.float16) for d in eng.L for c in (0, 1)), f'both cards decode on {MODN}')
 oracle = None
@@ -103,7 +103,7 @@ if Q8 or DIAG:   # the row oracle: on each card the F16 row kernel on that card'
     for c in (0, 1):
         nkv_c, nh_c = eng.kvc[c], eng.kvc[c] * 8; Mk = nkv_c * eng.hd
         with torch.cuda.device(eng.devs[c]):
-            oracle.append(dict(ops=q3m_ops.Ops(torch.device(f'cuda:{eng.devs[c]}'), 'q3m_prefill'), lay=ref_kv.Q8KVLayout(nkv_c, eng.hd),
+            oracle.append(dict(ops=q3m_ops.Ops(torch.device(f'cuda:{eng.devs[c]}'), 'pf_q3m'), lay=ref_kv.Q8KVLayout(nkv_c, eng.hd),
                                nkv=nkv_c, nh=nh_c, Mk=Mk, oc=torch.zeros((max_ctx + 1) * 2 * Mk, dtype=torch.float16, device=f'cuda:{eng.devs[c]}'),
                                oq=torch.zeros(nh_c * eng.hd, dtype=torch.float16, device=f'cuda:{eng.devs[c]}')))
 rows_bad, rows_rope = [], []

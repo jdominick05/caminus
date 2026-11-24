@@ -7,7 +7,7 @@ own hsaco/gfx1100 (an installed wheel). caminus.device.hip loads from it, and th
 The installed package carries RUNTIME_SET (what serving, replay and `caminus doctor --gpu` load), staged from build/ by
 tools/release/stage_kernels.py together with provenance.json: the toolchain, each object's compile command as build.sh ran it, the
 source commit and dirty flag, a content hash of kernels/ + build.sh, the ggml headers' commit, each object's sha256 and size.
-Not shipped: the *_trace profiling builds, gg_mmvf_ref and gg_mv_ref, the dormant S1 engine and training kernels,
+Not shipped: the *_trace profiling builds, ref_gg_mmvf and ref_gg_mv, the dormant S1 engine and training kernels,
 the probes (build them from a checkout and point CAMINUS_KERNEL_DIR at build/)."""
 import hashlib
 import json
@@ -20,46 +20,46 @@ PKG = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # (the camin
 PACKAGE_DIR = os.path.join(PKG, 'hsaco', ARCH)
 PROVENANCE = 'provenance.json'
 
-K3 = ('k3_gguf_gsq', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_qsa', 'k3_gguf_gsq_qsa_mt', 'k3_gguf_gsq_mtp', 'k3_gguf_gsq_mtp_mt',
-      'k3_gguf_draft', 'k3_gguf', 'k3_gguf_mt', 'k3_guard',
+K3 = ('dec_q4x_gsq', 'dec_q4x_gsq_ver', 'dec_q4x_gsq_qsa', 'dec_q4x_gsq_qsa_ver', 'dec_q4x_gsq_mtp', 'dec_q4x_gsq_mtp_ver',
+      'dec_q4x_dflash', 'dec_q4x_gg', 'dec_q4x_gg_ver', 'dec_guard',
       # the one-card engines (caminus.engine.qwen35_one: Qwen3.6 HauhauCS / GSQ, AREX-2) and Qwen3-Coder-Next (caminus.engine.qwen3next_tp),
       # T = 1 as caminus serve runs them
-      'k3_gguf_q35h', 'k3_gguf_q35g', 'k3_gguf_q35d', 'k3_gguf_q3n')
+      'dec_q35m_hh', 'dec_q35m_gg', 'dec_q35_arex', 'dec_q3n')
 MMQ_FORMATS = ('iq2_s', 'iq3_s', 'iq3_xxs', 'iq4_nl', 'iq4_xs', 'q2_0', 'q3_k', 'q4_k', 'q5_k', 'q6_k', 'q8_0', 'glue', 'glue8')   # build.sh's lists
 MOE_FORMATS = ('iq2_s', 'iq3_s', 'iq3_xxs', 'iq4_xs', 'iq4_nl', 'q2_0', 'glue')
-PREFILL = (('prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'prefill_tp', 'prefill_dense_q6_k', 'gemm',
-            'prefill_glue_q35', 'prefill_glue_q35d', 'prefill_gdn_q35', 'prefill_attn_q35', 'prefill_attn_q35d')   # (caminus.prefill.q35)
-           + tuple(f'prefill_mmq_{f}' for f in MMQ_FORMATS) + tuple(f'prefill_moe_{f}' for f in MOE_FORMATS))
+PREFILL = (('pf_gg_attn', 'pf_feed', 'pf_gg_gdn', 'pf_gg_glue', 'pf_tp', 'pf_gg_dense_q6_k', 'pf_gemm',
+            'pf_gg_glue_q35m', 'pf_gg_glue_q35', 'pf_gg_gdn_q35', 'pf_gg_attn_q35m', 'pf_gg_attn_q35')   # (caminus.prefill.q35)
+           + tuple(f'pf_gg_mmq_{f}' for f in MMQ_FORMATS) + tuple(f'pf_gg_moe_{f}' for f in MOE_FORMATS))
 # The own engines select these from the file's formats, including custom GGUFs.
 # Keep them explicit: doctor and wheel staging must not import torch or engines.
 # tests/packaging/test_runtime_kernels.py checks the real host selections against
 # this list without a GPU. Adding a serving module requires extending both.
-Q3_OWN = ('k3_q3m_lean', 'k3_q3m_iq', 'k3_q3m_rs4', 'k3_q3m_rs2', 'q3m_prefill', 'q3m_prefill_iq',
-          'q3m_prefill_mm',   # (the one-card prefill's wide GEMM tiles: caminus.prefill.q3m_ops.WIDE_MODULE)
+Q3_OWN = ('dec_q3m', 'dec_q3m_iq', 'dec_q3m_rs4', 'dec_q3m_rs2', 'pf_q3m', 'pf_q3m_iq',
+          'pf_q3m_mm',   # (the one-card prefill's wide GEMM tiles: caminus.prefill.q3m_ops.WIDE_MODULE)
           # its two-card serve (caminus serve --cards 2: engine/q3moe_tp.py's decode module, prefill/q3m_tp.py's slot sum;
-          # the exchange's add is prefill_tp, in PREFILL)
-          'k3_q3m_lean_tp', 'q3m_prefill_tp',
+          # the exchange's add is pf_tp, in PREFILL)
+          'dec_q3m_tp', 'pf_q3m_tp',
           # its 8-bit KV cache (caminus serve --kv q8): the one- and two-card decode modules and the prefill's Q8 rows and
-          # attention (q3m_prefill_kvq8: one object for both card counts); and its long-context mode (caminus serve
+          # attention (pf_q3m_kvq8: one object for both card counts); and its long-context mode (caminus serve
           # --long-context: YaRN x4): the YaRN builds of the decode modules and the prefill's qk_rope, F16 and Q8_0 rows
-          'k3_q3m_lean_kvq8', 'k3_q3m_lean_tp_kvq8', 'q3m_prefill_kvq8',
-          'k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn', 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn',
-          'q3m_prefill_yarn', 'q3m_prefill_kvq8_yarn')
-DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35_swift_ver', 'k3_q35_swift_mtp', 'k3_q35_dflash', 'q35_prefill',
-               'k3_q35_tcap', 'k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver', 'k3_q35_tcap_ver', 'k3_q35_tcap_mtp', 'k3_q35_tcap_dflash', 'q35_prefill_tcap',
-               'k3_q35_gsq', 'q35_prefill_gsq', 'k3_q35_gsq_ver', 'k3_q35_gsq_ver_m',
-               'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash')   # paused plain 27B: packaging does not unpause the catalog
+          'dec_q3m_kvq8', 'dec_q3m_tp_kvq8', 'pf_q3m_kvq8',
+          'dec_q3m_yarn', 'dec_q3m_kvq8_yarn', 'dec_q3m_tp_yarn', 'dec_q3m_tp_kvq8_yarn',
+          'pf_q3m_yarn', 'pf_q3m_kvq8_yarn')
+DENSE35_OWN = ('dec_q35_swift', 'dec_q35_swift_tp', 'dec_q35_swift_tp_ver', 'dec_q35_swift_ver', 'dec_q35_swift_mtp', 'dec_q35_swift_dflash', 'pf_q35_swift',
+               'dec_q35_tcap', 'dec_q35_tcap_tp', 'dec_q35_tcap_tp_ver', 'dec_q35_tcap_ver', 'dec_q35_tcap_mtp', 'dec_q35_tcap_dflash', 'pf_q35_tcap',
+               'dec_q35_gsq', 'pf_q35_gsq', 'dec_q35_gsq_ver', 'dec_q35_gsq_ver_m',
+               'dec_q35_gsq_mtp', 'dec_q35_gsq_dflash')   # paused plain 27B: packaging does not unpause the catalog
 # The two-card verify objects (*_tp_ver) serve two-card drafting; its drafters are the one-card MTP / DFlash objects.
 # Trace, ablation and standalone probes are deliberately outside the runtime set.
 # The XTX's objects of the own decode modules: build.sh's <name>_w4 (a 4-workgroups-per-WGP grid, VGPR cap 192 instead of
-# the XT's 144: kernels/k3.hip K3_PER_WGP); caminus.engine.k3.card_object loads one on a card whose grid is 4 per WGP
-CARD_W4 = tuple(n + '_w4' for n in Q3_OWN if n.startswith('k3_q3m_'))
+# the XT's 144: kernels/dec_core.hip K3_PER_WGP); caminus.engine.k3.card_object loads one on a card whose grid is 4 per WGP
+CARD_W4 = tuple(n + '_w4' for n in Q3_OWN if n.startswith('dec_q3m'))
 # Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (their YaRN
 # mode is the same objects: the table is a buffer), the prefill's own object, its Q8 rows and attention, and the prefill
 # attention object's YaRN build (pf_qk_nr's table)
-Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn',
-              'q35m_prefill_mm')   # (the one-card prefill's wide expert tiles: caminus.prefill.q35moe.WIDE_MODULE)
-RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + CARD_W4 + Q35MOE_OWN + ('own_topk', 'smoke')
+Q35MOE_OWN = ('dec_q35m', 'dec_q35m_kvq8', 'pf_q35m', 'pf_q35m_kvq8', 'pf_gg_attn_q35m_yarn',
+              'pf_q35m_mm')   # (the one-card prefill's wide expert tiles: caminus.prefill.q35moe.WIDE_MODULE)
+RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + CARD_W4 + Q35MOE_OWN + ('samp_topk', 'smoke')
 
 
 def checkout_build():

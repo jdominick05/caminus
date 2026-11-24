@@ -1,5 +1,5 @@
 """G1 of the dense qwen35 line's own prefill (caminus.prefill.q35own): every op but the GEMMs, over a chunk's rows, BITWISE
-its K3 decode op on the file's decode module (Swift's k3_q35_swift; ThinkingCap's k3_q35_tcap with the q35_prefill_tcap
+its K3 decode op on the file's decode module (Swift's dec_q35_swift; ThinkingCap's dec_q35_tcap with the pf_q35_tcap
 object) on the same inputs, one token per pass.
 
   tools/guard.sh LOG 900 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35_prefill_ops.py GGUF
@@ -70,16 +70,16 @@ def main():
     CH, KD, VD, QH, M = 2 * S * NK + S * NV, NK * S, NV * S, nh * hd, nkv * hd
     TE = F.T['token_embd.weight'].type
     TC = TE == 'IQ2_S'
-    MOD = 'k3_q35_tcap' if TC else 'k3_q35_swift'
+    MOD = 'dec_q35_tcap' if TC else 'dec_q35_swift'
     emb_rb = D // 256 * (82 if TC else 144)
-    print(f'NOTE decode module {MOD}, prefill object {"q35_prefill_tcap" if TC else "q35_prefill"}; embedding {TE}', flush=True)
+    print(f'NOTE decode module {MOD}, prefill object {"pf_q35_tcap" if TC else "pf_q35_swift"}; embedding {TE}', flush=True)
     mib = (2 * ROWS * 2 * M * 2 + 16 * T * (2 * QH + CH + 2 * D + ffn) * 4 + 2 * NV * S * S * 4 + V * emb_rb + NV * D * 4) / capacity.MIB
     capacity.check([dev.index], [mib * 1.5 + 64], 'q35 prefill G1 buffers')   # (before anything is allocated)
     from caminus.prefill.q35own import Ops
     from caminus.prefill.attn import Attn
     from caminus.prefill.gdn import Gdn
     from caminus.prefill.glue import Glue
-    O, A, Gd, Gl = Ops(dev, module='q35_prefill_tcap' if TC else 'q35_prefill'), Attn(dev, name='prefill_attn_q35d'), Gdn(dev, module='prefill_gdn_q35'), Glue(dev, module='prefill_glue_q35d')
+    O, A, Gd, Gl = Ops(dev, module='pf_q35_tcap' if TC else 'pf_q35_swift'), Attn(dev, name='pf_gg_attn_q35'), Gdn(dev, module='pf_gg_gdn_q35'), Glue(dev, module='pf_gg_glue_q35')
     rng = np.random.default_rng(5)
     put = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(dev)
     z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=dev)

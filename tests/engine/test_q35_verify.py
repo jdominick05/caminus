@@ -1,4 +1,4 @@
-"""Dense35Verify (the dense qwen35 line: Swift 1.5 on kernels/k3_q35_swift_ver.hip, ThinkingCap on k3_q35_tcap_ver.hip: T-token verify passes) against
+"""Dense35Verify (the dense qwen35 line: Swift 1.5 on kernels/dec_q35_swift_ver.hip, ThinkingCap on dec_q35_tcap_ver.hip: T-token verify passes) against
 Dense35Own's decode steps on the same tokens and positions, bit for bit, over a prefilled context of real text (this
 repository's docs) and from an empty one:
   for T = 1 .. 4, a walk of passes with rejections: each pass accepts a of its T rows (the schedule cycles T, 1, T - 1,
@@ -9,8 +9,8 @@ repository's docs) and from an empty one:
   T = 4 with every row accepted on 3, 6 and 7 workgroups per WGP: the same logits.
 The verify tape's feed-forward runs as three segments and the decode tape's as the fused gate | up segment: equal logits
 are also that check. Prints PASS / FAIL lines and RESULT PASS | FAIL.
---kv q8 runs the same walks on the separate Q8 objects (Dense35Own(q8=True): k3_q35_swift_kvq8 / k3_q35_tcap_kvq8 and
-their verify objects k3_q35_{swift,tcap}_ver_kvq8): verify passes on a Q8 cache bitwise the Q8 one-token decode steps.
+--kv q8 runs the same walks on the separate Q8 objects (Dense35Own(q8=True): dec_q35_swift_kvq8 / dec_q35_tcap_kvq8 and
+their verify objects dec_q35_{swift,tcap}_ver_kvq8): verify passes on a Q8 cache bitwise the Q8 one-token decode steps.
 There is no Q8 batched prefill yet, so a depth is reached by one-token decode steps on the Q8 decode tape (the first
 pass after them commits 1, not 0); each depth re-walks its context about ten times.
   tools/guard.sh LOG 1200 python -I tests/engine/test_q35_verify.py GGUF [--depths 0,512] [--kv q8]
@@ -48,8 +48,8 @@ if Q8:   # (Q35OwnPrefill refuses a Q8 engine: no prefill buffers; Dense35Verify
 else:
     eng = Dense35Own(A.gguf, max_ctx=max_ctx, spec_T=MAX_T, vram_extra_mib=extra + buffer_need_mib(shapes_of(A.gguf), CH) + 16)
 # the grids the verify module's LDS keeps resident (k3.resident_grid refuses the others: the GSQ verify module's 22.8 KB a
-# workgroup fits 5 per WGP); the GSQ files' passes are three launches (their IQ1_M matrix on k3_q35_gsq_ver_m)
-VMOD = k3.Q35RV_MODULES[0] if eng.module in k3.Q35R_MODULES else 'k3_q35_tcap_ver' if eng.tcap else 'k3_q35_swift_ver'
+# workgroup fits 5 per WGP); the GSQ files' passes are three launches (their IQ1_M matrix on dec_q35_gsq_ver_m)
+VMOD = k3.Q35RV_MODULES[0] if eng.module in k3.Q35R_MODULES else 'dec_q35_tcap_ver' if eng.tcap else 'dec_q35_swift_ver'
 if Q8 and VMOD not in k3.Q35_KV_Q8_OF: raise SystemExit(f"--kv q8: no Q8 verify object for {VMOD} (the GSQ line has none yet)")
 if Q8: VMOD = k3.Q35_KV_Q8_OF[VMOD]
 LDS_CAP = k3.WGP_LDS // max(k3._m(m).k3_run.lds_bytes() for m in (VMOD,) + (k3.Q35RVM_MODULES if eng.module in k3.Q35R_MODULES else ()))

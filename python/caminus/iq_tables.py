@@ -687,10 +687,10 @@ IQ1_DELTA = np.float32(0.125)   # IQ1_S / IQ1_M: a group's values are grid +- de
 
 
 def c_header():
-    """kernels/iq_grids.h: the three grids for the kernels (an entry's byte k = its magnitude k, little-endian words).
-    Regenerate: python -I python/caminus/iq_tables.py > kernels/iq_grids.h (tests/io/test_own_dequant.py compares)."""
+    """kernels/quant_grid_iq.h: the three grids for the kernels (an entry's byte k = its magnitude k, little-endian words).
+    Regenerate: python -I python/caminus/iq_tables.py > kernels/quant_grid_iq.h (tests/io/test_own_dequant.py compares)."""
     notice = __doc__[__doc__.index('MIT License'):]
-    out = ['// The grids of GGUF\'s IQ3_XXS, IQ3_S and IQ2_XXS block formats for the kernels (kernels/own_quant_iq.h): format',
+    out = ['// The grids of GGUF\'s IQ3_XXS, IQ3_S and IQ2_XXS block formats for the kernels (kernels/quant_iq.h): format',
            '// constants, ggml\'s data (llama.cpp, ggml/src/ggml-common.h: iq3xxs_grid, iq3s_grid, iq2xxs_grid). An entry is 4',
            '// (IQ3) or 8 (IQ2_XXS) magnitudes, byte k = magnitude k. Generated from python/caminus/iq_tables.py (c_header);',
            '// do not edit. Listed in THIRD_PARTY.md.', '//'] + ['// ' + l if l else '//' for l in notice.split('\n')]
@@ -707,11 +707,11 @@ def c_header():
 
 
 def c_header_iq2xs():
-    """kernels/iq2xs_grid.h: IQ2_XS's grid for the kernels (kernels/own_quant_iq2xs.h): entry e's 8 magnitudes as two
+    """kernels/quant_grid_iq2xs.h: IQ2_XS's grid for the kernels (kernels/quant_iq2xs.h): entry e's 8 magnitudes as two
     little-endian words, weights 0 .. 3 then 4 .. 7. Regenerate: python -I python/caminus/iq_tables.py iq2xs >
-    kernels/iq2xs_grid.h (tests/io/test_own_dequant.py compares)."""
+    kernels/quant_grid_iq2xs.h (tests/io/test_own_dequant.py compares)."""
     notice = __doc__[__doc__.index('MIT License'):]
-    out = ['// The grid of GGUF\'s IQ2_XS block format for the kernels (kernels/own_quant_iq2xs.h): a format constant, ggml\'s',
+    out = ['// The grid of GGUF\'s IQ2_XS block format for the kernels (kernels/quant_iq2xs.h): a format constant, ggml\'s',
            '// data (llama.cpp, ggml/src/ggml-common.h: iq2xs_grid). An entry is 8 magnitudes, byte k = magnitude k. Generated',
            '// from python/caminus/iq_tables.py (c_header_iq2xs); do not edit. Listed in THIRD_PARTY.md.', '//'] + \
           ['// ' + l if l else '//' for l in notice.split('\n')]
@@ -726,12 +726,12 @@ def c_header_iq2xs():
 
 
 def c_header_iq1():
-    """kernels/iq1_grid.h: IQ1_S / IQ1_M's grid for the kernels (kernels/own_quant_iq1m.h): entry e's 8 values g in -1 /
+    """kernels/quant_grid_iq1.h: IQ1_S / IQ1_M's grid for the kernels (kernels/quant_iq1m.h): entry e's 8 values g in -1 /
     0 / +1 stored as g + 1 (bytes 0 .. 2, byte k = value k), so fp16 1024 + byte - 1025 is g exactly. Read from global
     memory (16 KB: too big for the local memory a decode module shares). Regenerate: python -I python/caminus/iq_tables.py
-    iq1 > kernels/iq1_grid.h (tests/io/test_own_dequant.py compares)."""
+    iq1 > kernels/quant_grid_iq1.h (tests/io/test_own_dequant.py compares)."""
     notice = __doc__[__doc__.index('MIT License'):]
-    out = ['// The grid of GGUF\'s IQ1_S / IQ1_M block formats for the kernels (kernels/own_quant_iq1m.h): a format constant,',
+    out = ['// The grid of GGUF\'s IQ1_S / IQ1_M block formats for the kernels (kernels/quant_iq1m.h): a format constant,',
            '// ggml\'s data (llama.cpp, ggml/src/ggml-common.h: iq1s_grid). An entry is 8 values in -1 / 0 / +1, stored as',
            '// value + 1 (byte k = value k + 1). Generated from python/caminus/iq_tables.py (c_header_iq1); do not edit. Listed in',
            '// THIRD_PARTY.md.', '//'] + ['// ' + l if l else '//' for l in notice.split('\n')]
@@ -745,15 +745,15 @@ def c_header_iq1():
 
 
 def c_header_iq2s():
-    """kernels/iq2s_grid.h: IQ2_S's grid packed for the kernels (kernels/own_quant_iq2s.h): an entry's 8 magnitudes take
+    """kernels/quant_grid_iq2s.h: IQ2_S's grid packed for the kernels (kernels/quant_iq2s.h): an entry's 8 magnitudes take
     only 8, 25 and 43, so each is a 2-bit code (0, 1, 2; weight k at bits 2k), an entry 16 bits, two entries per word
     (entry 2 w in word w's low half): 2 KB, the size of IQ3_S's grid, where bytes would be 8 KB of the workgroup's LDS.
-    Regenerate: python -I -c "from caminus import iq_tables; print(iq_tables.c_header_iq2s(), end='')" > kernels/iq2s_grid.h"""
+    Regenerate: python -I -c "from caminus import iq_tables; print(iq_tables.c_header_iq2s(), end='')" > kernels/quant_grid_iq2s.h"""
     notice = __doc__[__doc__.index('MIT License'):]
     code = {8: 0, 25: 1, 43: 2}
     ent = [sum(code[int(m)] << (2 * k) for k, m in enumerate(e)) for e in GRID_IQ2_S]
     w = [ent[2 * i] | (ent[2 * i + 1] << 16) for i in range(len(ent) // 2)]
-    out = ['// The grid of GGUF\'s IQ2_S block format for the kernels (kernels/own_quant_iq2s.h), packed: entry e (8 weights)',
+    out = ['// The grid of GGUF\'s IQ2_S block format for the kernels (kernels/quant_iq2s.h), packed: entry e (8 weights)',
            '// is 16 bits, weight k\'s magnitude a 2-bit code at bits 2k (0: 8, 1: 25, 2: 43), entries 2 w and 2 w + 1 in word',
            '// w (low, high half). ggml\'s data (llama.cpp, ggml/src/ggml-common.h: iq2s_grid). Generated from',
            '// python/caminus/iq_tables.py (c_header_iq2s); do not edit. Listed in THIRD_PARTY.md.', '//'] + \

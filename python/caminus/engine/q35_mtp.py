@@ -1,5 +1,5 @@
 """The dense qwen35 line's multi-token-prediction drafter (Swift 1.5: blk.<n_layer>, all Q4_0) on the drafter module
-(kernels/k3_q35_swift_mtp.hip), beside a Dense35Own trunk on the same card.
+(kernels/dec_q35_swift_mtp.hip), beside a Dense35Own trunk on the same card.
 
 The block (llama.cpp's pairing, src/models/qwen35.cpp): MTP position j reads the trunk's normed final hidden state of
 position j - 1 (h_{j-1}: output_norm of the last block's residual, Dense35Own's buf['h'] / Dense35Verify's buf['h'] rows)
@@ -31,8 +31,8 @@ from .own_layout import q4_0_planes, q6k_planes
 from ..device import capacity
 from .q35_dense import attn_part_elems
 
-MODULE = 'k3_q35_swift_mtp'
-MODULE_TCAP = 'k3_q35_tcap_mtp'   # (ThinkingCap's: its block is all Q6_K, its head Q8_0, its embedding IQ2_S)
+MODULE = 'dec_q35_swift_mtp'
+MODULE_TCAP = 'dec_q35_tcap_mtp'   # (ThinkingCap's: its block is all Q6_K, its head Q8_0, its embedding IQ2_S)
 MAX_T = 4
 WINDOW = 2048        # the block KV rows below the newest a checkpoint keeps (window_state; the layout's W)
 NEXTN = ('nextn.eh_proj', 'attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate', 'ffn_up', 'ffn_down')
@@ -91,7 +91,7 @@ class Mtp35:
 
     def __init__(self, eng, k=3, module=None, per_wgp=None, vram_check=True, window=None):
         """eng: a Dense35Own (its card, max_ctx, head and embedding): Swift 1.5 (block Q4_0, head Q6_K, embedding Q4_K:
-        k3_q35_swift_mtp) or ThinkingCap (block Q6_K, head Q8_0, embedding IQ2_S: k3_q35_tcap_mtp); k: drafts per round
+        dec_q35_swift_mtp) or ThinkingCap (block Q6_K, head Q8_0, embedding IQ2_S: dec_q35_tcap_mtp); k: drafts per round
         (1 .. 4)"""
         gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: block Q6_K, head Q4_K, embedding IQ2_S)
         if module is None: module = k3.Q35RM_MODULES[0] if gsq else MODULE_TCAP if eng.tcap else MODULE
@@ -222,7 +222,7 @@ class Mtp35:
         q_ = mv(W['q'], h16, qf, n1)
         qd = E.qk_nr(qf, 2 * hd, nh, hd, N['qn'], pos, qo, e.nrot, e.theta_scale, e.eps, dep=q_)
         a_ = E.also(E.attn_dec(qo, self.cache, pos, att, nh, nkv, hd, 1.0 / np.sqrt(hd), dep=ap, max_cells=self.rows,
-                               part=self.part), qd)   # (the split pair: kernels/k3_attn_split.h; one record buffer for every tape)
+                               part=self.part), qd)   # (the split pair: kernels/ops_attn_split.h; one record buffer for every tape)
         g_ = E.gate_mul16(att, qf, 2 * hd, hd, gat16, hd, dep=a_)
         o_ = mv(W['o'], gat16, blk, g_)
         n2 = E.own_add_rms16(x, N['pn'], h, h16, e.eps, d=blk, slots=1, dep=o_, tokens=T)

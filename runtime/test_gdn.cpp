@@ -24,7 +24,7 @@ int main(int argc, char ** argv) {
     TensorFile W, G; W.load(dir + "/weights", arena); G.load(dir + "/golden", arena);
     hipStream_t s; HIP_CHECK(hipStreamCreate(&s));
     rocblas_handle blas; BLAS_CHECK(rocblas_create_handle(&blas)); BLAS_CHECK(rocblas_set_stream(blas, s));
-    Module actq, core; actq.load("actq"); core.load("core");
+    Module actq, core; actq.load("train_actq"); core.load("train_core");
     TritonManifest tri; tri.load(root_dir() + "/build/triton");
     if (tri.launches.size() != 10) { fprintf(stderr, "expected 10 Triton launches, got %zu\n", tri.launches.size()); return 1; }
     const auto & L = tri.launches;

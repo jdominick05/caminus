@@ -32,7 +32,7 @@ Placement: every drafter weight on the XT (card 1) except the head, whose shards
 remote inject's weights. Launch kinds: 'step' (accept + inject + draft), 'fused' (inject + draft at pos_i + F, the generic
 loop), 'draft', 'inject'; each an XT launch and (except a local 'inject') an XTX launch. Segments are claimed in tape
 order, so the accept and the draft's first ops come before the inject's matvecs.
-The code object kernels/k3_gguf_draft.hip holds only the drafter's ops (the trunk-only ops are compiled out: k3.DRAFT_OPS).
+The code object kernels/dec_q4x_dflash.hip holds only the drafter's ops (the trunk-only ops are compiled out: k3.DRAFT_OPS).
 KV: a ring of `ring` positions of f16 K / V per layer, a fixed capacity.dflash_ring(window, T) = 4096 rows whatever max_pos
 (before impl:dflash-ring: the power of two >= max(4096, max_pos), 5,120 MiB at 262,144): logical position p in row p &
 mask, rows rewritten by position, so a rejected draft costs nothing (its rows are re-injected / overwritten by the next
@@ -65,10 +65,10 @@ from gguf import GGUFReader                      # (caminus.engine.flashnext put
 
 from .. import config as _config   # noqa: E402
 DRAFTER = _config.dflash()        # the DFlash2 Q8_0 GGUF: CAMINUS_DFLASH / config.toml, else under the model directory
-MODULE = os.environ.get('K3_DRAFT_MODULE', 'k3_gguf_draft')   # (k3_gguf_draft_trace: the K3_TRACE measurement build)
+MODULE = os.environ.get('K3_DRAFT_MODULE', 'dec_q4x_dflash')   # (dec_q4x_dflash_trace: the K3_TRACE measurement build)
 from ..device.capacity import QSA_EXACT   # noqa: E402  (2051)
 from ..device import capacity   # noqa: E402
-CHUNK = 4096            # = DF_CHUNK in kernels/k3_draft_ops.h (OP_DF_TOPK's scan)
+CHUNK = 4096            # = DF_CHUNK in kernels/ops_q4x_dflash.h (OP_DF_TOPK's scan)
 MERGE_MAX = 640         # OP_DF_TOPK merge: pairs per row held in LDS
 
 
@@ -242,7 +242,7 @@ def df_argmax_scan(E, logits, rows_c, out, id_off, dep=-1):
 
 def df_accept(E, blk, rec, mode, vocab, cap, pairs=None, nch=0, dep=-1):
     """OP_DF_ACCEPT: mode 0 sets the draft position pos_d = pos_i + F (blk[16] + blk[20]), mode 1 the device accept from
-    both cards' argmax pairs ([2][T][nch]); writes blk[18] (pos_d) / blk[19] (anchor) and rec [T + 4] (kernels/k3_draft_ops.h)"""
+    both cards' argmax pairs ([2][T][nch]); writes blk[18] (pos_d) / blk[19] (anchor) and rec [T + 4] (kernels/ops_q4x_dflash.h)"""
     T = E.T
     assert blk.dtype == torch.int32 and blk.numel() >= 21 + T and rec.dtype == torch.int32 and rec.numel() >= T + 4 and T <= 8
     assert mode in (0, 1) and (mode == 0 or (pairs is not None and pairs.numel() >= 2 * T * nch * 2 and nch >= 1))
@@ -510,10 +510,10 @@ class DFlashK3:
         self.slots = {} if self.solo else {c: Slots(self.devs[c], self.N_EX, npl) for c in (0, 1)}
 
     # -- tapes -------------------------------------------------------------------------------------------------------
-    # llama.cpp's own norm layouts (kernels/k3_draft_ops.h op_rms_mul_ll / op_qk_nr_ll; Seg.aux = the expression variant)
+    # llama.cpp's own norm layouts (kernels/ops_q4x_dflash.h op_rms_mul_ll / op_qk_nr_ll; Seg.aux = the expression variant)
     RMS_VAR, QK_VAR = 2, 2   # bitwise llama.cpp's dumps (df_replay.py ops): the fma chain from x x; the fused rms_norm_mul_rope rotation
     FUSE_QKV, FUSE_RING, FUSE_ATTQ, FUSE_MVCONV = 1, 1, 1, 1   # tape fusions (off: the separate segments, the same bits)
-    ATTN_SPLIT = 1   # the attention as the split partial pass + combine (kernels/k3_draft_ops.h op_attn_split; 0: op_attn_dec_df128)
+    ATTN_SPLIT = 1   # the attention as the split partial pass + combine (kernels/ops_q4x_dflash.h op_attn_split; 0: op_attn_dec_df128)
     RPT_FFN, RPT_D, RPT_HEAD = 8, 8, 32   # rows per task: gate / up, the 2560- / 6144-row matvecs, the head shards (measured on the XT)
     HEAD_SHIFT = int(os.environ.get('DF_HEAD_SHIFT', 24576))   # rows of the XT's head shard the XTX computes from a copy (6 chunks)
 

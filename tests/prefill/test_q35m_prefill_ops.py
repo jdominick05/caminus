@@ -1,21 +1,21 @@
-"""G1 of the qwen35moe line's own prefill (caminus.prefill.q35moe, kernels/q35m_prefill.hip): the ops it adds to the dense
+"""G1 of the qwen35moe line's own prefill (caminus.prefill.q35moe, kernels/pf_q35m.hip): the ops it adds to the dense
 line's (those are tests/prefill/test_q35_prefill_ops.py's), over a chunk's rows, against Qwen3.6-35B-A3B's own weights:
 
-  router     q35mp_router_sh == the decode module's OP_ROUTER (k3_q35_moe: Engine.router_shexp), BITWISE: ids [8] and
+  router     q35mp_router_sh == the decode module's OP_ROUTER (dec_q35m: Engine.router_shexp), BITWISE: ids [8] and
              weights [9] (the gated shared expert's in slot 8), one token per pass; the real router and shexp gate of a block
              on random h, plus rows with a tie and a logit spread past fp32's exp range
   norm       q3p_add_rms16 over the 9 weighted slots == OP_OWN_ADD_RMS16 (Engine.own_add_rms16, slots 9, w), BITWISE
   embedding  q35mp_emb_bf16 == OP_OWN_EMB on the BF16 table (Engine.own_emb), BITWISE
-  yarn rope  pf_qk_nr of prefill_attn_q35_yarn (PF_QK_YARN) == OP_QK_NR's YaRN form on k3_q35_moe (the same table and
+  yarn rope  pf_qk_nr of pf_gg_attn_q35m_yarn (PF_QK_YARN) == OP_QK_NR's YaRN form on dec_q35m (the same table and
              magnitude scale: engine.q35_moe.yarn_table, x4), BITWISE, k and q heads at positions past the native window
-  kv q8      q35p_kv_append_q8 (the Q8 KV object, kernels/q35m_prefill_kvq8.hip) == OP_KV_APPEND on the Q8 decode module
-             (k3_q35_moe_kvq8), BITWISE: a chunk's rows of rotated-looking fp32 K / V (an all-zero block among them) at a
+  kv q8      q35p_kv_append_q8 (the Q8 KV object, kernels/pf_q35m_kvq8.hip) == OP_KV_APPEND on the Q8 decode module
+             (dec_q35m_kvq8), BITWISE: a chunk's rows of rotated-looking fp32 K / V (an all-zero block among them) at a
              position offset; a non-finite value refuses its block (error bit 2), a row past the cache sets bit 1
   experts    q35mp_mm_q2_0 grouped by q3p_group's Q3P_GROUP_Y9 form (gate K 2048 and down K 512 of a block's experts): every (token, slot)
              row against float64 of the exact weights (the blocks decoded on the host) and the fp16 inputs: max |error|
              within 1e-4 of the row's rms (fp32 sums; a layout or scatter bug is O(1)); the pairs' rows land where
              group9's three indices say (yp, y9), and an id out of range sets the routing flag
-  wide       the wide tiles (kernels/q35m_prefill_mm.hip, what Ops serves) against the narrow q35mp_mm_q2_0
+  wide       the wide tiles (kernels/pf_q35m_mm.hip, what Ops serves) against the narrow q35mp_mm_q2_0
              (Ops(wide=False)), BITWISE: gate and down, and the fused gate | up (q35mp_mm_q2_0_gu) against gate, up and
              q3p_swiglu; on the 37-token routing (partial items only) and on 150 tokens: 4 experts with full 64-pair items,
              4 with 5, 20, 40 and 60 pairs (partial items of 1, 2, 3 and 4 token tiles)
@@ -52,7 +52,7 @@ def same(name, a, b):
 
 def q2_0_rows(raw, R, K):
     """float64 [R, K] of Q2_0 rows (18-byte blocks: fp16 d, 16 code bytes; value j = bits 2 (j % 4) of byte j / 4,
-    w = d (q - 1)): kernels/own_quant_q2_0.h's format, decoded exactly"""
+    w = d (q - 1)): kernels/quant_q2_0.h's format, decoded exactly"""
     b = np.frombuffer(raw, dtype=np.uint8).reshape(R, K // 64, 18)
     d = b[:, :, :2].copy().view(np.float16).astype(np.float64)[:, :, 0]
     c = b[:, :, 2:]
@@ -82,7 +82,7 @@ def main():
     rng = np.random.default_rng(11)
     put = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(dev)
     z = lambda *s, dt=torch.float32: torch.zeros(*s, dtype=dt, device=dev)
-    MOD = 'k3_q35_moe'
+    MOD = 'dec_q35m'
     il = 0
 
     # ---- router + the gated shared weight ---------------------------------------------------------------------------------
@@ -163,12 +163,12 @@ def main():
         for t in range(TR):
             x1.copy_(xr[t * heads * hs:(t + 1) * heads * hs]); pr.fill_(P0 + t); Er.run(); o_dec[t].copy_(o1)
         torch.cuda.synchronize(dev)
-        A = Attn(dev, name='prefill_attn_q35_yarn'); o_pf = z(TR * heads * hd)
+        A = Attn(dev, name='pf_gg_attn_q35m_yarn'); o_pf = z(TR * heads * hd)
         A.qk_nr(xr, hs, heads, hd, kn, nrot, ts, eps, P0, o_pf, TR, yarn=yy); torch.cuda.synchronize(dev)
         same(f'yarn rope: {what}, {TR} rows at positions {P0} ..', o_pf, o_dec)
         del Er, A
     try:
-        Attn(dev, name='prefill_attn_q35').qk_nr(xr, hd, 1, hd, kn, nrot, ts, eps, 0, o_pf, 1, yarn=yy); refused = False
+        Attn(dev, name='pf_gg_attn_q35m').qk_nr(xr, hd, 1, hd, kn, nrot, ts, eps, 0, o_pf, 1, yarn=yy); refused = False
     except ValueError: refused = True
     check(refused, 'yarn rope: the native object refuses a YaRN table (no PF_QK_YARN form)')
 

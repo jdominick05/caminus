@@ -10,7 +10,7 @@ check fails (exit 1, RESULT FAIL) when
   directory: the comparison would have proved nothing);
 - an object is gone (unless --allow-missing);
 - the persistent kernel (--kernel, default k3_run) of a changed or new object is over the register budget (the cap of the
-  workgroups per WGP the object declares, kernels/k3.hip K3_PER_WGP, else --max-vgprs), holds less LDS than that count needs,
+  workgroups per WGP the object declares, kernels/dec_core.hip K3_PER_WGP, else --max-vgprs), holds less LDS than that count needs,
   spills a VGPR, or spills more SGPRs than before (unless --allow-sgpr-spill-up, with the measured cost in the pull
   request). The objects in EXEMPT may sit outside the budget up to their recorded counts, never past them. Unchanged objects are listed when they are outside the budget, never judged: this change did not build them.
 
@@ -33,12 +33,12 @@ WGP_LDS = 128 * 1024   # (RDNA3: a WGP's LDS, shared by its workgroups)
 # (AGENTS.md, "Register budget exemptions"; issue #127). A changed exempt object passes at or under these counts and fails
 # past them, so an exemption never grows silently; every other object is held to the budget.
 EXEMPT = {
-    'k3': (109, 0, 'the old monolithic module: development and tests only, not in the installed runtime set'),
-    'k3_trace': (110, 0, 'k3 with the trace ops: development only'),
-    'k3_u16': (173, 0, 'k3 with 16-bit ids: development only'),
-    'k3_gguf_gsq_mt': (96, 1, 'the Coder\'s decode module since 0.1.0: one spilled VGPR (160 B private segment), measured in its benchmarks'),
-    'k3_gguf_gsq_mt_trace': (96, 1, 'the Coder\'s module with the trace ops: development only'),
-    'k3_gguf_gsq_mtp_mt': (96, 1, 'the Coder\'s decode module with the drafter taps since 0.1.0: one spilled VGPR, measured in its benchmarks'),
+    'dec_core': (109, 0, 'the old monolithic module: development and tests only, not in the installed runtime set'),
+    'dec_core_trace': (110, 0, 'dec_core with the trace ops: development only'),
+    'dec_core_u16': (173, 0, 'dec_core with 16-bit ids: development only'),
+    'dec_q4x_gsq_ver': (96, 1, 'the Coder\'s decode module since 0.1.0: one spilled VGPR (160 B private segment), measured in its benchmarks'),
+    'dec_q4x_gsq_ver_trace': (96, 1, 'the Coder\'s module with the trace ops: development only'),
+    'dec_q4x_gsq_mtp_ver': (96, 1, 'the Coder\'s decode module with the drafter taps since 0.1.0: one spilled VGPR, measured in its benchmarks'),
 }
 
 
@@ -106,7 +106,7 @@ def kernels(note):
 
 
 def resident_per_wgp(buf):
-    """the int symbol k3_resident_per_wgp (kernels/k3.hip, from K3_PER_WGP) of an ELF64 code object, or None"""
+    """the int symbol k3_resident_per_wgp (kernels/dec_core.hip, from K3_PER_WGP) of an ELF64 code object, or None"""
     shoff, = struct.unpack_from('<Q', buf, 0x28)
     shentsize, shnum, _ = struct.unpack_from('<HHH', buf, 0x3A)
     hdr = [struct.unpack_from('<IIQQQQIIQQ', buf, shoff + i * shentsize) for i in range(shnum)]
@@ -123,7 +123,7 @@ def resident_per_wgp(buf):
 
 
 def vgpr_cap(per_wgp):
-    """kernels/k3.hip's VGPR cap for K3_PER_WGP workgroups (of 256 threads) per WGP"""
+    """kernels/dec_core.hip's VGPR cap for K3_PER_WGP workgroups (of 256 threads) per WGP"""
     return 1536 // (2 * per_wgp) // 24 * 24
 
 

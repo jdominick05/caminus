@@ -1,13 +1,13 @@
 """Where a Qwen3-30B-A3B decode token's time goes in Q3MoEOne (engine/q3moe_one.py), from K3_TRACE timestamps (module
-k3_q3m_lean_trace, the decode tape's module): per segment, the hop (its dependencies' last publish -> its first workgroup past the wait) and the
+dec_q3m_trace, the decode tape's module): per segment, the hop (its dependencies' last publish -> its first workgroup past the wait) and the
 span (first workgroup past the wait -> its last publish); the critical path (walked back through each segment's later
 dependency) summed per op kind; medians over --tokens traced tokens after --warm untraced ones. Also the host's view:
 step() wall time against the launch's GPU time (events) on the plain module.
   tools/guard.sh LOG 900 python -I benchmarks/q3moe_trace.py GGUF [--warm 8] [--tokens 10]
 --engine dense35: the same for the dense qwen35 line's Dense35Own (engine/q35_dense.py; Swift 1.5, module
-k3_q35_swift_trace): per-stage hop and span in Caminus's own persistent engine, the stage cost a model is sized on.
+dec_q35_swift_trace): per-stage hop and span in Caminus's own persistent engine, the stage cost a model is sized on.
 --engine q35moe: the same for the qwen35moe line's Moe35Own (engine/q35_moe.py; Qwen3.6-35B-A3B, module
-k3_q35_moe_kvq8_trace: its Q8 KV tape; the segments carry the tensor names the engine built the tape with).
+dec_q35m_kvq8_trace: its Q8 KV tape; the segments carry the tensor names the engine built the tape with).
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -25,8 +25,8 @@ ap.add_argument('--modules', nargs='+', default=None, help='one engine per run: 
                                                            'engine\'s _trace module)')
 ap.add_argument('--engine', choices=('q3moe', 'dense35', 'q35moe'), default='q3moe')
 A = ap.parse_args()
-if A.modules is None: A.modules = ['k3_q35_swift_trace' if A.engine == 'dense35' else
-                                   'k3_q35_moe_kvq8_trace' if A.engine == 'q35moe' else 'k3_q3m_lean_trace']
+if A.modules is None: A.modules = ['dec_q35_swift_trace' if A.engine == 'dense35' else
+                                   'dec_q35m_kvq8_trace' if A.engine == 'q35moe' else 'dec_q3m_trace']
 ENG = {'q3moe': Q3MoEOne, 'dense35': Dense35Own, 'q35moe': Moe35Own}[A.engine]
 KW = {'q35moe': dict(q8=True)}.get(A.engine, {})   # (the qwen35moe trace and plain modules are its Q8 KV objects)
 OPN = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int)}

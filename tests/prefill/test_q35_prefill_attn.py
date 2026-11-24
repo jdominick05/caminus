@@ -1,11 +1,11 @@
 """The own prefill's tiled attention, on random q and cache rows, no model file. Kernels (--kernel, default all):
-  dense   kernels/q35_prefill.hip q35p_attn_wm through caminus.prefill.q35own.Ops.attn_wm (the dense line: F16 KV)
-  moe     kernels/q35m_prefill.hip q35mp_attn through caminus.prefill.q35moe.Ops.attn_wm (Qwen3.6-35B-A3B, F16 KV)
-  moe-q8  q35mp_attn_q8 from the Q8 object (kernels/q35m_prefill_kvq8.hip), over Q8_0 rows (ref_kv's encode of random
+  dense   kernels/pf_q35_swift.hip q35p_attn_wm through caminus.prefill.q35own.Ops.attn_wm (the dense line: F16 KV)
+  moe     kernels/pf_q35m.hip q35mp_attn through caminus.prefill.q35moe.Ops.attn_wm (Qwen3.6-35B-A3B, F16 KV)
+  moe-q8  q35mp_attn_q8 from the Q8 object (kernels/pf_q35m_kvq8.hip), over Q8_0 rows (ref_kv's encode of random
           rows; the reference reads the decoded values)
-  q3m     kernels/q3m_prefill.hip q3mp_attn through caminus.prefill.q3m_ops.Ops.attn (Qwen3-30B-A3B: head dim 128, fp16 q
-          and out, in the prefill driver's launch splits; kernels/prefill_attn_g8.h, the 35B kernel's source)
-  q3m-q8  q3mp_attn_q8 from kernels/q3m_prefill_kvq8.hip over Q8_0 rows
+  q3m     kernels/pf_q3m.hip q3mp_attn through caminus.prefill.q3m_ops.Ops.attn (Qwen3-30B-A3B: head dim 128, fp16 q
+          and out, in the prefill driver's launch splits; kernels/pf_attn_g8.h, the 35B kernel's source)
+  q3m-q8  q3mp_attn_q8 from kernels/pf_q3m_kvq8.hip over Q8_0 rows
 Each runs:
   - against float64 causal attention (the q rounded to fp16 as the kernel reads it): max / mean |difference| of the
     reference's rms, at chunks from position 0, past the 32-position staging tiles, from an odd position (the first
@@ -275,7 +275,7 @@ def suite(name):
         Od = q35own.Ops(dev) if name in ('moe', 'moe-q8') else None
         c16 = C.f16() if Od is not None else None
         # the 30B's previous kernel: Q3P_ATTN_OLD's q3p_attn / q3p_attn_q8, kept (never launched) in these objects
-        old3 = getattr(_hip.Module('q35m_prefill_kvq8' if q8 else 'q35_prefill'), 'q3p_attn_q8' if q8 else 'q3p_attn') if q3 else None
+        old3 = getattr(_hip.Module('pf_q35m_kvq8' if q8 else 'pf_q35_swift'), 'q3p_attn_q8' if q8 else 'q3p_attn') if q3 else None
         slow = 0.0
         for P0 in (0, 8192, 30720):
             fl = 4.0 * N * (P0 + N / 2) * H * D

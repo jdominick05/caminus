@@ -1,5 +1,5 @@
-"""The row-scale study's matvec tile inside K3 (OP_OWN_MV on module k3_q3m_rs4 / k3_q3m_rs2: fixed-width codes with one
-scale per row, docs/dev/row-scale-study.md) against its standalone kernels (own_mv_rs) and float64, on a file's real
+"""The row-scale study's matvec tile inside K3 (OP_OWN_MV on module dec_q3m_rs4 / dec_q3m_rs2: fixed-width codes with one
+scale per row, docs/dev/row-scale-study.md) against its standalone kernels (bench_own_mv_rs) and float64, on a file's real
 expert tensors (a file whose experts are Q4_0 or Q2_0 with one scale per row: tools/eval/requant_rows.py --scale row):
   host    the engine's refusals, no launch: a row-scale format on the shipped module and on the other width's module;
           a row-scale segment without its scales, scales on another format
@@ -34,7 +34,7 @@ CONT = F.T['blk.0.ffn_gate_exps.weight'].type
 if CONT not in RS_CONT: sys.exit(f'{A.gguf}: the experts are {CONT} ({sorted(RS_CONT)} with one scale per row needed)')
 BITS, BV, BS = RS_CONT[CONT]
 FMT = f'RS{BITS}'; MOD = next(m for m, f in k3.Q3M_RS_MODULES.items() if f == FMT)
-OTHER = next(m for m, f in k3.Q3M_RS_MODULES.items() if f != FMT); LEAN = 'k3_q3m_lean'
+OTHER = next(m for m, f in k3.Q3M_RS_MODULES.items() if f != FMT); LEAN = 'dec_q3m'
 ok_all = True
 rng = np.random.default_rng(0)
 
@@ -76,7 +76,7 @@ check(raises(lambda: mv0(k3.Engine(module=MOD, grid=8), FMT, scales=zs)) is None
       raises(lambda: mv0(k3.Engine(module=MOD, grid=8), 'Q4_K')) is None, f'host: {FMT} with scales and Q4_K are accepted on {MOD}')
 
 # ---- device: each case's buffers, its standalone sums and their error against float64 ----------------------------------------
-OWN = Module('own_mv_rs')
+OWN = Module('bench_own_mv_rs')
 C = []
 worst_mean = worst_max = 0.0
 for (role, il), t in zip(cases, T0):
@@ -92,7 +92,7 @@ for (role, il), t in zip(cases, T0):
     v = rng.standard_t(3, (nx, K)); v[:, rng.choice(K, 8, replace=False)] *= 20; v = v / np.sqrt((v ** 2).mean())
     x16 = torch.tensor(v, dtype=torch.float16, device=dev).reshape(-1)
     ref = torch.full((KU * rows,), float('nan'), device=dev)
-    kern = getattr(OWN, f'own_mv_rs{BITS}_1rt_k{K}')
+    kern = getattr(OWN, f'bench_own_mv_rs{BITS}_1rt_k{K}')
     errs = []
     for s in range(KU):
         e0 = int(ids_np[s])
@@ -134,7 +134,7 @@ for i, c in enumerate(C):
 ys = [r[1] for r in runs]
 same = all(torch.equal(yy.view(torch.int16), ys[0].view(torch.int16)) for yy in ys) and not torch.isnan(ys[0]).any()
 uref = torch.zeros(KU * u['rows'], device=dev)                  # the up tensor's standalone sums on the GATE's slots and input
-kern = getattr(OWN, f"own_mv_rs{BITS}_1rt_k{u['K']}")
+kern = getattr(OWN, f"bench_own_mv_rs{BITS}_1rt_k{u['K']}")
 for s in range(KU):
     e0 = int(g['ids_np'][s]); rows, cb = u['rows'], u['cb']
     Ws = torch.from_numpy(np.ascontiguousarray(u['codes'][e0 * rows * cb:(e0 + 1) * rows * cb])).to(dev)

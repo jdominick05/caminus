@@ -1,4 +1,4 @@
-"""K3 engine skeleton (kernels/k3.hip): (1) matvec segments bitwise equal to gemm_tn_iu4g on every S1 shape; (2) a
+"""K3 engine skeleton (kernels/dec_core.hip): (1) matvec segments bitwise equal to gemm_tn_iu4g on every S1 shape; (2) a
 400-segment dependency chain and a dependent matvec chain at 1x / 3x / 5x oversubscribed grids: bitwise, status never
 set; (3) speed of a synthetic S1-shaped token tape (12 blocks x [block projection -> o+down stage] + the head: 25
 dependent segments) in us per launch, vs the cost model.

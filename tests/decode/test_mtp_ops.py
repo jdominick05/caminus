@@ -1,7 +1,7 @@
-"""The MTP module pair's device paths (kernels/k3_gguf_gsq_mtp*.hip, python/caminus/decode/mtp.py), on one card:
+"""The MTP module pair's device paths (kernels/dec_q4x_gsq_mtp*.hip, python/caminus/decode/mtp.py), on one card:
   (a) bf16_mv(ntok=R): R rows through one segment (the MTP eh_proj: 4 hc streams per token) == R one-row segments, bitwise,
       in the one-token module (T = 1 engine) and the multi-token one (T = 4 engine, team kept by build()); the trunk's
-      k3_gguf_gsq gives the same rows bitwise for the plain segments
+      dec_q4x_gsq gives the same rows bitwise for the plain segments
   (b) bf16_mv(swiglu_mul=m) (Seg.work 2: LDS stage silu(x) * m): with m = 1 bitwise the silu_scale = 1 path (silu(fma(1, x, 0))
       = silu(x)), and against a float64 reference of W . (x / (1 + exp(-x)) * m) within 1e-5 relative
   (c) the trunk modules refuse swiglu_mul
@@ -34,7 +34,7 @@ def chk(name, ok):
 
 # (a) eh_proj shapes: W [2560, 5120], R = 4 (T = 1) and 16 (T = 4)
 W, Wf = bf16(2560, 5120)
-for module, T in (('k3_gguf_gsq_mtp', 1), ('k3_gguf_gsq_mtp', 4)):
+for module, T in (('dec_q4x_gsq_mtp', 1), ('dec_q4x_gsq_mtp', 4)):
     R = 4 * T
     x = torch.randn(R, 5120, device=dev)
     e = eng(module, T)
@@ -51,16 +51,16 @@ for module, T in (('k3_gguf_gsq_mtp', 1), ('k3_gguf_gsq_mtp', 4)):
     if T == 1:
         x1 = x; o1 = o_all
     else:
-        o_t1 = torch.zeros(R, 2560, device=dev); e1 = eng('k3_gguf_gsq_mtp', 1); e1.bf16_mv(W, 2560, 5120, x, o_t1, ntok=R); e1.build(); e1.run()
+        o_t1 = torch.zeros(R, 2560, device=dev); e1 = eng('dec_q4x_gsq_mtp', 1); e1.bf16_mv(W, 2560, 5120, x, o_t1, ntok=R); e1.build(); e1.run()
         chk('(a) T=4 module rows == T=1 module rows', torch.equal(o_all, o_t1))
-        g = eng('k3_gguf_gsq', 1); o_g = torch.zeros(4, 2560, device=dev)
+        g = eng('dec_q4x_gsq', 1); o_g = torch.zeros(4, 2560, device=dev)
         for r in range(4): g.bf16_mv(W, 2560, 5120, x[r:r + 1], o_g[r:r + 1])
         g.build(); g.run()
-        chk('(a) trunk k3_gguf_gsq one-row segments == MTP module rows', torch.equal(o_g, o_t1[:4]))
+        chk('(a) trunk dec_q4x_gsq one-row segments == MTP module rows', torch.equal(o_g, o_t1[:4]))
 
 # (b) shared-expert down shapes: W [2560, 320] (K 320 per card at a 10 / 10 split)
 W2, W2f = bf16(2560, 320, 0.05)
-for module, T in (('k3_gguf_gsq_mtp', 1), ('k3_gguf_gsq_mtp', 4)):
+for module, T in (('dec_q4x_gsq_mtp', 1), ('dec_q4x_gsq_mtp', 4)):
     x = torch.randn(T, 320, device=dev) * 2; m = torch.randn(T, 320, device=dev)
     one = torch.ones(T, 320, device=dev)
     e = eng(module, T)
@@ -75,8 +75,8 @@ for module, T in (('k3_gguf_gsq_mtp', 1), ('k3_gguf_gsq_mtp', 4)):
     chk(f'(b) {e.module} T={T}: swiglu vs float64 (rel {rel:.2e})', rel < 1e-5)
 
 # (c)
-for module in ('k3_gguf_gsq', 'k3_gguf_gsq_mt'):
-    e = k3.Engine(module=module, T=1 if module == 'k3_gguf_gsq' else 4)
+for module in ('dec_q4x_gsq', 'dec_q4x_gsq_ver'):
+    e = k3.Engine(module=module, T=1 if module == 'dec_q4x_gsq' else 4)
     try:
         e.bf16_mv(W2, 2560, 320, torch.zeros(e.T, 320, device=dev), torch.zeros(e.T, 2560, device=dev), swiglu_mul=torch.zeros(e.T, 320, device=dev))
         chk(f'(c) {e.module} refuses swiglu_mul', False)

@@ -1,4 +1,4 @@
-"""caminus.device.topk on a GPU: the device sampler's candidates on Caminus's own kernel (kernels/own_topk.hip), against an
+"""caminus.device.topk on a GPU: the device sampler's candidates on Caminus's own kernel (kernels/samp_topk.hip), against an
 exact host oracle and against torch.topk / index_select, then its time beside torch's.
 
   tools/guard.sh LOG 600 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/device/test_topk.py [--no-timing]

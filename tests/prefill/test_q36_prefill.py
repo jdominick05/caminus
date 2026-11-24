@@ -1,6 +1,6 @@
 """Qwen3.6-35B-A3B one-card batched prefill (caminus.prefill.q35.Prefill35) gates.
 usage: tools/guard.sh LOG SECS python -I tests/prefill/test_q36_prefill.py GGUF STAGE... [--small] [--refs DIR] [--max-ctx N]
-  ops      G1 (no engine; run it on the XT alone first): each prefill op == K3's decode op (module k3_gguf_q35g, T = 1, one
+  ops      G1 (no engine; run it on the XT alone first): each prefill op == K3's decode op (module dec_q35m_gg, T = 1, one
            token per pass), BITWISE: rms_mul at n_embd 2048; f32_mv (the F32 router logits [256] and shared-expert gate [1]);
            bf16_mv at K 2048 (the BF16 ssm alpha / beta [32]); the top-8 router (ids and weights); the GDN chain (the conv +
            its state, l2, gates, the recurrence, the SiLU output norm; 32 value / 16 key heads, tiled) and its committed
@@ -51,9 +51,9 @@ from caminus.engine import k3   # noqa: E402
 for d in range(torch.cuda.device_count()): torch.cuda.set_per_process_memory_fraction(0.97 if d == 0 else 0.95, d)
 dev = torch.device('cuda:0')
 RES = []
-MOD = 'k3_gguf_q35g'
-SHAPES = dict(q36=dict(mod='k3_gguf_q35g', glue='prefill_glue_q35', attn='prefill_attn_q35', D=2048, H=32, NK=16, nh=16, nkv=2, moe=True),
-              arex=dict(mod='k3_gguf_q35d', glue='prefill_glue_q35d', attn='prefill_attn_q35d', D=5120, H=48, NK=16, nh=24, nkv=4, moe=False))
+MOD = 'dec_q35m_gg'
+SHAPES = dict(q36=dict(mod='dec_q35m_gg', glue='pf_gg_glue_q35m', attn='pf_gg_attn_q35m', D=2048, H=32, NK=16, nh=16, nkv=2, moe=True),
+              arex=dict(mod='dec_q35_arex', glue='pf_gg_glue_q35', attn='pf_gg_attn_q35', D=5120, H=48, NK=16, nh=24, nkv=4, moe=False))
 
 
 def ok(name, cond, info=''):
@@ -103,7 +103,7 @@ def stage_ops():
     rng = np.random.default_rng(7)
     sh = SHAPES[SHAPE]
     D, E, K8 = sh['D'], 256, 8
-    Gl, Gd, A = Glue(dev, module=sh['glue']), Gdn(dev, module='prefill_gdn_q35'), Attn(dev, name=sh['attn'])
+    Gl, Gd, A = Glue(dev, module=sh['glue']), Gdn(dev, module='pf_gg_gdn_q35'), Attn(dev, name=sh['attn'])
     T = 40 if SMALL else 777
     x = rng.standard_normal((T, D)).astype(np.float32) * 0.7; x[3] *= 40.0; x[5] *= 1e-3
     X = put(x)

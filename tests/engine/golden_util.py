@@ -1,6 +1,6 @@
 """Shared helpers of the tests/test_golden_*.py checks (K3 engine vs llama.cpp's own tensors from tools/gg_golden), for
-both Flash-Next models: REAP-308 (Q8_0 hc, F32 router, module k3_gguf) and the GSQ-RCO Coder (BF16 hc / router / alpha /
-beta / PLE key-value, the K-quant and IQ formats of docs/specs/spec-gsq-port.md, module k3_gguf_gsq).
+both Flash-Next models: REAP-308 (Q8_0 hc, F32 router, module dec_q4x_gg) and the GSQ-RCO Coder (BF16 hc / router / alpha /
+beta / PLE key-value, the K-quant and IQ formats of docs/specs/spec-gsq-port.md, module dec_q4x_gsq).
 
 Gate G3 of the GSQ port (spec S4): an op whose kernel reproduces llama.cpp's summation order must be BITWISE equal to
 llama.cpp's tensor when fed llama.cpp's own input; every other op within 1e-6 relative. Bitwise is expected for
@@ -52,7 +52,7 @@ def nrel(a, b):
 
 class Model:
     """the GGUF's tensors (memory-mapped; a split GGUF's first shard holds every tensor the engine reads) and the K3 module
-    its formats need (caminus.engine.flashnext.pick_module: k3_gguf for REAP-308, k3_gguf_gsq for the Coder)"""
+    its formats need (caminus.engine.flashnext.pick_module: dec_q4x_gg for REAP-308, dec_q4x_gsq for the Coder)"""
     def __init__(self, path):
         self.path = path
         self.rd = G.GGUFReader(path, 'r'); self.T = {t.name: t for t in self.rd.tensors}

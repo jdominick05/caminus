@@ -1,4 +1,4 @@
-"""One-card smoke of the two-card verify modules (kernels/k3_q35_{swift,tcap}_tp_ver.hip: K3_TP + K3_Q3M_VER in one code
+"""One-card smoke of the two-card verify modules (kernels/dec_q35_{swift,tcap}_tp_ver.hip: K3_TP + K3_Q3M_VER in one code
 object) before any two-card run: on ONE card (HIP_VISIBLE_DEVICES=<the non-display card>), Dense35Verify with its engine's
 module swapped to the two-card verify build, plus one OP_XCHG segment in local_only mode with a T * D payload, over the tiny
 synthetic models. The passes' logits are the one-card decode steps' bit for bit (the T-token forms in the combined code

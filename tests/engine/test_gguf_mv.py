@@ -1,4 +1,4 @@
-"""GGUF formats in the K3 engine (kernels/k3_gguf.hip): on real tensors of the Flash-Next REAP-308-UI cut, the q8_1
+"""GGUF formats in the K3 engine (kernels/dec_q4x_gg.hip): on real tensors of the Flash-Next REAP-308-UI cut, the q8_1
 quantizer matches a numpy port of llama.cpp's, and each format's matvec (llama.cpp's own vec_dot) matches a float64
 reference built from gguf-py's dequantizer and the same q8_1 activations, within fp32 summation-order error.
   HIP_VISIBLE_DEVICES=0 python tests/engine/test_gguf_mv.py [model.gguf]"""

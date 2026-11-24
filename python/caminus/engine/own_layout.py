@@ -4,24 +4,24 @@ loads (docs/specs/spec-own-quant.md). Each keeps the matrix's byte count, so a t
   q6k_planes(raw, rows, K)   Q6_K (210-byte blocks: ql[128] | qh[64] | scales[16] | d) -> three planes over the whole
                              matrix: A = per row, per block, ql | qh (192 B); B = the 16 int8 scales, reordered [n][h][qd]
                              (byte n * 8 + 4 h + qd = scale n * 8 + h + 2 qd: a kernel lane's four scales are contiguous);
-                             C = d (fp16). Read by kernels/own_quant.h own_rows_q6k_planes.
+                             C = d (fp16). Read by kernels/quant.h own_rows_q6k_planes.
   q6k_from_planes            the inverse (tests).
   iq_records(raw, rows, K, fmt)   IQ3_XXS / IQ3_S / IQ2_XXS (98 / 110 / 66-byte blocks) -> plane A: a record per unit of 32
                              weights (12 / 13 / 8 B: its index bytes, sign bits and, IQ3_S, its qh byte); plane B: a header
                              per block (d; IQ3_S: d | the four scale bytes; IQ2_S: a 10-byte record, d); then IQ_PAD zero bytes (a kernel's 16- and
-                             8-byte loads run past the last record and header). Read by kernels/own_quant_iq.h
+                             8-byte loads run past the last record and header). Read by kernels/quant_iq.h
                              own_rows_iqg_1rt.
   iq_from_records            the inverse (tests).
   q4_0_planes(raw, rows, K)  Q4_0 (18-byte blocks: d | 16 code bytes; 2-byte aligned) -> plane A = every block's 16 code
                              bytes, row-major (one aligned 16-byte load per block), plane B = every block's d (fp16).
-                             Read by kernels/own_quant_q4_0.h own_rows_q4_0_1rt.
+                             Read by kernels/quant_q4_0.h own_rows_q4_0_1rt.
   q4_0_from_planes           the inverse (tests).
   rs_planes(raw, rows, K, fmt)    the row-scale study's form (docs/dev/row-scale-study.md): a Q4_0 / Q2_0 tensor whose
                              blocks all repeat their row's scale -> (codes, scales): the codes alone, K * bits / 8 bytes
                              per row (4 bits: Q4_0's 16 code bytes per 32 values as they are; 2 bits: each 16 values
                              as a dword with value 4 i + k at bits 8 k + 2 i), and one fp32 scale per row in an array
                              of its own. Fewer bytes than the container (no repeated scales). Read by
-                             kernels/own_quant_rs.h own_rows_rs_1rt.
+                             kernels/quant_rs.h own_rows_rs_1rt.
   rs_from_planes             the inverse (tests)."""
 import numpy as np
 
@@ -86,7 +86,7 @@ def iq_records(raw, rows, K, fmt):
     elif fmt == 'IQ3_S':
         A[:, :, :8] = b[:, 2:66].reshape(n, 8, 8); A[:, :, 8:12] = b[:, 74:106].reshape(n, 8, 4); A[:, :, 12] = b[:, 66:74]
         B[:, 2:] = b[:, 106:110]
-    elif fmt == 'IQ2_S':   # a unit: its 4 index bytes | 4 sign bytes | qh byte | scale byte (kernels/own_quant_iq2s.h)
+    elif fmt == 'IQ2_S':   # a unit: its 4 index bytes | 4 sign bytes | qh byte | scale byte (kernels/quant_iq2s.h)
         A[:, :, :4] = b[:, 2:34].reshape(n, 8, 4); A[:, :, 4:8] = b[:, 34:66].reshape(n, 8, 4)
         A[:, :, 8] = b[:, 66:74]; A[:, :, 9] = b[:, 74:82]
     elif fmt == 'IQ2_XS':  # a unit: its 4 u16 (9-bit grid index | 7-bit sign code << 9) | its scale byte (two nibbles)
@@ -122,7 +122,7 @@ Q2K_RS, Q2K_HS = 10, 4   # Q2_K records: a unit's 8 code bytes + its 2 scale byt
 
 
 def q2k_records(raw, rows, K):
-    """raw: uint8 [rows * K / 256 * 84] (GGUF Q2_K rows, contiguous) -> uint8, the record layout (kernels/own_quant_q2k.h):
+    """raw: uint8 [rows * K / 256 * 84] (GGUF Q2_K rows, contiguous) -> uint8, the record layout (kernels/quant_q2k.h):
     plane A = a 10-byte record per unit of 32 values (its 32 2-bit codes packed four per byte, value 4 k + j at bits 2 j of
     byte k, then the block's scale bytes 2 ib and 2 ib + 1: scale nibble | min nibble << 4, one per 16 values), plane B = a
     4-byte header per block (d, dmin), then 16 bytes of padding. In the GGUF block a unit's codes are one bit pair of 32
@@ -158,7 +158,7 @@ IQ1M_RS, IQ1M_HS = 8, 2   # IQ1_M records: a unit's 4 index bytes, 2 qh bytes, i
 
 
 def iq1m_records(raw, rows, K):
-    """raw: uint8 [rows * K / 256 * 56] (GGUF IQ1_M rows) -> uint8, the record layout (kernels/own_quant_iq1m.h): plane A
+    """raw: uint8 [rows * K / 256 * 56] (GGUF IQ1_M rows) -> uint8, the record layout (kernels/quant_iq1m.h): plane A
     = an 8-byte record per unit of 32 values (qs[4 ib .. 4 ib + 3], qh[2 ib], qh[2 ib + 1], the unit's two 3-bit scales
     s0 | s1 << 3, a zero byte), plane B = the block's fp16 d (reassembled from the four scale words' top nibbles), then 16
     bytes of padding"""

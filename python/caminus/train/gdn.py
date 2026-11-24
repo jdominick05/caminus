@@ -1,4 +1,4 @@
-# This module and kernels/gdn.hip implement flash-linear-attention's (fla) chunk_gated_delta_rule_fwd_h and _bwd_dhu
+# This module and kernels/train_gdn.hip implement flash-linear-attention's (fla) chunk_gated_delta_rule_fwd_h and _bwd_dhu
 # (fla/ops/common/chunk_delta_h.py, https://github.com/fla-org/flash-linear-attention) for HIP, following its algorithm and
 # operand roundings; fla is distributed under the following license (THIRD_PARTY.md):
 #
@@ -35,7 +35,7 @@ _mod = {}
 
 def _m():
     dev = torch.cuda.current_device()
-    if dev not in _mod: _mod[dev] = Module('gdn')
+    if dev not in _mod: _mod[dev] = Module('train_gdn')
     return _mod[dev]
 
 

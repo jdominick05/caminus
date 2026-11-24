@@ -1,4 +1,4 @@
-"""Gates of the batched prefill's own MoE GEMMs (caminus.prefill.moe, kernels/prefill_moe.hip): the grouping, the fused gate / up +
+"""Gates of the batched prefill's own MoE GEMMs (caminus.prefill.moe, kernels/pf_gg_moe.hip): the grouping, the fused gate / up +
 swiglu + down-input quantization, and the down projection over flat tile lists, against the vendored MMQ path they replace
 (caminus.prefill.mmq: mm_ids_helper, quantize_scatter, mul_mat_id gate / up, pf_swiglu, the per-slot quantize, mul_mat_id down).
 

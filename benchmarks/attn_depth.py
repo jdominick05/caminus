@@ -3,14 +3,14 @@ kv heads, head dim 256), one attention layer alone: a tape of just the attention
 positions (the timing does not depend on the values), T = 1 (decode) and T = 4 (a verify pass).
 
 Arms (the same geometry, our own kernels only):
-  own        the Swift modules' attention (k3_q35_swift; k3_q35_swift_ver for T = 4): the split pair since they run it
-             (kernels/k3_q35_ops.h K3_Q35_ATTN_SPLIT); before that OP_ATTN_DEC, one workgroup per query head walking
-             every position (kernels/k3_own_ops.h own_op_attn_dec, batched loads); f16 cache.
+  own        the Swift modules' attention (dec_q35_swift; dec_q35_swift_ver for T = 4): the split pair since they run it
+             (kernels/ops_q35.h K3_Q35_ATTN_SPLIT); before that OP_ATTN_DEC, one workgroup per query head walking
+             every position (kernels/ops_own.h own_op_attn_dec, batched loads); f16 cache.
   part       the same modules' OP_ATTN_PART alone (the pair's COMB segment dropped from the tape; its records are
              written, not merged): own - part = what the COMB costs
-  split      the split pair OP_ATTN_PART + OP_ATTN_COMB (kernels/k3_attn_split.h, flash decoding: ATTN_SS-position
+  split      the split pair OP_ATTN_PART + OP_ATTN_COMB (kernels/ops_attn_split.h, flash decoding: ATTN_SS-position
              slices, one task per (slice, row, kv head) reads its K/V rows once for the 6 query heads, then a merge per
-             query head) in the AREX-2 modules (k3_gguf_q35d; k3_gguf_q35d_mt for T = 4), f16 and q8_0 caches.
+             query head) in the AREX-2 modules (dec_q35_arex; dec_q35_arex_ver for T = 4), f16 and q8_0 caches.
 Every arm runs on the same grid (--per-wgp; default the dense engine's own, ~200 workgroups). Each row prints the launch median over REPS runs (host events around E.run: one persistent launch, so it includes the
 launch; the 'empty' row is a tape of one no-op segment, the launch floor to subtract), the KV bytes one layer must read
 (T rows reading the cache once) and the time those bytes take at --bw GB/s (default 952: the XTX's measured read peak,
@@ -34,10 +34,10 @@ A = ap.parse_args()
 CTX = [int(v) for v in A.ctx.split(',')]; ARMS = A.arms.split(','); TS = [int(v) for v in A.T.split(',')]
 H, NKV, D = 24, 4, 256
 SCALE = 1.0 / 16.0
-MOD = {('own', 1): 'k3_q35_swift', ('own', 4): 'k3_q35_swift_ver', ('part', 1): 'k3_q35_swift', ('part', 4): 'k3_q35_swift_ver',
-       ('split', 1): 'k3_gguf_q35d', ('split', 4): 'k3_gguf_q35d_mt'}
+MOD = {('own', 1): 'dec_q35_swift', ('own', 4): 'dec_q35_swift_ver', ('part', 1): 'dec_q35_swift', ('part', 4): 'dec_q35_swift_ver',
+       ('split', 1): 'dec_q35_arex', ('split', 4): 'dec_q35_arex_ver'}
 PW = card_per_wgp() if A.per_wgp == 'card' else int(A.per_wgp)
-print(torch.cuda.get_device_name(0), f'| grid {PW} per WGP ({k3.resident_grid("k3_q35_swift", PW)} workgroups) for every arm | geometry {H} q heads / {NKV} kv heads x {D} | floor at {A.bw:.0f} GB/s', flush=True)
+print(torch.cuda.get_device_name(0), f'| grid {PW} per WGP ({k3.resident_grid("dec_q35_swift", PW)} workgroups) for every arm | geometry {H} q heads / {NKV} kv heads x {D} | floor at {A.bw:.0f} GB/s', flush=True)
 
 
 def timed(E, reps):

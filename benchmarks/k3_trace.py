@@ -1,5 +1,5 @@
 """Where a K3 token's time goes: runs the synthetic S1 token tape (12 blocks x [block projection -> o+down stage] + the
-head, 25 dependent matvec segments) on build/k3_trace.hsaco (the engine with K3_TRACE timestamps) and prints, per
+head, 25 dependent matvec segments) on build/dec_core_trace.hsaco (the engine with K3_TRACE timestamps) and prints, per
 segment, the median over 20 launches of: the hop (end of the dependency wait - the dependency's last publish), the first
 task's compute split into activation-code load / dots + P_g to LDS / FMA chain + store, the publish, how many workgroups
 claimed only after the dependency was done (their weights were not prefetched), and the segment's span.
@@ -18,7 +18,7 @@ for blk in range(12):
     N = 5248 if (blk + 1) % 4 == 0 else 7680
     SH += [(N, 896, RA), (896, 2944, RS2)]
 SH.append((24576, 896, RH))
-e = k3.Engine(grid=192, module="k3_trace"); prev = -1
+e = k3.Engine(grid=192, module="dec_core_trace"); prev = -1
 for n, k, rpt in SH:
     w, gs = mats(n, k); a = torch.randint(-8, 8, (k,), device='cuda').to(torch.int8)
     prev = e.matvec(w, gs, a, 0.5, torch.empty(n, device='cuda', dtype=torch.bfloat16), rows_per_task=rpt, dep=prev)

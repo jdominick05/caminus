@@ -2,7 +2,7 @@
 with the layers that need them; checked against a module's capability set (caminus.engine.k3.MODULE_CAPS) and printed as the
 per-op format whitelists a module build takes (spec-gsq-port.md 4b).
 
-  python -I tools/gg_inventory.py MODEL.gguf [--module k3_gguf_gsq] [--tape [--ntok T]] [--json OUT]
+  python -I tools/gg_inventory.py MODEL.gguf [--module dec_q4x_gsq] [--tape [--ntok T]] [--json OUT]
 
 Header mode (default, CPU only): maps every tensor the way python/caminus/engine/flashnext_tp.py's tapes use it. --tape also
 builds the tapes on the GPU (FlashNextTP local_only, tape_only: nothing is launched) and checks that the tapes'
@@ -77,7 +77,7 @@ def main():
         if name in a:
             i = a.index(name); v = f(a[i + 1]); del a[i:i + 2]; return v
         return default
-    module, out_json, ntok = opt('--module', 'k3_gguf_gsq'), opt('--json', None), opt('--ntok', 1, int)
+    module, out_json, ntok = opt('--module', 'dec_q4x_gsq'), opt('--json', None), opt('--ntok', 1, int)
     tape = '--tape' in a
     if tape: a.remove('--tape')
     path = a[0]

@@ -1,7 +1,7 @@
 """What a T-token verify pass of Qwen3-30B-A3B costs (Q3MoEVerify, engine/q3moe_verify.py) against plain decode steps
 (Q3MoEOne) on the same real consecutive tokens (this repository's docs as text) over a prefilled context: ms per pass
 for each T, interleaved with the decode steps over --rounds rounds (the first round is a warm-up), the distinct experts
-per layer, and with --trace the pass's critical path summed per op kind (K3_TRACE timestamps, module k3_q3m_ver_trace).
+per layer, and with --trace the pass's critical path summed per op kind (K3_TRACE timestamps, module dec_q3m_ver_trace).
 With --accept (the measured fraction of passes in which draft 1, 2, 3 is accepted; a draft counts only when every draft
 before it was) it also prints the ms per accepted token for each T: a pass of T tokens checks T - 1 drafts and always
 yields one token of its own.
@@ -47,7 +47,7 @@ tapes = len(WG) * sum(Q3MoEVerify.need_mib(T) for T in Ts) + (Q3MoEVerify.need_m
 eng = Q3MoEOne(A.gguf, max_ctx=min(n_ctx, max(depths) + G + 64), vram_extra_mib=tapes)
 vers = {(T, w): Q3MoEVerify(eng, T, per_wgp=w) for T in Ts for w in WG}   # key: (T, workgroups per WGP or None)
 lab = lambda k: f'T {k[0]}' + (f' @{k[1]}' if k[1] else '')
-vt = Q3MoEVerify(eng, A.trace, module='k3_q3m_ver_trace') if A.trace else None
+vt = Q3MoEVerify(eng, A.trace, module='dec_q3m_ver_trace') if A.trace else None
 own_mib = 8 + (vt.E.grid * len(vt.E.segs) * 8 * 8 / 2 ** 20 if vt else 0)
 capacity.check([eng.dev], [own_mib], f'q3moe_verify: its trace buffer ({own_mib:.0f} MiB)')
 pf = Q3MPrefill(eng, chunk=512)

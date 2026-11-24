@@ -1,0 +1,621 @@
+// The dense qwen35 line's decode ops without llama.cpp's headers (kernels/dec_q35_swift.hip: Swift 1.5 Q4_K_M, a
+// Qwen3.8-27B finetune; python/caminus/engine/q35_dense.py). The K3 core (kernels/dec_core.hip) plus exactly the ops of that
+// engine's tape:
+//   the matvecs      OP_OWN_MV's one-round-trip tiles (Q4_K, Q6_K planes; the feed-forward's gate | up fused when the two
+//                    share a format) and OP_OWN_MV16 below (Q8_0, Q5_K: quant.h's general rows tiles), all on fp16
+//                    activations; OP_F32_MV (the Gated DeltaNet's alpha / beta, F32 [48, 5120])
+//   the glue         OP_OWN_EMB; OP_OWN_ADD_RMS16 at any row length (below: this model's is 5120, the qwen3moe form
+//                    stops at 2048); OP_OWN_SWIGLU16 (a block whose gate and up differ in format)
+//   Gated DeltaNet   OP_GDN_CONV / L2 / GATES / STEP / SAVE and OP_GDN_NORM16: the engine's own ops, lifted from
+//                    kernels/ops_gg.h (which includes ggml-cuda's headers) statement for statement, as
+//                    kernels/ops_q3m.h lifted OP_F32_MV; value head h reads key head h % nk (tiled), the SiLU output gate
+//   attention        OP_QK_NR, OP_KV_APPEND (f16 cache) and the split pair OP_ATTN_PART / COMB (ops_attn_split.h; the MTP
+//                    drafter's module: OP_ATTN_DEC, ops_own.h's batched form), then OP_GATE_MUL16; head dim 256, 6 query heads per kv head, RoPE on the first 64 dims
+// The three ops whose output is fp16 here where the GGUF engine's writes fp32 (+ q8_1 codes) carry numbers of their own:
+// a tape built with the other engine's methods cannot run them by mistake. The wave reductions are quant.h's
+// wave_sum (the xor butterfly, partners 16 .. 1), as everywhere in the own modules.
+#pragma once
+#include <stdint.h>
+
+#define K3_OPS_NO_DISPATCH   // ops_q3m.h's helpers and ops (seg_T, OP_F32_MV, the KV helpers, ops_own.h) without its dispatch
+#include "ops_q3m.h"
+#ifdef K3_Q35_KV_Q8
+#include "ops_q35_kvq8.h"
+#endif
+#ifdef K3_TP   // (the two-card modules dec_q35_*_tp: OP_XCHG, its warm word and claim-time store)
+#include "ops_xchg.h"
+#endif
+
+enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
+#ifdef K3_Q35_ATTN_SPLIT   // (the Swift / ThinkingCap decode, verify and two-card modules; not the MTP drafter's module)
+// decode attention as the split pair (flash decoding) of kernels/ops_attn_split.h, with dec_q35_arex's settings (the same
+// geometry: 6 query heads per kv head, one V pass of 6, 32-cell splits, the parallel merge): one read of a split's K / V
+// rows for its kv head's 6 query heads, as many workgroups as the depth needs. OP_ATTN_DEC (one workgroup per query head
+// walking every position: 26-31x the bandwidth floor at every depth, 64 ms of a token at 32K on the XTX) is not in these
+// modules; caminus.k3.Engine.attn_dec emits the pair on them. Not bitwise OP_ATTN_DEC (another summation order);
+// bitwise dec_q35_arex's pair on the same cache, and the same bits at T = 1 and T = 4.
+#ifndef ATTN_G   // (kernels/dec_q35m.hip: qwen35moe's 8 query heads per kv head; the dense line's 6)
+#define ATTN_G 6
+#endif
+#ifndef ATTN_VH   // (one V pass over every query head: 6 here, 8 in the qwen35moe module)
+#define ATTN_VH 6
+#endif
+#define K3_ATTN_COMB_FAST
+enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
+#include "ops_attn_split.h"
+#endif
+enum { OWN_Q5_K = 5 };   // (the GG_* number of the format, as OWN_Q6_K / OWN_Q4_K / OWN_Q8_0)
+
+__device__ __forceinline__ float q35_silu(float x) { return x / (1.0f + expf(-x)); }
+
+// OP_OWN_MV16: out[r] = W[r] . x for raw GGUF blocks W of N contiguous rows (Seg.work = OWN_Q8_0 / OWN_Q5_K) and an fp16
+// activation buffer x [K] (Seg.a); Seg.y = fp32 out [N]. quant.h's general rows tiles with Act16: a wave takes
+// OWN_R = 4 rows, a task = rows_per_task rows (a multiple of 4), wave w the row groups r0 + 4 w, r0 + 4 (w + 8), ...
+// A row's sum does not depend on the grid or the task size. T = 1; the verify module (K3_Q3M_VER) also takes the T-token
+// form of OP_OWN_MV: Seg.pad1 bits 8 .. 11 = tokens NT, token tk reads x at Seg.a + tk * xs (fp16 values) and writes its
+// rows at Seg.y + tk * ys (xs / ys: the low / high half of Seg.gs); each token's rows are the one-token tile's statements
+// (the same bits), NT <= OWN_MT (host-checked). K3_Q35_MV16_ROW (the qwen35moe module): Seg.pad1 bit 16 = Q8_0 at K = 1024 n
+// as own_row_q8_0_w, a wave per row (wave w: rows r0 + w, r0 + w + 8, ...; host-set: Engine.own_matvec16 row=True).
+__device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
+    const int wave = K3WAVE, lane = K3TID % 32;
+    const int r0 = t * sg.rows_per_task, r1 = min(sg.N, r0 + sg.rows_per_task);
+    const uint8_t * W = sg.W; const void * x = sg.a; float * y = (float *)sg.y;
+#ifdef K3_Q3M_VER
+    const int NT = max(1, (int)__builtin_amdgcn_readfirstlane((sg.pad1 >> 8) & 15));
+    const uint64_t st = (uint64_t)sg.gs;
+    const size_t xs = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)st), ys = (uint32_t)__builtin_amdgcn_readfirstlane((int)(uint32_t)(st >> 32));
+    // (the T-token rows tiles, kernels/quant_ver.h: each weight word unpacked once for the pass's tokens, each token's
+    //  statements the one-token tile's; before, the tokens ran the whole tile in turn: 2.3 .. 3.1x a decode step's time)
+    for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
+        if (NT == 1) {
+            if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
+            else own_rows_q8_0_1rt<2>(W, row, r1, sg.K, x, y, lane);   // (own_rows_q8_0's bits, 2 block steps' loads per pass)
+        } else if (sg.work == OWN_Q5_K) own_rows_q5_k_mt(W, row, r1, sg.K, (const _Float16 *)x, xs, NT, y, ys, lane);
+        else own_rows_q8_0_mt(W, row, r1, sg.K, (const _Float16 *)x, xs, NT, y, ys, lane);
+    }
+#else
+#ifdef K3_Q35_MV16_ROW
+    if ((sg.pad1 >> 16) & 1) {   // (Seg.pad1 bit 16, host-set for Q8_0 at K = 1024 n: own_row_q8_0_w, a wave per row, wave w rows
+        const size_t rb = (size_t)(sg.K / 32) * 34;  //  r0 + w, r0 + w + 8, ...; the host sizes these tasks for it)
+        for (int row = r0 + wave; row < r1; row += 8) {
+            const float s = own_row_q8_0_w(W + (size_t)row * rb, sg.K / 32, x, lane);
+            if (lane == 0) y[row] = s;
+        }
+        return;
+    }
+#endif
+    for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
+        if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
+        else own_rows_q8_0_1rt<2>(W, row, r1, sg.K, x, y, lane);   // (own_rows_q8_0's bits, 2 block steps' loads per pass)
+    }
+#endif
+}
+
+// OP_OWN_ADD_RMS16 for any row length N = 256 NI (one task, one workgroup; a thread owns elements tid + 256 j):
+//   x[i] += d[i]   (Seg.pad1 = 1; 0: no add)
+//   h[i] = (x[i] * rsqrt(sum x^2 / N + eps)) * nw[i];   h16[i] = fp16(h[i])
+// Seg.a = d, Seg.y = x (in / out), Seg.W = nw, Seg.asum = h (fp32), Seg.aux = h16, Seg.rs = eps. Two walks of the
+// row, four elements per round trip: the add and the squares (a thread's fma chain in element order, the wave sum, the
+// eight waves in order), then the norm from x as stored. ops_own.h's form holds a thread's whole row in registers
+// (8 elements); at N = 5120 that is 20. The verify module (K3_Q3M_VER): task tk = token tk, its rows d / x / h / h16 at
+// tk * N (nw shared), each the one-token statements.
+#ifdef K3_Q3M_VER
+__device__ __forceinline__ void q35_op_add_rms16(const Seg & sg, int tk) {
+#else
+__device__ __forceinline__ void q35_op_add_rms16(const Seg & sg) {
+#endif
+#pragma clang fp contract(off)
+#ifndef K3_Q3M_VER
+    constexpr int tk = 0;
+#endif
+    __shared__ float part[8];
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, N = sg.N, NI = N >> 8;
+    const size_t o = (size_t)tk * N;
+    const float * d = (const float *)sg.a + o; const float * nw = (const float *)sg.W;
+#ifdef K3_Q35_MTP   // (the drafter module: h16's token stride is Seg.K, so two norms fill the halves of eh_proj's [e; h] rows)
+    float * x = (float *)sg.y + o; float * h = (float *)sg.asum + o; _Float16 * h16 = (_Float16 *)sg.aux + (size_t)tk * sg.K;
+#else
+    float * x = (float *)sg.y + o; float * h = (float *)sg.asum + o; _Float16 * h16 = (_Float16 *)sg.aux + o;
+#endif
+    const bool add = sg.pad1 > 0;
+    float ss = 0.0f;
+#pragma unroll 1
+    for (int j0 = 0; j0 < NI; j0 += 4) {
+        float xv[4], dv[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const int i = tid + 256 * min(j0 + j, NI - 1);
+            xv[j] = x[i]; dv[j] = add ? d[i] : 0.0f;
+        }
+        __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            if (j0 + j >= NI) continue;
+            if (add) { xv[j] = xv[j] + dv[j]; x[tid + 256 * (j0 + j)] = xv[j]; }
+            ss = __builtin_fmaf(xv[j], xv[j], ss);
+        }
+        __builtin_amdgcn_sched_barrier(0);
+    }
+    ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / N + sg.rs);
+#pragma unroll 1
+    for (int j0 = 0; j0 < NI; j0 += 4) {
+        float xv[4], wn[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const int i = tid + 256 * min(j0 + j, NI - 1);
+            xv[j] = x[i]; wn[j] = nw[i];
+        }
+        __builtin_amdgcn_sched_barrier(0);
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            if (j0 + j >= NI) continue;
+            const float v = (xv[j] * scale) * wn[j];
+            h[tid + 256 * (j0 + j)] = v; h16[tid + 256 * (j0 + j)] = (_Float16)v;
+        }
+        __builtin_amdgcn_sched_barrier(0);
+    }
+    __syncthreads();
+}
+
+// ---- Gated DeltaNet decode step (kernels/ops_gg.h's ops: the same statements) ----
+// OP_GDN_CONV: per channel c: in = [st[c][0..2], x[c]], out[c] = silu(sum_j in[j] * w[c][j]), and the state shifts to
+//   [in[1..3]]. Seg.a = x [C] (the qkv matvec's output), Seg.W = fp32 w [C, 4], Seg.gs = fp32 state [C, 3] (updated in
+//   place), Seg.aux = the previous pass's inputs [T, C], Seg.asum = int32 pass params ([1] = mprev: the previous pass's
+//   accepted tokens, committed first), Seg.y = out [C]; N = C; a task = rows_per_task channels.
+// K3_Q35_CONV_L2 (the qwen35moe module), Seg.K = the head dim (0: the plain op): the conv with OP_GDN_L2 fused for the
+//   q | k channels [0, Seg.pad1): each normed in place (out[c] = (scale x) / sqrt(K), the separate op's statements and
+//   sum order: a head's 128 channels are 4 waves of the task, its sum 0 + their 4 wave sums, then the op's zeros), the
+//   v channels as before. Host-checked: T = 1, 256 channels per task (one per thread), K 128, Seg.pad1 a multiple of 256,
+//   Seg.rs = eps / K. One segment and one hop less per Gated DeltaNet block.
+__device__ __forceinline__ void q35_op_gdn_conv(const Seg & sg, int t) {
+    const int c0 = t * sg.rows_per_task, c1 = min(sg.N, c0 + sg.rows_per_task);
+    const float * x = (const float *)sg.a, * w = (const float *)sg.W;
+    float * st = (float *)sg.gs, * xp = (float *)sg.aux;
+    const int C = sg.N, T = seg_T(sg), mprev = ((const int *)sg.asum)[1];
+#ifdef K3_Q35_CONV_L2
+    if (sg.K) {
+        __shared__ float part[8];
+        const int tid = K3TID, lane = tid % 32, wave = tid / 32, c = c0 + tid;
+        GF * stg = (GF *)st + (size_t)c * 3;
+        float s0 = stg[0], s1 = stg[1], s2 = stg[2];
+        const float4 w4 = *(const __attribute__((address_space(1))) float4 *)(w + (size_t)c * 4);
+        const float x0 = ((GF *)x)[c], xp0 = ((GF *)xp)[c];
+        __builtin_amdgcn_sched_barrier(0);
+        for (int j = 0; j < mprev; j++) { s0 = s1; s1 = s2; s2 = j == 0 ? xp0 : xp[(size_t)j * C + c]; }   // commit the accepted tokens
+        GW * stw = (GW *)st + (size_t)c * 3;
+        stw[0] = s0; stw[1] = s1; stw[2] = s2;
+        const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
+        const float in[4] = {s0, s1, s2, x0};
+        float sumf = 0.0f;
+        for (int j = 0; j < 4; j++) sumf += in[j] * wv[j];
+        const float v = q35_silu(sumf);
+        ((GW *)xp)[c] = x0;                                          // this pass's input, for the next pass's commit
+        if (c0 < sg.pad1) {                                          // (workgroup-uniform: q | k heads)
+            float ss = v * v; asm volatile("" : "+v"(ss));   // (rounded, as the separate op's loop: not fused into the sum's fma)
+            ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+            const int h0 = wave & ~3;
+            float tot = 0.0f; for (int q = 0; q < 4; q++) tot += part[h0 + q];
+            for (int q = 0; q < 4; q++) tot += 0.0f;                 // (the separate op's other four waves: zeros)
+            const float scale = rsqrtf(tot / sg.K + sg.rs), s2n = 1.0f / sqrtf((float)sg.K);
+            ((GW *)sg.y)[c] = (scale * v) * s2n;
+            __syncthreads();
+        } else ((GW *)sg.y)[c] = v;
+        return;
+    }
+#endif
+    for (int c = c0 + (int)K3TID; c < c1; c += blockDim.x) {
+        GF * stg = (GF *)st + (size_t)c * 3;
+        float s0 = stg[0], s1 = stg[1], s2 = stg[2];
+        const float4 w4 = *(const __attribute__((address_space(1))) float4 *)(w + (size_t)c * 4);
+        const float x0 = ((GF *)x)[c], xp0 = ((GF *)xp)[c];
+        __builtin_amdgcn_sched_barrier(0);
+        for (int j = 0; j < mprev; j++) { s0 = s1; s1 = s2; s2 = j == 0 ? xp0 : xp[(size_t)j * C + c]; }   // commit the accepted tokens
+        GW * stw = (GW *)st + (size_t)c * 3;
+        stw[0] = s0; stw[1] = s1; stw[2] = s2;
+        const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
+        for (int tt = 0; tt < T; tt++) {
+            const float xv = tt == 0 ? x0 : x[(size_t)tt * C + c];
+            const float in[4] = {s0, s1, s2, xv};
+            float sumf = 0.0f;
+            for (int j = 0; j < 4; j++) sumf += in[j] * wv[j];
+            ((GW *)sg.y)[(size_t)tt * C + c] = q35_silu(sumf);
+            s0 = s1; s1 = s2; s2 = xv;
+            ((GW *)xp)[(size_t)tt * C + c] = xv;                   // this pass's input, for the next pass's commit
+        }
+    }
+}
+
+// OP_GDN_L2: per head of K values: y = (x * rsqrt(sum(x^2) / K + rs)) * (1 / sqrt(K)), rs = eps / K (so y = x /
+//   sqrt(sum(x^2) + eps)). Seg.a = in (token stride pad1, 0: heads * K), Seg.y = out, N = heads; one task per head.
+__device__ __forceinline__ void q35_op_gdn_l2(const Seg & sg, int t) {
+    __shared__ float part[8];
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, K = sg.K;
+    const int heads = sg.N / seg_T(sg), tt = t / heads, hh = t - tt * heads;
+    const float * x = (const float *)sg.a + (size_t)tt * (sg.pad1 ? sg.pad1 : heads * K) + (size_t)hh * K;
+    float * y = (float *)sg.y + (size_t)t * K;
+    float ss = 0.0f;
+    for (int i = tid; i < K; i += blockDim.x) ss += x[i] * x[i];
+    ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / K + sg.rs), s2 = 1.0f / sqrtf((float)K);
+    for (int i = tid; i < K; i += blockDim.x) y[i] = (scale * x[i]) * s2;
+    __syncthreads();
+}
+
+// OP_GDN_GATES: gate[h] = softplus(alpha[h] + dt[h]) * a[h]; beta_sig[h] = sigmoid(beta[h]) (separate roundings).
+//   Seg.a = alpha [H], Seg.W = fp32 beta [H], Seg.gs = fp32 dt [H], Seg.asum = fp32 ssm_a [H] (cast), Seg.y = out [2H]
+//   (gate, then beta_sig); N = H; one task.
+__device__ __forceinline__ void q35_op_gdn_gates(const Seg & sg) {
+#pragma clang fp contract(off)
+    const float * al = (const float *)sg.a, * be = (const float *)sg.W, * dt = sg.gs, * A = (const float *)sg.asum;
+    float * y = (float *)sg.y;
+    const int H = sg.N;
+    for (int q = K3TID; q < seg_T(sg) * H; q += blockDim.x) {   // q = token * H + head; out [T, 2H]
+        const int tt = q / H, h = q - tt * H;
+        const float ab = al[q] + dt[h];
+        const float sp = (ab > 20.0f) ? ab : logf(1.0f + expf(ab));
+        y[tt * 2 * H + h] = sp * A[h];
+        y[tt * 2 * H + H + h] = 1.0f / (1.0f + expf(-be[q]));
+    }
+}
+
+// OP_GDN_STEP: the gated delta rule per value head h, key / query head h % nk; state M[h][col][i] (S[i][col] at col * S
+//   + i). Per token: kv = sum_i M[col][i] k[i]; delta = (v[col] - g kv) beta; M = g M + k[i] delta; attn[col] = scale
+//   sum_i M[col][i] q[i], g = exp(gate[h]), scale = 1 / sqrt(S). Lazy commit: the stored state is the one before the
+//   previous pass's accepted tokens; each pass first replays those mprev tokens from their saved inputs (OP_GDN_SAVE),
+//   stores the result, then runs its T tokens without storing. The same update code (explicit fmaf) runs for the replay
+//   and the new tokens.
+//   Seg.a = q|k [T, 2, nk, S] (l2-normed), Seg.W = v [T, ...] (token stride pad2), Seg.gs = gates [T, 2H] (gate,
+//   beta_sig), Seg.aux = the layer's block [state H*S*S | saved inputs T x (nk*S + H*S + 2H)], Seg.asum = int32 pass
+//   params ([1] = mprev), Seg.y = attn [T, H, S]; N = H, K = S = 128 (host-checked), pad1 = nk. A task = 32 columns of
+//   one head (4 per wave); a state column is one float4 per lane.
+__device__ __forceinline__ float4 q35_gdn_upd(const float4 m, const float4 k4, float kv, float vcol, float g, float beta) {
+    const float t1 = g * kv, t2 = vcol - t1, delta = t2 * beta;
+    float4 sv;
+    sv.x = fmaf(k4.x, delta, g * m.x); sv.y = fmaf(k4.y, delta, g * m.y);
+    sv.z = fmaf(k4.z, delta, g * m.z); sv.w = fmaf(k4.w, delta, g * m.w);
+    return sv;
+}
+__device__ __forceinline__ float q35_gdn_dot(const float4 m, const float4 k4) {
+    return fmaf(m.w, k4.w, fmaf(m.z, k4.z, fmaf(m.y, k4.y, m.x * k4.x)));
+}
+__device__ __forceinline__ void q35_op_gdn_step(const Seg & sg, int t) {
+    constexpr int S = 128, CPT = 32, CPW = CPT / 8;
+    int nk = sg.pad1, H = sg.N;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    asm volatile("" : "+s"(nk), "+s"(H));
+#endif
+    const int h = t / (S / CPT), c0 = (t % (S / CPT)) * CPT, kh = h % nk, T = seg_T(sg);
+    const int lane = K3TID % 32, wave = K3WAVE, mprev = ((const int *)sg.asum)[1];
+    const int RS = nk * S + H * S + 2 * H;                         // a saved input record per token
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    uintptr_t addr = (uintptr_t)sg.aux;
+    asm volatile("" : "+v"(addr));   // preserve the address, prevent its derived replay pointer hoisting across dispatch
+    float * base = (float *)addr;
+#else
+    float * base = (float *)sg.aux;
+#endif
+    const float * rec = base + (size_t)H * S * S;
+    float4 * M = (float4 *)(base + (size_t)h * S * S);
+    const float scale = 1.0f / sqrtf((float)S);
+    float4 m[CPW];
+#pragma unroll
+    for (int j = 0; j < CPW; j++) m[j] = M[(size_t)(c0 + wave * CPW + j) * (S / 4) + lane];
+#pragma unroll 1
+    for (int r = 0; r < mprev; r++) {                              // replay the previous pass's accepted tokens
+        const float * rr = rec + (size_t)r * RS;
+        const float4 k4 = ((const float4 *)(rr + (size_t)kh * S))[lane];
+        const float * v = rr + nk * S + (size_t)h * S;
+        const float g = expf(rr[nk * S + H * S + h]), beta = rr[nk * S + H * S + H + h];
+        float kv[CPW];
+#pragma unroll
+        for (int j = 0; j < CPW; j++) kv[j] = wave_sum(q35_gdn_dot(m[j], k4));
+#pragma unroll
+        for (int j = 0; j < CPW; j++) m[j] = q35_gdn_upd(m[j], k4, kv[j], v[c0 + wave * CPW + j], g, beta);
+    }
+#pragma unroll
+    for (int j = 0; j < CPW; j++) M[(size_t)(c0 + wave * CPW + j) * (S / 4) + lane] = m[j];   // the committed state
+#pragma unroll 1
+    for (int tt = 0; tt < T; tt++) {
+        const float * qk = (const float *)sg.a + (size_t)tt * 2 * nk * S;
+        const float4 k4 = ((const float4 *)(qk + (size_t)(nk + kh) * S))[lane];
+        const float4 q4 = ((const float4 *)(qk + (size_t)kh * S))[lane];
+        const float * v = (const float *)sg.W + (size_t)tt * sg.pad2 + (size_t)h * S;
+        const float * gt = sg.gs + (size_t)tt * 2 * H;
+        const float g = expf(gt[h]), beta = gt[H + h];
+        float kv[CPW], at[CPW];
+#pragma unroll
+        for (int j = 0; j < CPW; j++) kv[j] = wave_sum(q35_gdn_dot(m[j], k4));
+#pragma unroll
+        for (int j = 0; j < CPW; j++) {
+            m[j] = q35_gdn_upd(m[j], k4, kv[j], v[c0 + wave * CPW + j], g, beta);
+            at[j] = wave_sum(q35_gdn_dot(m[j], q4));
+        }
+        if (lane == 0) {
+#pragma unroll
+            for (int j = 0; j < CPW; j++) ((float *)sg.y)[((size_t)tt * H + h) * S + c0 + wave * CPW + j] = at[j] * scale;
+        }
+    }
+}
+
+// OP_GDN_SAVE: after the step, this pass's step inputs per token (k [nk, S], v [H, S], gates [2H]) into the layer's
+//   saved-input records (read by the next pass's commit replay). Same Seg fields as OP_GDN_STEP; tasks = tokens.
+__device__ __forceinline__ void q35_op_gdn_save(const Seg & sg, int tt) {
+    constexpr int S = 128;
+    int nk = sg.pad1, H = sg.N;
+#ifdef K3_Q35_GDN_LOCAL_BASE
+    asm volatile("" : "+s"(nk), "+s"(H));
+    uintptr_t addr = (uintptr_t)sg.aux;
+    asm volatile("" : "+v"(addr));
+    float * base = (float *)addr;
+#else
+    float * base = (float *)sg.aux;
+#endif
+    const int RS = nk * S + H * S + 2 * H;
+    float * rr = base + (size_t)H * S * S + (size_t)tt * RS;
+    const float * qk = (const float *)sg.a + (size_t)tt * 2 * nk * S, * v = (const float *)sg.W + (size_t)tt * sg.pad2;
+    const float * gt = sg.gs + (size_t)tt * 2 * H;
+    for (int i = K3TID; i < nk * S; i += blockDim.x) rr[i] = qk[nk * S + i];
+    for (int i = K3TID; i < H * S; i += blockDim.x) rr[nk * S + i] = v[i];
+    for (int i = K3TID; i < 2 * H; i += blockDim.x) rr[nk * S + H * S + i] = gt[i];
+}
+
+// OP_GDN_NORM16: per value head: y16 = fp16(((o * rsqrt(mean(o^2) + eps)) * w) * silu(z)): OP_GDN_NORM's arithmetic
+//   (the SiLU output gate), its result stored as the output matvec's fp16 input. Seg.a = o [H, S], Seg.W = fp32 w [S],
+//   Seg.gs = fp32 z [H, S], Seg.y = fp16 out [H, S], N = H, K = S, rs = eps; one task per head.
+__device__ __forceinline__ void q35_op_gdn_norm16(const Seg & sg, int t) {
+#pragma clang fp contract(off)
+    __shared__ float part[8];
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, K = sg.K;
+    const float * o = (const float *)sg.a + (size_t)t * K, * w = (const float *)sg.W, * z = sg.gs + (size_t)t * K;
+    _Float16 * y = (_Float16 *)sg.y + (size_t)t * K;
+    float ss = 0.0f;
+    for (int i = tid; i < K; i += blockDim.x) ss += o[i] * o[i];
+    ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / K + sg.rs);
+    for (int i = tid; i < K; i += blockDim.x) {
+        const float nrm = (scale * o[i]) * w[i];
+        const float v = nrm * q35_silu(z[i]);
+        y[i] = (_Float16)v;
+    }
+    __syncthreads();
+}
+
+// ---- gated attention ----
+// OP_QK_NR: per head: y = rms_norm(x) * w, then RoPE on the first n_rot dims, pairs (j, j + n_rot / 2), theta = pos *
+//   theta_scale^j. Seg.a = in base, Seg.W = fp32 norm w [D], Seg.asum = int32 pos [1], Seg.y = out [heads, D]; N =
+//   heads, K = D (<= 512), pad1 = input head stride (floats), out_f32 = n_rot, rs = theta_scale, pad2 = eps bits; one
+//   task per head.
+__device__ __forceinline__ void q35_op_qk_nr(const Seg & sg, int t) {
+    __shared__ float part[8]; __shared__ float nrm[512];
+    const int tid = K3TID, lane = tid % 32, wave = tid / 32, D = sg.K, nrot = sg.out_f32;
+    const float * x = (const float *)sg.a + (size_t)t * sg.pad1, * w = (const float *)sg.W;
+    float * y = (float *)sg.y + (size_t)t * D;
+    const float eps = __builtin_bit_cast(float, sg.pad2);
+    float ss = 0.0f;
+    for (int i = tid; i < D; i += blockDim.x) ss += x[i] * x[i];
+    ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+    float tot = 0.0f; for (int q = 0; q < 8; q++) tot += part[q];
+    const float scale = rsqrtf(tot / D + eps);
+    for (int i = tid; i < D; i += blockDim.x) nrm[i] = (scale * x[i]) * w[i];
+    __syncthreads();
+    const float pos = (float)(((const int *)sg.asum)[0] + t / (sg.N / seg_T(sg)));   // task t = token * heads + head
+#ifdef K3_Q35_YARN
+    // (YaRN: Seg.aux = the per-dim frequency factor m[j] (fp32 [n_rot / 2]), Seg.work = the magnitude scale's bits;
+    //  aux NULL: the plain rope, bit for bit. theta = pos * rs^j * m[j], cos / sin scaled by mscale: llama.cpp's
+    //  rope_yarn with theta_interp * (1 - ramp) + theta_extrap * ramp folded into m. Both are loop-invariant: hoisted,
+    //  or the extra live values cost this object a spilled SGPR over its pin)
+    const float * mt = (const float *)sg.aux;   // (always present in this module: the host passes all-ones for the plain rope)
+    const float ms = __builtin_bit_cast(float, sg.work);
+#endif
+    for (int i = tid; i < D; i += blockDim.x) {
+        if (i >= nrot) { y[i] = nrm[i]; continue; }
+        const int j = i < nrot / 2 ? i : i - nrot / 2;
+#ifdef K3_Q35_YARN
+        const float theta = pos * powf(sg.rs, (float)j) * mt[j];
+        const float c = cosf(theta) * ms, sn = sinf(theta) * ms;
+#else
+        const float theta = pos * powf(sg.rs, (float)j);
+        const float c = cosf(theta), sn = sinf(theta);
+#endif
+        const float x0 = nrm[j], x1 = nrm[j + nrot / 2];
+        y[i] = i < nrot / 2 ? x0 * c - x1 * sn : x0 * sn + x1 * c;
+    }
+    __syncthreads();
+}
+
+// OP_KV_APPEND: cache[pos] = (k, v) as fp16 (round to nearest even). Seg.a = k fp32 [M], Seg.W = fp32 v [M], Seg.y =
+//   the cache ([K | V] per position, 2 M halves), Seg.asum = int32 pos [1]; N = M; one task. The f16 cache only
+//   (Seg.work = 0, host-checked).
+__device__ __forceinline__ void q35_op_kv_append(const Seg & sg, int tt) {
+    const int pos = ((const int *)sg.asum)[0] + tt, M = sg.N;   // task tt = token tt: k / v [T, M]
+    _Float16 * c = (_Float16 *)sg.y + (size_t)pos * 2 * M;
+    for (int i = K3TID; i < M; i += blockDim.x) {
+        c[i] = (_Float16)((const float *)sg.a)[(size_t)tt * M + i];
+        c[M + i] = (_Float16)((const float *)sg.W)[(size_t)tt * M + i];
+    }
+}
+
+// OP_GATE_MUL16: y16[h * D + d] = fp16(a[h * D + d] * sigmoid(gate[h * stride + off + d])): OP_GATE_MUL's arithmetic,
+//   stored as the output matvec's fp16 input. Seg.a = a fp32, Seg.W = gate fp32, Seg.y = fp16 out; N = values, K = D,
+//   pad1 = the gate's head stride, pad2 = its offset in a head; a task = rows_per_task values.
+__device__ __forceinline__ void q35_op_gate_mul16(const Seg & sg, int t) {
+#pragma clang fp contract(off)
+    const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task);
+    const float * a = (const float *)sg.a, * gt = (const float *)sg.W;
+    for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) {
+        const int h = i / sg.K, d = i - h * sg.K;
+        const float sgm = 1.0f / (1.0f + expf(-gt[(size_t)h * sg.pad1 + sg.pad2 + d]));
+        const float v = a[i] * sgm;
+        ((_Float16 *)sg.y)[i] = (_Float16)v;
+    }
+}
+
+// OP_GDN_SAVE as the dispatch runs it: a bailed launch (sy->err set) leaves the saved-input records alone, as
+// kernels/ops_gg.h's OP_GDN_SAVE. A bailed launch still runs every task once, its gdn_step tasks replaying the previous
+// pass's records into the state, and this task's dependency wait may have given up before they read them: a save then
+// overwrites records a replay has not read yet, and the retry (commit 0) cannot repair the state. err == 0 here means
+// every wait so far succeeded (a wait sets err before it gives up). Thread 0 decides for the workgroup, so a record is
+// written whole or not at all. (Seen with a launch whose bound expired early in the pass, so that every later task ran at
+// once: without this its retry differed from the uninterrupted pass, and every later pass with it; tools/gates/forcebail.py.)
+__device__ __forceinline__ void q35_gdn_save_guarded(const Seg & sg, int t, Sync * sy) {
+    __shared__ int save_ok;
+    if (thread0()) save_ok = __hip_atomic_load(&sy->err, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT) == 0;
+    __syncthreads();
+    const bool ok = save_ok;
+    __syncthreads();
+    if (ok) q35_op_gdn_save(sg, t);
+}
+
+#ifdef K3_Q35_MTP
+// OP_OWN_ARGMAX (the drafter module): the greedy token of logits fp32 [N] (Seg.a) as a 64-bit key at Seg.y: the value's
+// order-preserving bits << 32 | ~index, combined with atomicMax over the tasks, so the key is the largest value and,
+// among equal values, the lowest index (a NaN counts as the lowest value): the host's first-maximum rule. The key word
+// starts at 0 (the pass's stage copy writes it). A task = Seg.rows_per_task values; each wave's maximum, the eight in
+// LDS, one atomic per task.
+enum { OP_OWN_ARGMAX = 55 };
+__device__ __forceinline__ void q35_op_argmax(const Seg & sg, int t) {
+    __shared__ unsigned long long part[8];
+    const int i0 = t * sg.rows_per_task, i1 = min(sg.N, i0 + sg.rows_per_task);
+    unsigned long long best = 0ull;
+    for (int i = i0 + (int)K3TID; i < i1; i += blockDim.x) {
+        const float v = ((const float *)sg.a)[i];
+        uint32_t u = __builtin_bit_cast(uint32_t, v);
+        u = v != v ? 0u : (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+        const unsigned long long k = ((unsigned long long)u << 32) | (uint32_t)~(uint32_t)i;
+        best = k > best ? k : best;
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) { const unsigned long long b = __shfl_xor(best, o, 32); best = b > best ? b : best; }
+    if (K3TID % 32 == 0) part[K3TID / 32] = best;
+    __syncthreads();
+    if (K3TID == 0) {
+        unsigned long long m = part[0];
+        for (int q = 1; q < 8; q++) m = part[q] > m ? part[q] : m;
+        atomicMax((unsigned long long *)sg.y, m);
+    }
+    __syncthreads();
+}
+#endif
+
+#ifdef K3_Q35_DF   // (the DFlash drafter module, kernels/dec_q35_swift_dflash.hip: its fp32 ops on own code)
+#include "ops_q35_dflash.h"
+#endif
+
+#ifdef K3_Q35_MOE
+// OP_OWN_EMB on the qwen35moe module: the GSQ file's token_embd is BF16, so a row is N * 2 bytes and value i is the
+// high half of a float32 (bf16 -> f32 is a shift, exact). The dense form below decodes Q4_K blocks of 256 values.
+__device__ __forceinline__ void own_op_emb_bf16(const Seg & sg) {
+    const int tok = min(max(((const int *)sg.a)[0], 0), sg.pad2 - 1);
+    const uint16_t * row = (const uint16_t *)sg.W + (size_t)tok * sg.N;
+    float * x = (float *)sg.y;
+    for (int i = (int)K3TID; i < sg.N; i += blockDim.x)
+        x[i] = __builtin_bit_cast(float, (uint32_t)row[i] << 16);
+}
+
+// OP_ROUTER on the qwen35moe module: the 30B's softmax top-k (op_router, kernels/ops_q3m.h), then the gated shared
+// expert's weight as slot k, which own_op_add_rms16's 9th slot reads. The shared gate logit arrives in sg.W, one fp32
+// (the OP_F32_MV of ffn_gate_inp_shexp); the weights buffer is k + 1 wide. T = 1 (tt = 0: the router's stride is k).
+__device__ __forceinline__ void op_router_shexp(const Seg & sg, int tt) {
+    op_router(sg, tt);
+    if (K3TID == 0) ((float *)sg.gs)[tt * sg.pad1 + sg.pad1] = 1.0f / (1.0f + expf(-((const float *)sg.W)[0]));
+}
+#endif
+
+#ifdef K3_Q35_MOE
+// OP_PREFETCH (57, the qwen35moe module): brings weight ranges into the Infinity Cache (the memory-side cache: 80 MB
+//   on the XT, 96 on the XTX) ahead of their matvecs, by plain loads of one dword per 128-byte line (a plain load allocates there; a nontemporal
+//   one, slc dlc, does not: measured, a 27 MB range read after a 4-workgroup plain touch at 1,283 GB/s against 579 cold).
+//   It writes nothing (the XOR of the loads goes to Seg.y only on an impossible value, which keeps the loads). Seg.W = K
+//   range records (int64 base address, int64 lines; bases 128-byte aligned), Seg.K = their count, Seg.N = the lines of
+//   all of them; task t = the lines [t L, (t + 1) L) of their concatenation, L = ceil(N / ntask); Seg.rows_per_task = the
+//   threads that load (0: all; fewer: fewer misses in flight). A few tasks on a whole layer's weights: that many
+//   workgroups stream them while the latency-bound ops run.
+enum { OP_PREFETCH = 57 };
+__device__ __forceinline__ void q35_op_prefetch(const Seg & sg, int t) {
+    const long long * rec = (const long long *)sg.W;
+    const int per = (sg.N + sg.ntask - 1) / sg.ntask, lo = t * per, hi = min(sg.N, lo + per);
+    uint32_t acc = 0;
+    int r0 = 0;
+    const int nth = sg.rows_per_task > 0 ? sg.rows_per_task : (int)blockDim.x;
+    if ((int)K3TID >= nth) return;
+    for (int r = 0; r < sg.K; r++) {
+        const int n = (int)rec[2 * r + 1], a = max(lo, r0), b = min(hi, r0 + n);
+        const uint32_t * p = (const uint32_t *)rec[2 * r] - (size_t)r0 * 32;
+#pragma unroll 8
+        for (int i = a + (int)K3TID; i < b; i += nth) acc ^= p[(size_t)i * 32];
+        r0 += n;
+    }
+    if (acc == 0x9e3779b9u) ((uint32_t *)sg.y)[0] = acc;
+}
+#endif
+
+#ifndef K3_Q35_NO_DISPATCH   // (kernels/ops_q35_tcap.h: these ops under its own dispatch)
+__device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
+                                            uint64_t * tr = nullptr) {
+    if (sg.op == OP_OWN_MV) { own_op_mv_1rt(sg, t, (int)__builtin_amdgcn_readfirstlane(K3TID / 32), K3TID % 32); return true; }
+#ifdef K3_Q35_MTP   // (the drafter module; it keeps the trunk's dispatch below, whose ops its tape never runs: without
+    // them k3_run took 96 VGPRs and spilled 5 (the batched attention's loads), with them 89 and none. The host refuses
+    // those ops on this module: k3.Q35M_OPS / MODULE_CAPS)
+    if (sg.op == OP_OWN_ARGMAX) { q35_op_argmax(sg, t); return true; }
+#endif
+#ifdef K3_Q35_DF   // (the DFlash drafter module: its own ops, then the trunk's; the host refuses the rest: k3.MODULE_CAPS)
+    if (sg.op == OP_DF_CONV) { op_df_conv(sg, t); return true; }
+    if (sg.op == OP_DF_TOPK) { op_df_topk(sg, t); return true; }
+    if (sg.op == OP_DF_SELECT) { op_df_select(sg, t); return true; }
+    if (sg.op == OP_KV_APPEND && sg.aux) { df_op_kv_append_ring(sg, t); return true; }
+    if (sg.op == OP_ATTN_DEC && sg.pad2) { df_op_attn(sg, t); return true; }
+#endif
+    if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
+#ifdef K3_Q35_MOE   // (kernels/dec_q35m.hip: qwen35moe's tape. Its add_rms16 is the ops_own.h form, whose weighted
+    // sum takes the routed experts' slots plus the gated shared expert as a 9th (OWN_ADD_MAX_S); the dense line's
+    // any-length form below has no slots or weights. OP_ROUTER is the 30B's softmax top-k, renormalised.)
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg OWN_TK_ARG); return true; }
+    if (sg.op == OP_ROUTER) { op_router_shexp(sg, t); return true; }
+    if (sg.op == OP_PREFETCH) { q35_op_prefetch(sg, t); return true; }
+#else
+    if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
+#endif
+    if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
+    if (sg.op == OP_GDN_CONV) { q35_op_gdn_conv(sg, t); return true; }
+    if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
+    if (sg.op == OP_GDN_GATES) { q35_op_gdn_gates(sg); return true; }
+    if (sg.op == OP_GDN_STEP) { q35_op_gdn_step(sg, t); return true; }
+    if (sg.op == OP_GDN_SAVE) { q35_gdn_save_guarded(sg, t, sy); return true; }
+    if (sg.op == OP_GDN_NORM16) { q35_op_gdn_norm16(sg, t); return true; }
+    if (sg.op == OP_QK_NR) { q35_op_qk_nr(sg, t); return true; }
+#ifdef K3_Q35_KV_Q8
+    if (sg.op == OP_KV_APPEND) { q35_op_kv_append_q8(sg, t); return true; }
+    if (sg.op == OP_HADAMARD) { q35_op_hadamard(sg, t); return true; }
+#else
+    if (sg.op == OP_KV_APPEND) { q35_op_kv_append(sg, t); return true; }
+#endif
+#ifdef K3_Q35_ATTN_SPLIT
+    if (sg.op == OP_ATTN_PART) { ATTN_PART_FN(sg, t); return true; }   // (ops_attn_split.h: the packed PART in the verify modules)
+    if (sg.op == OP_ATTN_COMB) { op_attn_comb(sg, t); return true; }
+#else
+    if (sg.op == OP_ATTN_DEC) { own_op_attn_dec(sg, t); return true; }
+#endif
+    if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
+    if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
+#ifdef K3_Q35_MOE
+    if (sg.op == OP_OWN_EMB) { own_op_emb_bf16(sg OWN_TK_ARG); return true; }
+#else
+    if (sg.op == OP_OWN_EMB) { own_op_emb(sg OWN_TK_ARG); return true; }
+#endif
+#ifdef K3_TP
+    if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
+#endif
+    return false;
+}
+#ifdef K3_TP
+__device__ __forceinline__ uint32_t * k3_extra_warm(const Seg & sg) { return xchg_warm(sg); }
+__device__ __forceinline__ void k3_extra_prefetch(const Seg & sg, int) { xchg_prefetch(sg); }
+#else
+__device__ __forceinline__ uint32_t * k3_extra_warm(const Seg &) { return nullptr; }
+__device__ __forceinline__ void k3_extra_prefetch(const Seg &, int) {}
+#endif
+#endif

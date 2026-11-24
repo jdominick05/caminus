@@ -1,7 +1,7 @@
 """qwen3moe (Qwen3-30B-A3B) decoding on TWO cards with tensor parallelism, on Caminus's own code from the GGUF file to the
 logits: engine/q3moe_one.py's reader, weight layouts and fused tape (Q3MoEOne._tape_fused, layer for layer), each card
-running the two-card build of the lean decode module (k3_q3m_lean_tp: the lean ops plus a push-only OP_XCHG and
-OP_OWN_SLOT_SUM, kernels/k3_q3m_ops.h under K3_Q3M_TP). The host shell is engine/q35_dense_tp.py's (the uploader, the
+running the two-card build of the lean decode module (dec_q3m_tp: the lean ops plus a push-only OP_XCHG and
+OP_OWN_SLOT_SUM, kernels/ops_q3m.h under K3_Q3M_TP). The host shell is engine/q35_dense_tp.py's (the uploader, the
 capacity check before any allocation, the exchange slots of engine/tp_slots.py, the server contract). No gguf-py, no
 tokenizers. Served by `caminus serve --cards 2` (caminus.arch.Q3MoETP, the 'qwen3moe-tp' entry; one card stays the model's
 default).
@@ -28,8 +28,8 @@ No link keep-alive segment (Q3MoEOne's): the exchanges keep both links busy (an 
 Not bitwise to the one-card engine by design (the K-split down, the attn_output column split and the split count each
 change a summation order); bitwise to itself across grids, and its replicas equal after every pass.
 
-q8=True: each card's KV cache as Q8_0 rows on k3_q3m_lean_tp_kvq8 (the two-card module with the one-card Q8 module's
-OP_OWN_ATTS: kernels/k3_own_atts.h under K3_Q3M_KV_Q8), the one-card engine's format (q3moe_one.KV_FORMAT_Q8: each block
+q8=True: each card's KV cache as Q8_0 rows on dec_q3m_tp_kvq8 (the two-card module with the one-card Q8 module's
+OP_OWN_ATTS: kernels/ops_own_atts.h under K3_Q3M_KV_Q8), the one-card engine's format (q3moe_one.KV_FORMAT_Q8: each block
 the encode of the fp16 values the F16 cache holds, K and q through the head's Walsh-Hadamard transform) over that card's
 2 kv heads: 544 bytes per position and layer on each card instead of 1,024. A refused block (a non-finite K / V value)
 sets that card's error word after Sync; both words come back in each card's one status copy and are read before the
@@ -61,7 +61,7 @@ SPLITS_CAP = 128         # the most attention splits per kv head on a card (spli
 from .tp_slots import Slots, _hip
 
 TAPE_MIB = 4      # an upper bound of one card's tape buffers (checked in _build_tapes), counted in the projection
-MODULE = 'k3_q3m_lean_tp'
+MODULE = 'dec_q3m_tp'
 EXP_ROWS, VOCAB_SHARE = 512, 0.532   # the design defaults: the XTX (card 0) takes 512 of each expert's 768 rows; the
                                      # head at the pair's bandwidth share (XTX 881 vs XT 774 GB/s)
 
@@ -145,7 +145,7 @@ class Q3MoETP:
         """path: a qwen3moe GGUF with Q4_K / Q6_K matrices (the lean module's formats). devices: the two torch / HIP device
         indices (card 0 first: its partials come first in every sum). exp_rows: card 0's rows of every expert's
         intermediate (a multiple of 256); kv_heads: card 0's kv heads (None: half); vocab_share: card 0's part of the
-        head rows. module None: k3_q3m_lean_tp (or its one-card base / the _trace builds, by name). per_wgp: workgroups
+        head rows. module None: dec_q3m_tp (or its one-card base / the _trace builds, by name). per_wgp: workgroups
         per WGP ('card': q3moe_one.card_per_wgp on each card, or an int for both; the logits are the same bits at every
         grid). rpt: rows per matvec task (an int, or one per card); rpt_down: the expert down's (per card; None: rpt;
         the second card's down is K = ffn - exp_rows wide, so larger tasks there are a measured option); rpt_head: the
@@ -154,7 +154,7 @@ class Q3MoETP:
         engine's projection: another tape set is TAPE_MIB). splits_cap: the most attention splits per kv head on a card
         (1 .. k3.atts_max_splits of the module: 128 on the two-card modules; default SPLITS_CAP = 128); each card takes
         q3moe_one.splits_for(its kv heads, splits_cap), and the projection counts the cap's scratch. q8: the KV caches as Q8_0
-        rows on k3_q3m_lean_tp_kvq8 (KV_FORMAT_Q8; module None or that module only; not with the _trace build); a refused
+        rows on dec_q3m_tp_kvq8 (KV_FORMAT_Q8; module None or that module only; not with the _trace build); a refused
         encoding raises caminus.errors.InvalidKVEncoding and leaves the engine broken (reset() keeps it). rope: None or a
         caminus.rope.YarnMode (the long-context mode: the two-card module's YaRN build, k3.Q3M_YARN_OF, the table after eps in
         every layer's qk_par on both cards, max_ctx up to the mode's positions; Q3MoEOne's)"""
@@ -184,7 +184,7 @@ class Q3MoETP:
         if len(devices) != 2 or devices[0] == devices[1]: raise ValueError(f'Q3MoETP: two different devices, not {devices}')
         self.devs, self.max_ctx, self.limit_us = list(devices), int(max_ctx), limit_us
         self.cache_rows = self.max_ctx + k3.Engine.ATS_PAD   # (OP_OWN_ATTS's chunks read up to ATS_PAD - 1 rows past the position)
-        one = module or ('k3_q3m_lean_kvq8' if q8 else 'k3_q3m_lean')
+        one = module or ('dec_q3m_kvq8' if q8 else 'dec_q3m')
         one = {v: k for k, v in k3.Q3M_TP_OF.items()}.get(one, one)          # (a two-card module named: its one-card base)
         if one in k3.Q3M_YARN_MODULES and self.rope is None: raise ValueError(f'Q3MoETP: {one} is a YaRN build: it needs rope=YarnMode')
         if self.rope is not None:   # (the long-context mode: the YaRN build of the module the rest of these checks pick)
@@ -194,7 +194,7 @@ class Q3MoETP:
         if one not in k3.Q3M_TP_OF: raise ValueError(f'Q3MoETP: module {one} has no two-card build ({sorted(k3.Q3M_TP_OF)})')
         if (k3.Q3M_TP_OF[one] in k3.Q3M_KV_Q8_MODULES) != q8:   # (before anything is read: the module decides the cache format)
             raise ValueError(f'Q3MoETP: module {k3.Q3M_TP_OF[one]} ' + ('needs q8=True' if not q8 else
-                             f'reads F16 rows (the Q8 KV cache runs on {k3.Q3M_TP_OF[k3.Q3M_KV_Q8_OF["k3_q3m_lean"]]} only, or its YaRN build)'))
+                             f'reads F16 rows (the Q8 KV cache runs on {k3.Q3M_TP_OF[k3.Q3M_KV_Q8_OF["dec_q3m"]]} only, or its YaRN build)'))
         self.module = k3.Q3M_TP_OF[one]
         if q8: self.kv_format_id = KV_FORMAT_Q8   # (the engine key carries it: Q8 rows never restore into F16 ones)
         self.emb = F.T['token_embd.weight']

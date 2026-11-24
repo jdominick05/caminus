@@ -1,18 +1,18 @@
-"""One-card probe of the qwen3moe two-card decode module (kernels/k3_q3m_lean_tp.hip: K3_TP + K3_Q3M_TP, push-only
+"""One-card probe of the qwen3moe two-card decode module (kernels/dec_q3m_tp.hip: K3_TP + K3_Q3M_TP, push-only
 OP_XCHG and OP_OWN_SLOT_SUM in the lean module's k3_run) before any two-card run: on ONE card
 (HIP_VISIBLE_DEVICES=<the non-display card>), nothing sent to a peer.
-  - Q3MoEOne runs STEPS greedy steps on k3_q3m_lean at its card's grid, then rebuilds the same tape on k3_q3m_lean_tp and
+  - Q3MoEOne runs STEPS greedy steps on dec_q3m at its card's grid, then rebuilds the same tape on dec_q3m_tp and
     replays the tokens at 3, 5, 6 and 7 workgroups per WGP: every step's logits are the lean module's bits, and no pass bailed
   - at each of those grids, one local-only OP_XCHG of D floats (pad1: the peer is never touched) writes its partial's
-    bits, and OP_OWN_SLOT_SUM over the file's top-k slots equals OP_OWN_MOE_SUM into a zeroed x on k3_gguf_q3m_own, value
+    bits, and OP_OWN_SLOT_SUM over the file's top-k slots equals OP_OWN_MOE_SUM into a zeroed x on dec_q3m_gg, value
     for value (a -0 / +0 difference excepted: moe_sum adds the sum to +0)
 --tiny: tests/engine/tiny_q3m.py's synthetic file (a few MiB; its first steps on the lean module are also compared with
 the float64 host forward, caminus.ref_q3moe: top-1 and KLD reported, logits checked not degenerate); else the GGUF given (the catalog file: about 18,000 MiB on
 the card at max_ctx 512). Prints PASS / FAIL lines and RESULT PASS | FAIL.
   HIP_VISIBLE_DEVICES=<card> tools/guard.sh LOG 300 python -I tests/engine/test_q3m_tp_probe.py --tiny --scratch DIR
   HIP_VISIBLE_DEVICES=<card> tools/guard.sh LOG 900 python -I tests/engine/test_q3m_tp_probe.py GGUF --scratch DIR   (after --tiny passed)
---kv q8: the Q8 KV builds: the reference on k3_q3m_lean_kvq8 (Q3MoEOne(q8=True)), the replays and the two ops on
-k3_q3m_lean_tp_kvq8 (its first launch, on one card: the exchange, slot sum and pinned add_rms16 of its k3_run), the logits
+--kv q8: the Q8 KV builds: the reference on dec_q3m_kvq8 (Q3MoEOne(q8=True)), the replays and the two ops on
+dec_q3m_tp_kvq8 (its first launch, on one card: the exchange, slot sum and pinned add_rms16 of its k3_run), the logits
 bitwise the one-card Q8 module's, both error words 0."""
 import argparse, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,7 +49,7 @@ else:
     P, max_ctx, first = A.gguf, A.max_ctx or 512, [785, 6722, 9625]
 if A.steps + 1 > max_ctx: raise SystemExit(f'--steps {A.steps} needs max_ctx > {A.steps}')
 Q8 = A.kv == 'q8'
-LEAN = k3.Q3M_KV_Q8_OF['k3_q3m_lean'] if Q8 else 'k3_q3m_lean'
+LEAN = k3.Q3M_KV_Q8_OF['dec_q3m'] if Q8 else 'dec_q3m'
 TP = k3.Q3M_TP_OF[LEAN]
 GRIDS = (3, 5, 6, 7)
 print(torch.cuda.get_device_name(0), flush=True)
@@ -75,7 +75,7 @@ if A.tiny:   # (the synthetic shapes' first launch: the lean reference itself ag
         r, gl = rm.step(seq[i]), ref[i].view(np.float32).astype(np.float64)
         lr, lg_ = r - r.max(), gl - gl.max(); lr, lg_ = lr - np.log(np.exp(lr).sum()), lg_ - np.log(np.exp(lg_).sum())
         klds.append(float(np.sum(np.exp(lr) * (lr - lg_)))); agree += int(np.argmax(r)) == int(np.argmax(gl))
-    print(f'  k3_q3m_lean vs the float64 reference, first {n_cmp} steps: top-1 {agree} / {n_cmp}, mean KLD {np.mean(klds):.2e} (reported only)', flush=True)
+    print(f'  dec_q3m vs the float64 reference, first {n_cmp} steps: top-1 {agree} / {n_cmp}, mean KLD {np.mean(klds):.2e} (reported only)', flush=True)
     check(all(float(r.view(np.float32).std()) > 0.1 for r in ref), 'tiny: the lean reference\'s logits are not degenerate (std > 0.1 at every step)')
 
 slots = Slots(eng.dev, 1, D)
@@ -101,7 +101,7 @@ for pw in GRIDS:
     E2.xchg(partial, xout, slots.slot(0), slots.slot(0), epoch, 0, 0, local_only=True)
     E2.own_slot_sum(d, y, KU, w)
     E2.build().run()
-    E3 = k3.Engine(module='k3_gguf_q3m_own', grid=k3.resident_grid('k3_gguf_q3m_own', pw))
+    E3 = k3.Engine(module='dec_q3m_gg', grid=k3.resident_grid('dec_q3m_gg', pw))
     x = torch.zeros(D, device='cuda'); E3.own_moe_sum(d, x, slots=KU, w=w); E3.build().run()
     torch.cuda.synchronize()
     check(np.array_equal(bits(xout), bits(partial)), f'{TP} at {pw} per WGP: a local-only OP_XCHG of {D} floats writes its partial\'s bits')

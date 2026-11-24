@@ -1,4 +1,4 @@
-"""Per-output-channel weight scale with the MSE-optimal clip ratio, one fused pass per row (kernels/wquant.hip)."""
+"""Per-output-channel weight scale with the MSE-optimal clip ratio, one fused pass per row (kernels/train_wquant.hip)."""
 import ctypes
 import torch
 from ..device.hip import Module
@@ -9,7 +9,7 @@ RATIOS = [0.5 + 0.02 * i for i in range(26)]   # training/tools/s1_patches.py ch
 
 def _m():
     dev = torch.cuda.current_device()
-    if dev not in _mod: _mod[dev] = Module('wquant')
+    if dev not in _mod: _mod[dev] = Module('train_wquant')
     return _mod[dev]
 
 

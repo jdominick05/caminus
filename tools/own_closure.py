@@ -10,7 +10,7 @@ GGML = re.compile(r'(common|vecdotq|quantize|mmq|mmvq|convert|ggml[\w-]*)\.(cuh|
 
 def closure(name, seen=None, macros=None):
     """the kernels/ files a kernel file includes, transitively: #include "x", and #include NAME with NAME #defined as a
-    "file" earlier on the path (k3.hip's K3_EXTRA_OPS_HEADER); <system> headers are the toolchain's"""
+    "file" earlier on the path (dec_core.hip's K3_EXTRA_OPS_HEADER); <system> headers are the toolchain's"""
     seen = set() if seen is None else seen
     macros = {} if macros is None else macros
     p = os.path.join(ROOT, 'kernels', name)

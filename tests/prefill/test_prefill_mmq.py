@@ -1,4 +1,4 @@
-"""Gates of the batched prefill's quantized GEMMs (docs/specs/spec-prefill-cache.md S2; caminus.prefill.mmq, kernels/prefill_mmq.hip,
+"""Gates of the batched prefill's quantized GEMMs (docs/specs/spec-prefill-cache.md S2; caminus.prefill.mmq, kernels/pf_gg_mmq.hip,
 the vendored ggml MMQ in kernels/ggml_mmq).
 
   python -I tests/prefill/test_prefill_mmq.py CODER STAGE... [--scratch DIR] [--ref BIN] [--ref-stock BIN] [--json OUT]
@@ -120,15 +120,15 @@ def stage_codegen(scratch):
                         '--targets=hipv4-amdgcn-amd-amdhsa--gfx1100', '--output=' + co], check=True)
         return co
     pairs = [(f'prefill_mmq_{f.lower()}', os.path.join(OBJ, 'template-instances', f'mmq-instance-{f.lower()}.cu.o')) for f in mmq.FORMATS]
-    pairs += [('prefill_mmq_glue', os.path.join(OBJ, 'quantize.cu.o')), ('prefill_mmq_glue', os.path.join(OBJ, 'mmid.cu.o'))]
+    pairs += [('pf_gg_mmq_glue', os.path.join(OBJ, 'quantize.cu.o')), ('pf_gg_mmq_glue', os.path.join(OBJ, 'mmid.cu.o'))]
     tot = 0
     for mod, obj in pairs:
         mine = os.path.join(mmq.BUILD, mod + '.hsaco'); ship = unbundle(obj); sf = _funcs(ship)
         syms = [s for s in sorted(_funcs(mine)) if s.startswith('_ZL') and s in sf]
-        if mod == 'prefill_mmq_glue':
+        if mod == 'pf_gg_mmq_glue':
             syms = [s for s in syms if ('quantize' in s) == ('quantize' in obj)]
         bad = [s for s in syms if _dis(mine, s) != _dis(ship, s)]
-        want = len([s for s in _funcs(mine) if s.startswith('_ZL') and (mod != 'prefill_mmq_glue' or ('quantize' in s) == ('quantize' in obj))])
+        want = len([s for s in _funcs(mine) if s.startswith('_ZL') and (mod != 'pf_gg_mmq_glue' or ('quantize' in s) == ('quantize' in obj))])
         tot += len(syms)
         check(not bad and len(syms) == want, f'codegen {mod} vs {os.path.basename(obj)}: {len(syms) - len(bad)} / {want} kernels '
               f'with ignite\'s instructions' + (f' (differ: {[b[:60] for b in bad]})' if bad else ''))

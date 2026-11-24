@@ -1,8 +1,8 @@
-"""The dense qwen35 prefill's GEMMs (kernels/q35_prefill.hip) on a card against float64, on real rows of a model file: Q4_K
-and Q6_K (q3m_prefill.hip's kernels, included as they are) and the two formats this object adds, Q8_0 and Q5_K. A file
-with codebook formats (ThinkingCap) runs on kernels/q35_prefill_tcap.hip, which adds IQ4_XS / IQ3_XXS / IQ3_S (the IQ
+"""The dense qwen35 prefill's GEMMs (kernels/pf_q35_swift.hip) on a card against float64, on real rows of a model file: Q4_K
+and Q6_K (pf_q3m.hip's kernels, included as they are) and the two formats this object adds, Q8_0 and Q5_K. A file
+with codebook formats (ThinkingCap) runs on kernels/pf_q35_tcap.hip, which adds IQ4_XS / IQ3_XXS / IQ3_S (the IQ
 study's kernels) and IQ2_S, the grid formats read in the record layout. A file with the GSQ-RCO formats (the plain
-Qwen3.8-27B) runs on kernels/q35_prefill_gsq.hip: ThinkingCap's object + IQ2_XS / Q2_K / IQ1_M (and the IQ study's
+Qwen3.8-27B) runs on kernels/pf_q35_gsq.hip: ThinkingCap's object + IQ2_XS / Q2_K / IQ1_M (and the IQ study's
 IQ2_XXS), in the decode engine's record layouts.
 
   tools/guard.sh LOG 900 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35_prefill_mm.py GGUF
@@ -13,7 +13,7 @@ from the host decoder (caminus.own_dequant). The error of each output is measure
 (the scale of the fp32 rounding); the test asserts the worst at most 1e-5 of it, prints the mean and the worst per
 format, and checks the Q4_K / Q5_K overflow branch: one token whose 32-value sums pass 65,504 (fp16's range).
 Every tensor's bytes are read into ordinary memory (Tensor.pread); every allocation is checked against the card's cap.
---ref-module NAME: also run every launch on another build of the same object (e.g. the previous commit's q35_prefill.hsaco
+--ref-module NAME: also run every launch on another build of the same object (e.g. the previous commit's pf_q35_swift.hsaco
 copied into the kernel dir as q35_prefill_base.hsaco) and require the outputs BITWISE equal: a change that keeps every
 sum's arithmetic (prefetching, staging, tiling) must keep every output's bits.
   ... test_q35_prefill_mm.py GGUF [--ref-module q35_prefill_base]
@@ -62,7 +62,7 @@ def main():
     Kmax = max(F.T[n].shape[0] for n in picks.values())
     capacity.check([dev.index], [(130 * Kmax * 2 + 130 * 256 * 4 * 2 + 256 * Kmax * 2) / capacity.MIB * 1.5], 'q35 prefill GEMM test')
     tc = any(f in picks for f in IQK)
-    obj = 'q35_prefill_gsq' if any(f in picks for f in GSQ) else 'q35_prefill_tcap' if tc else 'q35_prefill'
+    obj = 'pf_q35_gsq' if any(f in picks for f in GSQ) else 'pf_q35_tcap' if tc else 'pf_q35_swift'
     mod = hip.Module(obj)
     print(f'NOTE object: {obj}', flush=True)
     refmod = hip.Module(refname) if refname else None

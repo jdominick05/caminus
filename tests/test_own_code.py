@@ -1,8 +1,8 @@
 """The own-code gate of the qwen3moe line (Qwen3-30B-A3B), CPU only:
-  - the decode module (kernels/k3_q3m_lean.hip, + _trace) and the prefill objects (kernels/q3m_prefill.hip; the two-card
-    prefill's q3m_prefill_tp.hip and the exchange's prefill_tp.hip): no ggml /
+  - the decode module (kernels/dec_q3m.hip, + _trace) and the prefill objects (kernels/pf_q3m.hip; the two-card
+    prefill's pf_q3m_tp.hip and the exchange's pf_tp.hip): no ggml /
     llama.cpp header in their include closure (every #include "..." followed inside kernels/), and build.sh gives them no
-    ggml include path (their compile lines are the generic loop's or the k3_q3m case, not the k3_gguf one)
+    ggml include path (no pattern of its GGUF-build case names them; the own decode modules get max-ilp)
   - the serve path for the architecture imports neither gguf (gguf-py) nor tokenizers: the modules caminus serve loads
     for it, imported under a hook that refuses both, and arch.Q3MoE selects the own BPE ('own')
   - with a qwen3moe or qwen35moe GGUF given (--model; skipped otherwise): its header facts (arch.meta) and vocabulary through
@@ -11,7 +11,7 @@
 The end-to-end form: tools/serve_smoke1.py --block-imports gguf,tokenizers (a GPU run: the server under an import hook, and
 the include closure of every code object it reports having loaded).
   python -I tests/test_own_code.py [--model GGUF]"""
-import argparse, os, re, subprocess, sys
+import argparse, fnmatch, os, re, subprocess, sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 sys.path.insert(0, os.path.join(ROOT, 'tools')); sys.path.insert(0, os.path.join(ROOT, 'python'))   # (python/ first: tools/caminus.py would shadow the package)
 from own_closure import audit   # noqa: E402
@@ -23,34 +23,37 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
-for top in ('k3_q3m_lean.hip', 'k3_q3m_lean_trace.hip', 'k3_q3m_lean_kvq8.hip', 'q3m_prefill_kvq8.hip', 'k3_q3m_lean_tp.hip', 'k3_q3m_lean_tp_trace.hip',   # (+ its two-card build)
-            'k3_q3m_lean_tp_kvq8.hip',                       # (the two-card Q8 KV build)
-            'k3_q3m_lean_yarn.hip', 'k3_q3m_lean_kvq8_yarn.hip', 'k3_q3m_lean_tp_yarn.hip', 'k3_q3m_lean_tp_kvq8_yarn.hip',
-            'q3m_prefill_yarn.hip', 'q3m_prefill_kvq8_yarn.hip',   # (the long-context mode's YaRN builds)
-            'k3_q3m_ver.hip', 'k3_q3m_ver_trace.hip', 'q3m_prefill.hip',
-            'q3m_prefill_tp.hip', 'prefill_tp.hip',          # (its two-card prefill: the slot sum, and the exchange's add)
-            'k3_q3m_iq.hip', 'k3_q3m_iq_trace.hip', 'q3m_prefill_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
-            'k3_q3m_rs4.hip', 'k3_q3m_rs2.hip', 'own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
-            'k3_q35_swift.hip', 'k3_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)
-            'own_mv_q35.hip',                                 # (its standalone own tiles: ThinkingCap's formats, IQ2_S included)
-            'own_mv_q2_0.hip',                                # (the standalone own Q2_0 tiles: Qwen3.6's experts, the Coder's down)
-            'k3_q35_tcap.hip', 'k3_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
-            'k3_q35_moe.hip',                                 # (the qwen35moe decode module: the same rule, its Q2_0 tile included)
-            'q35m_prefill.hip', 'q35m_prefill_kvq8.hip', 'prefill_attn_q35.hip', 'prefill_attn_q35_yarn.hip', 'prefill_glue_q35.hip',   # (its batched prefill's objects)
-            'q35_prefill_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
-            'q35_prefill.hip', 'prefill_attn_q35d.hip', 'prefill_gdn_q35.hip', 'prefill_glue_q35d.hip',
+TOPS = ('dec_q3m.hip', 'dec_q3m_trace.hip', 'dec_q3m_kvq8.hip', 'pf_q3m_kvq8.hip', 'dec_q3m_tp.hip', 'dec_q3m_tp_trace.hip',   # (+ its two-card build)
+            'dec_q3m_tp_kvq8.hip',                       # (the two-card Q8 KV build)
+            'dec_q3m_yarn.hip', 'dec_q3m_kvq8_yarn.hip', 'dec_q3m_tp_yarn.hip', 'dec_q3m_tp_kvq8_yarn.hip',
+            'pf_q3m_yarn.hip', 'pf_q3m_kvq8_yarn.hip',   # (the long-context mode's YaRN builds)
+            'dec_q3m_ver.hip', 'dec_q3m_ver_trace.hip', 'pf_q3m.hip',
+            'pf_q3m_tp.hip', 'pf_tp.hip',          # (its two-card prefill: the slot sum, and the exchange's add)
+            'dec_q3m_iq.hip', 'dec_q3m_iq_trace.hip', 'pf_q3m_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
+            'dec_q3m_rs4.hip', 'dec_q3m_rs2.hip', 'bench_own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
+            'dec_q35_swift.hip', 'dec_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)
+            'bench_own_mv_q35.hip',                                 # (its standalone own tiles: ThinkingCap's formats, IQ2_S included)
+            'bench_own_mv_q2_0.hip',                                # (the standalone own Q2_0 tiles: Qwen3.6's experts, the Coder's down)
+            'dec_q35_tcap.hip', 'dec_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
+            'dec_q35m.hip',                                 # (the qwen35moe decode module: the same rule, its Q2_0 tile included)
+            'pf_q35m.hip', 'pf_q35m_kvq8.hip', 'pf_gg_attn_q35m.hip', 'pf_gg_attn_q35m_yarn.hip', 'pf_gg_glue_q35m.hip',   # (its batched prefill's objects)
+            'pf_q35_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
+            'pf_q35_swift.hip', 'pf_gg_attn_q35.hip', 'pf_gg_gdn_q35.hip', 'pf_gg_glue_q35.hip',
             'kv_codec.hip',    # (staged own Q8 KV codec and cache-specialized dense modules)
-            'k3_q35_gsq_kvq8.hip', 'k3_q35_swift_kvq8.hip', 'k3_q35_swift_ver_kvq8.hip',
-            'k3_q35_tcap_kvq8.hip', 'k3_q35_tcap_ver_kvq8.hip'):
+            'dec_q35_gsq_kvq8.hip', 'dec_q35_swift_kvq8.hip', 'dec_q35_swift_ver_kvq8.hip',
+            'dec_q35_tcap_kvq8.hip', 'dec_q35_tcap_ver_kvq8.hip')
+for top in TOPS:
     cl, missing, bad = audit(top)
     check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
-ref = audit('k3_gguf_q3m_own.hip')[2]
-check(bool(ref), f'the detector itself: the full GGUF module (k3_gguf_q3m_own.hip) is flagged ({ref})')
+ref = audit('dec_q3m_gg.hip')[2]
+check(bool(ref), f'the detector itself: the full GGUF module (dec_q3m_gg.hip) is flagged ({ref})')
 bs = open(os.path.join(ROOT, 'build.sh')).read()
-gg_case = ''.join(re.findall(r'\*k3_gguf\*\.hip\).*', bs))
-check(re.search(r'kernels/k3_q3m\*\.hip\|kernels/k3_q35_\*\.hip\)\s*extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\)', bs) is not None and
-      'k3_q3m' not in gg_case and 'k3_q35' not in gg_case,
-      'build.sh: k3_q3m*.hip and k3_q35_*.hip get max-ilp and no ggml include path; q3m_prefill.hip the generic loop')
+gg = re.search(r'^\s*(dec_q4x_\*\|[^)\n]*)\)\n\s*extra=\(-DGGML_USE_HIP', bs, re.M)
+gg_pats = gg.group(1).split('|') if gg else []
+named = sorted(t for t in TOPS for p in gg_pats if fnmatch.fnmatchcase(t[:-len('.hip')], p))
+check(bool(gg_pats) and not named and fnmatch.fnmatchcase('dec_q3m_gg', gg.group(1).split('|')[4])
+      and re.search(r'^\s*dec_q3m\|dec_q3m_\*\|dec_q35_\*\) extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs, re.M) is not None,
+      f'build.sh: no GGUF-build pattern ({gg_pats}) names an object above ({named}); the own decode modules get max-ilp, pf_q3m the default')
 
 # the serve path under an import hook refusing gguf and tokenizers
 MODS = ('caminus.serve.cli', 'caminus.serve.server', 'caminus.serve.k3_session', 'caminus.serve.worker', 'caminus.serve.generate',
