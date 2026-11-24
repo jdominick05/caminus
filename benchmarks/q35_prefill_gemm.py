@@ -130,6 +130,9 @@ def engine_mode():
         if isinstance(W, dict): return W['fmt'], int(W['rows']), int(W['K']), W.get('name', '?')
         return W[0], int(W[1]), int(W[2]), names.get(W[3].data_ptr(), '?')
     calls, routing = [], []
+    def held(*ts, what):   # (every recording copy is projected before it is made: the engine's checks cover only its own buffers)
+        need = sum(t.numel() * t.element_size() for t in ts) / 2 ** 20
+        capacity.check([dev.index or 0], [need], f'q35_prefill_gemm --engine: {what} ({need:.2f} MiB)')
     YW = {'mm': (3, None), 'mm_q2_0': (3, 5), 'mm_gu': (4, 6)}   # (the output's and the positional work's argument index)
     def rec(meth):
         f = getattr(O, meth); yi, wi = YW[meth]
@@ -137,7 +140,8 @@ def engine_mode():
             W = a[0]; work = kw.get('work', a[wi] if wi is not None and len(a) > wi else None)
             fmt, R, K, nm = wkey(W)
             if work is not None:   # (the items as they are now: the next layer's grouping rewrites them)
-                items, nitems, bound, xs, yd = work; work = (items.clone(), nitems.clone(), bound, xs.clone(), yd.clone())
+                items, nitems, bound, xs, yd = work; held(items, nitems, xs, yd, what='recorded work items')
+                work = (items.clone(), nitems.clone(), bound, xs.clone(), yd.clone())
                 if 'work' in kw: kw = dict(kw, work=work)
                 else: a = a[:wi] + (work,) + a[wi + 1:]
             n = kw.get('n'); gu = meth == 'mm_gu'
@@ -150,7 +154,7 @@ def engine_mode():
     gname = 'group9' if hasattr(O, 'group9') else 'group'
     g0 = getattr(O, gname)
     def grp(ids, npairs, *a, **kw):
-        routing.append(ids[:npairs].clone()); return g0(ids, npairs, *a, **kw)
+        held(ids[:npairs], what='recorded routing'); routing.append(ids[:npairs].clone()); return g0(ids, npairs, *a, **kw)
     setattr(O, gname, grp)
     def setattrs(o_, spec):   # (--set / --ref-set: name=value,...; values are ints)
         for kv in filter(None, (spec or '').split(',')):
@@ -199,7 +203,7 @@ def engine_mode():
             if ref is not None:   # (bitwise: every launch of the group on both objects, its output compared)
                 nd = 0
                 for i in idx:
-                    y = calls[i]['y']; replay(ref, [i]); torch.cuda.synchronize(dev); y0 = y.clone()
+                    y = calls[i]['y']; replay(ref, [i]); torch.cuda.synchronize(dev); held(y, what='the ref arm\'s output copy'); y0 = y.clone()
                     replay(O, [i]); torch.cuda.synchronize(dev); nd += int((y.view(torch.int32) != y0.view(torch.int32)).sum()); del y0
                 print(f'  {"BITWISE" if nd == 0 else "DIFFER"} ref ({ref.module} {A.ref_set or ""}) vs own ({O.module} {A.set or ""}): {label} ({len(idx)} launches'
                       + (f', {nd} values differ)' if nd else ')'), flush=True)
