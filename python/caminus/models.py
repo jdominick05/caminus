@@ -150,12 +150,14 @@ SAMPLING = {
     # (enable_thinking=False), we suggest using Temperature=0.7, TopP=0.8, TopK=20, MinP=0, and PresencePenalty=1.5").
     'qwen3-30b-a3b': Sampling(0.6, 0.95, 20, 0.0, 1.5, None, 32768,
                               nothink=Sampling(0.7, 0.8, 20, 0.0, 1.5, None, 32768)),
-    # https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/345d467b117d1fd5eda9b879a5988de9ae5f47a7/README.md ("Thinking mode for
-    # general tasks: temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0", the set
-    # its agent evaluations' temperature / top_p match; its "precise coding" set is 0.6 / presence 0; "an output length of
-    # 32,768 tokens for most queries"); nothink: its "Instruct (or non-thinking) mode" set. The GSQ-hybrid GGUF card
+    # https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/345d467b117d1fd5eda9b879a5988de9ae5f47a7/README.md: the card has no
+    # set named for agent use. Its agent evaluations ran at "temp=1.0, top_p=0.95" (SWE-bench, NL2Repo) and "temp=1.0,
+    # top_p=0.95, top_k=20" (Terminal-Bench 2.0), with no presence penalty stated, and its generation_config.json ships
+    # temperature 1.0 / top_p 0.95 / top_k 20 and no penalty. Thinking: that set (presence 0, as served for coding agents),
+    # not its "general tasks" set (presence_penalty=1.5) or its "precise coding" set (temperature 0.6); "an output length
+    # of 32,768 tokens for most queries". nothink: its "Instruct (or non-thinking) mode" set. The GSQ-hybrid GGUF card
     # (revision 34a912bd) states none.
-    'qwen3.6': Sampling(1.0, 0.95, 20, 0.0, 1.5, 1.0, 32768, nothink=Sampling(0.7, 0.8, 20, 0.0, 1.5, 1.0, 32768)),
+    'qwen3.6': Sampling(1.0, 0.95, 20, 0.0, 0.0, 1.0, 32768, nothink=Sampling(0.7, 0.8, 20, 0.0, 1.5, 1.0, 32768)),
 }
 
 
