@@ -61,9 +61,6 @@ info ggml_commit "$gg_commit"
 info ggml_dirty "$gg_dirty"
 for src in kernels/*.hip; do
     out=build/$(basename "$src" .hip).hsaco
-    # test builds (kernels/k3_gguf*_swiglu.hip: REAP-308 with the swiglu glue, the forced-unfused shared expert) only
-    # with K3_TEST_BUILDS=1
-    case "$src" in *_swiglu.hip) [ "${K3_TEST_BUILDS:-0}" = 1 ] || continue ;; esac
     case "$src" in kernels/prefill_mmq.hip|kernels/prefill_moe.hip|kernels/prefill_dense.hip) continue ;; esac   # below: their own pipeline
 
     extra=(); std=c++20

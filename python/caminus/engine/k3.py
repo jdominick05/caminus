@@ -255,15 +255,14 @@ ATTN_SS_OF['k3_q35_moe_kvq8_trace'] = 128
 GG_FMT = {'IQ3_XXS': 0, 'IQ4_NL': 1, 'Q6_K': 2, 'Q8_0': 3, 'Q4_K': 4, 'Q5_K': 5, 'IQ4_XS': 6, 'IQ2_S': 7, 'IQ3_S': 8, 'Q2_0': 9, 'Q3_K': 10}   # Q3_K: the qwen35moe HauhauCS modules only
 GG_FMT_NAME = {v: k for k, v in GG_FMT.items()}
 Q8_1_MODE = {0: 'PLAIN', 1: 'SILU', 2: 'SWIGLU'}   # OP_GG_Q8_1 Seg.work: x, silu(x * rs), silu(x) * Seg.gs[i] (SWIGLU: the
-                                                  # k3_gguf_gsq modules and the REAP-308 test build k3_gguf_swiglu only)
+                                                  # modules built with K3_Q8_SWIGLU only, not REAP-308's)
 
 # What each code object implements, as (op, format) pairs: the formatted ops (GG matvec / MoE / dense gate-up by GGUF
 # format, F32 / BF16 matvecs, the q8_1 glue modes). A tape with a pair outside its module's set fails at build (or, with
 # build(strict=False), at run), never silently on the device (unknown formats fall to Q8_0 there, unknown ops to a nop).
 _REAP_FMTS = ('IQ3_XXS', 'IQ4_NL', 'Q6_K', 'Q8_0')
 _Q8_1 = {('Q8_1', m) for m in Q8_1_MODE.values()}
-# REAP-308's modules have no SWIGLU glue (K3_Q8_SWIGLU: its never-taken branch cost their k3_run ~0.04-0.07 ms per token);
-# the test build k3_gguf_swiglu (K3_TEST_BUILDS=1 ./build.sh) has it, for the forced-unfused shared expert on REAP-308
+# REAP-308's modules have no SWIGLU glue (K3_Q8_SWIGLU: its never-taken branch cost their k3_run ~0.04-0.07 ms per token)
 CAPS_REAP = frozenset({(op, f) for op in ('MV', 'MOE_GU', 'MOE_DOWN', 'GU_DENSE') for f in _REAP_FMTS} | {('F32_MV', 'F32')} |
                       (_Q8_1 - {('Q8_1', 'SWIGLU')}))
 # the GSQ-RCO Coder module's per-op whitelist (spec-gsq-port.md 4b, from tools/gg_inventory.py = kernels/k3_gguf_gsq.hip's
@@ -272,7 +271,6 @@ CAPS_GSQ = frozenset({('MV', f) for f in ('Q4_K', 'Q5_K', 'Q6_K', 'IQ4_XS', 'IQ4
                      {('MOE_GU', f) for f in ('IQ2_S', 'IQ3_XXS', 'IQ3_S', 'IQ4_XS')} | {('MOE_DOWN', f) for f in ('IQ4_NL', 'Q2_0')} |
                      {('BF16_MV', 'BF16')} | _Q8_1)
 MODULE_CAPS = {m: CAPS_REAP for m in ('k3_gguf', 'k3_gguf_trace', 'k3_gguf_mt', 'k3_gguf_mt_trace')}
-MODULE_CAPS.update({m: CAPS_REAP | {('Q8_1', 'SWIGLU')} for m in ('k3_gguf_swiglu', 'k3_gguf_mt_swiglu')})
 MODULE_CAPS.update({m: CAPS_GSQ for m in ('k3_gguf_gsq', 'k3_gguf_gsq_trace', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_mt_trace')})
 # the MTP block's module pair (kernels/k3_gguf_gsq_mtp*.hip, python/caminus/decode/mtp.py): the Coder's formats, the F32 router of the
 # sidecar (op_f32_mv is compiled into every GGUF module) and OP_BF16_MV's fp32 swiglu stage (work 2, bf16_mv(swiglu_mul=))
@@ -570,7 +568,7 @@ def module_for(module, T):
     instead of VGPR lanes (~450 reloads, T=4 pass 16.4 -> 23 ms); the QSA module compiles the same source cleanly (T=4 pass
     at depth 0 ~+0.5 ms vs the old trunk module, the cost of its indexer ops). k3_gguf_gsq_mt stays built (tests name it)"""
     m = module
-    if T > 1 and module in ('k3_gguf', 'k3_gguf_trace', 'k3_gguf_swiglu') and os.environ.get('K3_MT', '1') != '0':
+    if T > 1 and module in ('k3_gguf', 'k3_gguf_trace') and os.environ.get('K3_MT', '1') != '0':
         m = module.replace('k3_gguf', 'k3_gguf_mt', 1)
     elif T > 1 and module == 'k3_gguf_gsq' and os.environ.get('K3_MT', '1') != '0':
         m = 'k3_gguf_gsq_qsa_mt'

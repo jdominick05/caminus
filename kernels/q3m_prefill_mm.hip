@@ -21,7 +21,7 @@
 
 // q4k_b with fp16's exponent byte (0x64: 1024 + q) taken by v_perm from its first source instead of OR-ed in after it:
 // the same bits, two VALU instructions fewer per four values (the wide tile's limit is this unpack: with B = 1 it runs at
-// ~104 TF on the XT, q35_prefill_abl1)
+// ~104 TF on the XT, a Q3P_ABL 1 build)
 __device__ __forceinline__ h16_t q4k_bw(const u32x4_t & qw, int sh, _Float16 sc) {
     const h2_t s2 = {sc, sc}, o2 = {(_Float16)(-1024.0f) * sc, (_Float16)(-1024.0f) * sc};
     const uint32_t w4[4] = {qw.x, qw.y, qw.z, qw.w};

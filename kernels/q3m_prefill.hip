@@ -25,7 +25,7 @@
 #include "own_kv_codec.h"
 #include "own_kv_rot128.h"
 #endif
-// Q3P_ABL (measurement builds only: kernels/q35_prefill_abl*.hip; never the runtime objects, whose text is unchanged):
+// Q3P_ABL (measurement builds only, none built by build.sh now: docs/dev/yardsticks.md; the runtime objects' text is unchanged):
 // 1 a constant B (no weight loads or decode), 2 no X staging (the stage's barriers kept), 3 the WMMAs accumulate into acc
 // directly (no per-block / per-sub-block scale step, no Q4_K min term). Each removes one part of a tile to time the rest.
 #ifndef Q3P_ABL

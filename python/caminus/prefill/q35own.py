@@ -50,9 +50,9 @@ MODULE_GSQ = 'q35_prefill_gsq'   # (the plain Qwen3.8-27B GSQ-RCO files: kernels
 FORMATS_GSQ = FORMATS_TCAP + ('IQ2_XXS', 'IQ2_XS', 'Q2_K', 'IQ1_M')
 MM_KERNEL = {'Q8_0': 'q35p_mm_q8_0', 'Q5_K': 'q35p_mm_q5k'}
 MMW_N = 256   # (rows per workgroup of the wide Q4_K tile, kernels/q35_prefill.hip MMW_N)
-# the objects that carry q35_prefill.hip's wide tiles: it, its B = 1 measurement build, and the qwen35moe line's object
-# (kernels/q35m_prefill.hip includes it as it is)
-WIDE_MODULES = (MODULE, 'q35_prefill_abl1', 'q35m_prefill')
+# the objects that carry q35_prefill.hip's wide tiles: it and the qwen35moe line's object (kernels/q35m_prefill.hip includes
+# it as it is)
+WIDE_MODULES = (MODULE, 'q35m_prefill')
 MMW_MIN_PER_CU = 4   # (the wide tile only when its grid has at least this many workgroups per compute unit)
 # the codebook formats (the tcap object only): the decode engine's copies in place (IQ4_XS raw blocks; the grid formats
 # in the record layout), one more argument: the buffer's rows (Rtot)
@@ -98,7 +98,7 @@ class Ops(q3m_ops.Ops):
             return
         if fmt == 'Q4_K' and work is None and n is not None and self.module in WIDE_MODULES and not self.q4k_narrow:
             # the wide tile (kernels/q35_prefill.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows; ThinkingCap has
-            # no Q4_K weights; the measurement build q35_prefill_abl1 (B = 1) too; q4k_narrow = True runs q3p_mm_q4k and
+            # no Q4_K weights; q4k_narrow = True runs q3p_mm_q4k and
             # q4k_force_wide = True skips the grid-size rule, both for benchmarks/q35_prefill_gemm.py --arms ab)
             if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
             n = int(n)

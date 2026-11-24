@@ -115,10 +115,10 @@ What it says:
 
 ### Where the tile's time goes (ablation builds)
 
-`kernels/q35_prefill_abl{1,2,3}.hip` (measurement objects, not in the runtime set; wrong outputs by design) remove one
-part of the tiles each (kernels/q3m_prefill.hip `Q3P_ABL`): 1 the weight loads and decode (a constant B), 2 the X staging,
-3 the per-block / per-sub-block scale step. `benchmarks/q35_prefill_gemm.py --module q35_prefill_ablN`, Swift's shapes,
-M 2048, XT:
+Measurement builds of `kernels/q35_prefill.hip` with `-DQ3P_ABL=N` (not built by build.sh since the study ended; wrong
+outputs by design) remove one part of the tiles each (kernels/q3m_prefill.hip `Q3P_ABL`): 1 the weight loads and decode (a
+constant B), 2 the X staging, 3 the per-block / per-sub-block scale step. `benchmarks/q35_prefill_gemm.py --module OBJECT`
+on such a build, Swift's shapes, M 2048, XT:
 
 | removed | chunk of 2048 | Q8_0 attn_qkv | Q6_K ffn_up | Q4_K ffn_gate |
 |---|---|---|---|---|

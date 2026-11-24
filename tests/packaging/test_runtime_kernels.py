@@ -421,7 +421,7 @@ class RuntimeKernels(unittest.TestCase):
     def test_experimental_objects_remain_excluded_and_names_are_unique(self):
         names = kernels.RUNTIME_SET
         self.assertEqual(len(names), len(set(names)))
-        self.assertFalse(any(n.endswith(('_trace', '_swiglu')) or '_abl' in n for n in names))
+        self.assertFalse(any(n.endswith('_trace') for n in names))
         self.assertTrue(set(k3.Q35TPV_MODULES) <= set(names))
         self.assertTrue(set(k3.Q3M_VER_MODULES).isdisjoint(names))
         self.assertNotIn('kv_codec', names)

@@ -53,7 +53,7 @@ possible: `./build.sh` in a checkout, then `CAMINUS_KERNEL_DIR=<dir>`.
 | Sampler | `own_topk` (device candidate selection) |
 | Toolchain check | `smoke` (`caminus doctor --gpu` launches its saxpy once per card) |
 
-**Not shipped:** the `*_trace` profiling builds, the `*_swiglu` test builds, `gg_mmvf_ref` (a test reference), the
+**Not shipped:** the `*_trace` profiling builds, `gg_mmvf_ref` (a test reference), the
 dormant S1 engine (`k3`, `k3_trace`, `k3_u16`, `k3_mv`), the dormant training kernels (`actq`, `attn`, `core`, `fuse`, `gdn`,
 `headloss`, `wquant`) and the probes (`bw_bench`, `sync_bench`, `wmma_probe`). A missing object raises with the way to build it.
 Staged unused Q8 experiments and

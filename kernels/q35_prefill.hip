@@ -38,7 +38,7 @@ __device__ __forceinline__ h16_t q8_b(const uint8_t * p, bool ok) {
 // next pair's loads are issued before this pair's WMMAs (one pair ahead, across the stage barriers too). The B operand
 // is q8_b's bytes and arithmetic from registers (q8_wb), so every sum keeps its bits (the per-block order, the WMMA
 // chain, the fma with d: unchanged). Before: the loads of each block waited right before its WMMAs (Q8_0 37.5 TF at the
-// Swift shapes, 54.8 with the weight path removed: benchmarks/q35_prefill_gemm.py --module q35_prefill_abl1).
+// Swift shapes, 54.8 with the weight path removed: a Q3P_ABL 1 build, docs/dev/yardsticks.md).
 struct Q8Pair { uint32_t w[17]; };
 __device__ __forceinline__ void q8_pair_load(Q8Pair & P, const uint8_t * wrow, int pair) {
     const uint32_t * src = (const uint32_t *)(wrow + (size_t)pair * 68);
@@ -265,7 +265,7 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0_w(const uint8_t *
 
 // q4k_b with fp16's exponent byte (0x64: 1024 + q) taken by v_perm from its first source instead of OR-ed in after it:
 // the same bits, two VALU instructions fewer per four values (the wide tile's limit is this unpack: with B = 1 it runs at
-// ~104 TF on the XT, q35_prefill_abl1)
+// ~104 TF on the XT, a Q3P_ABL 1 build)
 __device__ __forceinline__ h16_t q4k_bw(const u32x4_t & qw, int sh, _Float16 sc) {
     const h2_t s2 = {sc, sc}, o2 = {(_Float16)(-1024.0f) * sc, (_Float16)(-1024.0f) * sc};
     const uint32_t w4[4] = {qw.x, qw.y, qw.z, qw.w};
@@ -285,7 +285,7 @@ __device__ __forceinline__ h16_t q4k_bw(const u32x4_t & qw, int sh, _Float16 sc)
 // q3p_mm_q4k with two 16-row tiles per wave: a workgroup is 64 tokens x 256 rows (8 waves x 32 rows), and each A operand
 // (a token tile's 16 values, from LDS) feeds the WMMAs of both row tiles. q3p_mm_q4k reads A once per WMMA; here once
 // per two and stages each token tile's X once per 256 rows instead of per 128 (an experiment: q3p_mm_q4k stops near
-// 52-57 TF with its weight path, staging or scale step removed, benchmarks/q35_prefill_gemm.py --module q35_prefill_abl1/2/3;
+// 52-57 TF with its weight path, staging or scale step removed, Q3P_ABL 1 / 2 / 3 builds: docs/dev/yardsticks.md;
 // halving the A reads is one candidate limit, measured by --arms ab). Every row's statements are
 // q3p_mm_q4k's in its order (the B operand from the row's own scale, P per block in the same k-step order, the min term
 // against the same sub-block sums, the same overflow branch), so each output keeps its bits: tests/prefill/

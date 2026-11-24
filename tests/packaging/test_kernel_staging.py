@@ -47,7 +47,7 @@ class Staging(unittest.TestCase):
                          source_dirty='0', kernel_tree_sha256=stager.kernel_tree_sha256(str(ROOT)),
                          ggml_commit='0' * 40, ggml_dirty='0')
         self.commands = {}
-        for name in K.RUNTIME_SET + ('k3_q3m_lean_trace', 'q35_prefill_abl1'):
+        for name in K.RUNTIME_SET + ('k3_q3m_lean_trace', 'k3_q35_swift_trace'):
             file = name + '.hsaco'
             (self.build / file).write_bytes(b'NOT EXECUTABLE: synthetic CPU packaging fixture ' + name.encode())
             self.commands[file] = f'<ROCM_PATH>/bin/amdclang++ SYNTHETIC {name}'
@@ -83,7 +83,7 @@ class Staging(unittest.TestCase):
             self.assertEqual((self.out / file).read_bytes(), (self.build / file).read_bytes())
             self.assertEqual(record['command'], self.commands[file])
             self.assertEqual(record['bytes'], (self.out / file).stat().st_size)
-        self.assertEqual(set(prov['not_shipped']), {'k3_q3m_lean_trace.hsaco', 'q35_prefill_abl1.hsaco'})
+        self.assertEqual(set(prov['not_shipped']), {'k3_q3m_lean_trace.hsaco', 'k3_q35_swift_trace.hsaco'})
         _, checks = K.verify(str(self.out))
         self.assertTrue(checks and all(ok for _, ok, _ in checks))
         setup_guard(self.out)
@@ -162,7 +162,7 @@ class Staging(unittest.TestCase):
     def test_extra_staged_object_refused_and_existing_provenance_not_replaced(self):
         self.staged()
         old = (self.out / K.PROVENANCE).read_bytes()
-        (self.out / 'q35_prefill_abl1.hsaco').write_bytes(b'extra')
+        (self.out / 'k3_q35_swift_trace.hsaco').write_bytes(b'extra')
         result = self.stage()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('outside the runtime set', result.stderr)

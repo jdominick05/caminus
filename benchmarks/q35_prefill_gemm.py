@@ -11,7 +11,7 @@ Timing: events around ITERS back-to-back launches, median of REPS such groups, t
 arms replay the ITERS launches from a captured HIP graph (its own tuner's method), the others launch eagerly.
 TFLOPS = 2 M N K / t. 'per chunk' = the shape's time x its count in the model (48 GDN blocks, 16 attention blocks).
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_gemm.py [GGUF] [--M 512,2048] [--arms own,torch,flydsl]
-      [--flydsl-src DIR] [--reps 7] [--iters 10] [--module q35_prefill_abl1]
+      [--flydsl-src DIR] [--reps 7] [--iters 10] [--module OBJECT]
 Run it on the XT alone first.
 --engine (a MoE file: qwen3moe, Qwen3-30B-A3B; qwen35moe, Qwen3.6-35B-A3B): every GEMM of one real chunk. The engine and its
 batched prefill load on the card, M tokens of --tokens REF.npz's 'seq' (a reference's public text: real routing) prefill as
@@ -41,7 +41,7 @@ from caminus.prefill import q35own, q3m_ops
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf', nargs='?', default=os.path.expanduser(os.environ.get('SWIFT', '')))
 ap.add_argument('--M', default='512,2048'); ap.add_argument('--arms', default='own,torch')
-ap.add_argument('--module', default=None, help='the prefill object of the own arm (default the file\'s: q35_prefill / q35_prefill_tcap); a measurement build such as q35_prefill_abl1 times what is left of the tile without one of its parts (kernels/q3m_prefill.hip Q3P_ABL; its outputs are wrong by design)')
+ap.add_argument('--module', default=None, help='the prefill object of the own arm (default the file\'s: q35_prefill / q35_prefill_tcap); a measurement build of kernels/q35_prefill.hip with -DQ3P_ABL=N times what is left of the tile without one of its parts (kernels/q3m_prefill.hip Q3P_ABL; its outputs are wrong by design)')
 ap.add_argument('--flydsl-src', default=None); ap.add_argument('--reps', type=int, default=7); ap.add_argument('--iters', type=int, default=10)
 ap.add_argument('--engine', action='store_true', help='a MoE file: every GEMM of one real chunk (above)')
 ap.add_argument('--tokens', default=None, help='--engine: a reference .npz whose seq is the chunk\'s text')

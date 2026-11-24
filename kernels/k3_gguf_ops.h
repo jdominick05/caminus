@@ -2,7 +2,7 @@
 // OP_GG_Q8_1: Seg.a = fp32 input [N], Seg.y = q8_1 blocks out; a task = 8 blocks, one wave per block (llama.cpp's
 //             quantize_q8_1_lane, so the bytes equal gg_quantize_q8_1's). Seg.work: 0 x, 1 silu(x * Seg.rs), 2 silu(x) *
 //             Seg.gs[i] (fp32 [N]: llama.cpp's unfused swiglu, the shared expert when gate and up differ in format; only
-//             with K3_Q8_SWIGLU: the k3_gguf_gsq modules and the REAP-308 test build k3_gguf_swiglu*).
+//             in the modules built with K3_Q8_SWIGLU).
 // OP_GG_MV:   Seg.W = raw GGUF blocks of N contiguous rows, Seg.a = q8_1 activations, Seg.y = fp32 out [N], K = ncols,
 //             Seg.work = format (GG_IQ3_XXS 0, GG_IQ4_NL 1, GG_Q6_K 2, GG_Q8_0 3); a task = rows_per_task rows, wave w
 //             takes rows w, w + 8, ...; each row is computed exactly as gg_mv_* does (same lane mapping, same vec_dot,
