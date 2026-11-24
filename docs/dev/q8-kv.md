@@ -124,6 +124,22 @@ The second checks verify passes on a Q8 cache bitwise against Q8 one-token decod
 None of these has run on a GPU. Still missing after them: model accuracy at depth (KLD against the F16 cache),
 speed, matching prefill, cache park/restore, the GSQ verify objects and two cards.
 
+## Qwen3.6-35B-A3B (one card)
+
+`Moe35Own(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q35_moe_kvq8` (`k3.Q35MOE_KV_Q8_OF`), with the dense
+line's format and rotations above (`kv_format_id` `q8_0-v1:qk-hadamard256:v-hadamard64-v1`; eight query heads per KV
+head). Its batched prefill `Q35MoEPrefill` follows the engine: the rotations run as `prefill_attn_q35`'s `pf_hadamard`
+(the decode op's butterflies), `kernels/q35m_prefill_kvq8.hip` (`kernels/q35_prefill.hip` under `Q35P_KV_Q8`) adds the
+append (`q35p_kv_append_q8`: the decode's `own_kv_q8_encode`, one thread per block) and the tiled attention over the rows
+(`q35p_attn_wm_q8`: each staged block decoded and rounded to fp16, one rounding more than the decode's reader). A
+refused block sets error bit 2 and marks the engine broken (`k3.InvalidKVEncoding`). `caminus serve --kv q8` takes the
+batched prefill in the native rope; the YaRN mode still runs K3 passes.
+
+Gates (RX 7900 XT): `tests/prefill/test_q35m_prefill_ops.py` (the append bitwise the decode module's, the refusals);
+prefill of positions 0 .. 63 then decode of 64 .. 127 against the float64 reference: mean KLD 2.34e-4, top-1 64/64,
+decode-only on the same rows 2.49e-4, 64/64 (F16: 3.54e-4 / 3.45e-4); chunk geometry and prompt-cache stops change no
+logit and no cache byte; 2,048 tokens from empty in 386 ms (5,304 tok/s; F16 376 ms).
+
 ## Qwen3-30B-A3B (one card)
 
 `Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to

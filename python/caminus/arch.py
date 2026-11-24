@@ -993,9 +993,9 @@ class Dense35(OneCard):
 class Q35MoE(OneCard):
     """qwen35moe (Qwen3.6-35B-A3B) on Caminus's own code: Moe35Own's tape on one card, T = 1 (kernels/k3_q35_moe.hip:
     the router, the BF16 embedding, the grouped Q2_0 expert tiles), the own reader and tokenizer. The prompt goes through
-    the own batched prefill (caminus.prefill.q35moe.Q35MoEPrefill, kernels/q35m_prefill.hip) with F16 KV and the native
-    rope; with --kv q8 or the YaRN mode it runs as K3 passes (KPassOnly: one decode pass a token, correct and slow) until
-    those modes have a prefill. No drafter for this line yet."""
+    the own batched prefill (caminus.prefill.q35moe.Q35MoEPrefill, kernels/q35m_prefill.hip; --kv q8 adds
+    kernels/q35m_prefill_kvq8.hip's rows and attention) with the native rope; in the YaRN mode it runs as K3 passes
+    (KPassOnly: one decode pass a token, correct and slow) until that mode has a prefill. No drafter for this line yet."""
     engine = 'engine.q35_moe:Moe35Own'
     rope_facts = QWEN35_ROPE
     kv_formats = ('f16', 'q8')  # (the Q8 KV object: kernels/k3_q35_moe_kvq8.hip, half the bytes per position)
@@ -1005,8 +1005,8 @@ class Q35MoE(OneCard):
     PREFILL_CHUNK = 2048       # (XT, from empty, 2,048 positions: chunk 2048 5,485 tok/s, 1024 4,759; 531 MiB at 2048)
 
     def _batched(self, opt):
-        """the modes the own batched prefill takes: F16 KV, the native rope"""
-        return opt.get('kv') != 'q8' and self.rope_mode(opt) is None
+        """the modes the own batched prefill takes: F16 or Q8 KV, the native rope"""
+        return self.rope_mode(opt) is None
 
     def build(self, opt, log=print, T=None):
         self.kv_check(opt)                                  # (opt['kv'] = 'q8': refused, never built as F16)
@@ -1024,8 +1024,8 @@ class Q35MoE(OneCard):
         """max_ctx auto's projection: Moe35Own's own statics, not the ggml engine's. The inherited OneCard.auto_need builds
         Qwen35One's shape, which reads the embedding row on the host (this engine uploads the whole BF16 table) and counts
         a q8 cache (this one is F16 only): 2.0 GiB low at 4096 and 4.3 GiB at 262,144, so the default serve could place a
-        context the own build then refuses. The batched prefill's buffers (F16 KV, native rope) are counted as build
-        allocates them."""
+        context the own build then refuses. The batched prefill's buffers (native rope; the same at F16 and Q8 KV) are
+        counted as build allocates them."""
         self.kv_check(opt)
         from .engine.q35_moe import Moe35Own
         path = opt['model']
