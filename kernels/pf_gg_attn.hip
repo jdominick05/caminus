@@ -44,7 +44,7 @@
 
 #define ATTN_SS 32                    // list positions per split (= kernels/ops_attn_split.h, caminus.k3.ATTN_SS)
 #define ATTN_CPR 2                    // cells per wave per scoring round (ops_attn_split.h's default; the Coder's modules)
-#ifndef ATTN_G                       // (pf_gg_attn_q35m.hip: 8 and 8, qwen35moe's 16 q / 2 kv heads = dec_q35m_gg / dec_q35m_hh)
+#ifndef ATTN_G                       // (pf_gg_attn_q35m: 8 and 8, qwen35moe's 16 q / 2 kv heads = dec_q35m_gg / dec_q35m_hh)
 #define ATTN_VH 12                    // query heads per V pass
 #define ATTN_G 12                     // query heads per kv head
 #endif
@@ -103,7 +103,7 @@ __device__ __forceinline__ size_t kv_pos_bytes(int M) { return (size_t)2 * (M / 
 // ---- pf_qk_nr: OP_QK_NR over rows: block t = row * heads + head (the decode's task index) ---------------------------------
 //   x: [rows, heads] heads at head_stride floats (the q GEMM's [q | gate] head pairs: stride 2 D), w: the norm [D], out
 //   [rows, heads, D]; position of row r: pos0 + r. D <= 512, 256 threads
-//   PF_QK_YARN (pf_gg_attn_q35m_yarn.hip): the qwen35moe decode op's YaRN form (ops_q35.h, K3_Q35_YARN): mt = the per-dim
+//   PF_QK_YARN (pf_gg_attn_q35m_yarn): the qwen35moe decode op's YaRN form (ops_q35.h, K3_Q35_YARN): mt = the per-dim
 //   frequency factor [n_rot / 2], ms = the magnitude scale; theta = pos * theta_scale^j * mt[j], cos / sin times ms
 extern "C" __global__ void __launch_bounds__(256) pf_qk_nr(const float * xin, int head_stride, int heads, const float * w, int D,
                                                            int nrot, float theta_scale, float eps, int pos0, float * out

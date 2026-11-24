@@ -1,4 +1,4 @@
-"""The own DFlash 2 drafter module (engine/q35_dflash.py on kernels/dec_q35_swift_dflash.hip) against the float64 reference
+"""The own DFlash 2 drafter module (engine/q35_dflash.py on kernels/objects.tsv dec_q35_swift_dflash) against the float64 reference
 (caminus.ref_dflash.RefDFlash, anchored on llama.cpp's own drafter: tools/reference/dflash35_anchor.py), on the same inputs:
   inject: synthetic target features [5, n, D] (the drafter's ops do not care where they come from) -> each drafter layer's
           ring rows K / V vs the reference's cache rows (worst relative error);

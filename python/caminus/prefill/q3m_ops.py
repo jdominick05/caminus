@@ -26,7 +26,7 @@ MMW_N = 256                 # (rows per workgroup of the wide tiles, kernels/pf_
 WIDE_MODULE = 'pf_q3m_mm'   # the 30B's wide kernels (q3p_mm_q4k_w / q3p_mm_q4k_gu / q3p_mm_q6k_w; kernels/pf_q3m_mm.hip)
 AT_T = 16                   # q3mp_attn: tokens per workgroup
 BLOCK_BYTES = {'Q4_K': 144, 'Q6_K': 210}
-KVQ8_MODULE = 'pf_q3m_kvq8'                                  # the Q8 KV cache's qk_rope / attn (kernels/pf_q3m_kvq8.hip)
+KVQ8_MODULE = 'pf_q3m_kvq8'                                  # the Q8 KV cache's qk_rope / attn (kernels/objects.tsv pf_q3m_kvq8)
 # the long-context mode's qk_rope (YaRN: Q3P_YARN, the frequency table and attention factor after eps in par): F16 and Q8
 # cache; every other kernel, the Q8 attention included, stays on its own object
 YARN_MODULE = {False: 'pf_q3m_yarn', True: 'pf_q3m_kvq8_yarn'}

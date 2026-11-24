@@ -1,4 +1,4 @@
-// DFlash 2 drafter ops on Caminus's own code, for the dense qwen35 line's drafter module (kernels/dec_q35_swift_dflash.hip;
+// DFlash 2 drafter ops on Caminus's own code, for the dense qwen35 line's drafter module (kernels/objects.tsv dec_q35_swift_dflash;
 // docs/dev/qwen38-27b.md). Included by kernels/ops_q35.h only under K3_Q35_DF: no other code object contains any of
 // this. The fp32 ops are kernels/ops_q4x_dflash.h's (the Coder's drafter, ggml-backed) with the ggml dependencies removed:
 // the scratch in LDS of their own (not AQ's), the selector's Q8_0 rows decoded inline (half scale + 32 int8 values), no

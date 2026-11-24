@@ -37,7 +37,7 @@ __device__ __forceinline__ void op_xchg(const Seg & sg, Sync * sy, int limit_us,
     // pad2 = 1 (pull, the producing card): the payload goes to aux (this card's own uncached slot), only the flag to the
     // peer; pad2 = 2 (pull, the reading card): the peer's partial is read from aux (the peer's uncached slot)
 // K3_XCHG_PUSH_ONLY: the same push-only form for a module whose register budget has no room for the selects (the
-// qwen3moe two-card module, kernels/dec_q3m_tp.hip: with them k3_run spilled 1 VGPR and 63 SGPRs, lean's 53)
+// qwen3moe two-card module, kernels/objects.tsv dec_q3m_tp: with them k3_run spilled 1 VGPR and 63 SGPRs, lean's 53)
 #if defined(K3_MT) || defined(K3_XCHG_PUSH_ONLY)   // (the multi-token module has no pull: its payload is T x larger and the selects cost it 4 VGPR spills)
     XG4 * __restrict__ px = (XG4 *)(peer + 16);
 #else

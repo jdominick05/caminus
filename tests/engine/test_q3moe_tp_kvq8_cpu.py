@@ -157,9 +157,10 @@ check(TPQ in kernels.RUNTIME_SET and 'dec_q3m_kvq8' in kernels.RUNTIME_SET and '
       and 'dec_q3m_tp' in kernels.RUNTIME_SET,
       'in the installed runtime set with the one-card Q8 module and pf_q3m_kvq8 (served: --cards 2 --kv q8); the F16 two-card '
       'module stays in it')
-src = [ln.strip() for ln in open(os.path.join(ROOT, 'kernels', TPQ + '.hip')) if ln.strip() and not ln.strip().startswith('//')]
-check(src == ['#define K3_Q3M_KV_Q8', '#define K3_Q3M_ADD_RMS_PIN', '#include "dec_q3m_tp.hip"'],
-      f'kernels/{TPQ}.hip: the Q8 switch and the add_rms16 pin over the two-card module, nothing else')
+sys.path.append(os.path.join(ROOT, 'tools'))   # (after python/: tools/caminus.py would shadow the package)
+from own_closure import rows   # noqa: E402
+check(rows().get(TPQ) == ('dec_q3m_tp', [('K3_Q3M_KV_Q8', ''), ('K3_Q3M_ADD_RMS_PIN', '')]),
+      f'kernels/objects.tsv {TPQ}: the Q8 switch and the add_rms16 pin over the two-card module, nothing else')
 E = k3.Engine(module=TPQ, grid=8, T=1)
 check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
       and E.status_words().numel() == k3.STATUS_WORDS + 1 and k3.Engine(module='dec_q3m_tp', grid=8).kv_error is None,

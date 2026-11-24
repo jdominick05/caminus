@@ -148,7 +148,7 @@ __device__ __forceinline__ void own_rows_q6k_planes_mt(const uint8_t * __restric
     }
 }
 
-// ---- the dense qwen35 verify module's T-token tiles (kernels/dec_q35_swift_ver.hip, K3_Q35_VER): the weights unpacked
+// ---- the dense qwen35 verify module's T-token tiles (kernels/objects.tsv dec_q35_swift_ver, K3_Q35_VER): the weights unpacked
 // once per pass and reused by every token. Per token the statements and their order are the one-token tile's (the same
 // products, the same dot2 chains from 0, the same fma chain per row), so every sum keeps that tile's bits; what goes is
 // the repeat of the unpacking (nibbles / bytes -> fp16) and of the scale decode for tokens 1 .. T - 1. Measured on the

@@ -1,5 +1,5 @@
 // T-token forms of ThinkingCap's one-round-trip tiles (the dense qwen35 line's ThinkingCap verify module,
-// kernels/dec_q35_tcap_ver.hip, through kernels/ops_q35_tcap.h q35t_op_mv under K3_Q3M_VER): IQ4_XS (quant_iq.h),
+// kernels/objects.tsv dec_q35_tcap_ver, through kernels/ops_q35_tcap.h q35t_op_mv under K3_Q3M_VER): IQ4_XS (quant_iq.h),
 // IQ3_XXS / IQ3_S (own_rows_iqg_1rt, the runtime format), IQ2_S (quant_iq2s.h), Q5_K (quant_q5k.h). Q6_K has its
 // own (quant_ver.h own_rows_q6k_planes_mt2).
 // As quant_ver.h's mt2 forms: a pass's weight words are loaded once for the pass's tokens; per token j its activations

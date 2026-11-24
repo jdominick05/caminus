@@ -391,7 +391,7 @@ def main():
     if a.block_imports:   # the own-code gate's device half: what the process loaded, by its own record
         from own_closure import audit
         objs = ((S.get(port, '/props')[1] or {}).get('caminus') or {}).get('code_objects') or []
-        rep = {o: audit(o + '.hip') for o in objs}
+        rep = {o: audit(o) for o in objs}
         bad = {o: (r[1], r[2]) for o, r in rep.items() if r[1] or r[2]}
         refused = [l for l in srv.lines if 'import refused' in l]
         check(objs and not bad and not refused, f'own code: the server loaded {objs}: no ggml / llama.cpp header in their include '

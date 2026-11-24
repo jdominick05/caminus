@@ -1,11 +1,11 @@
 """The own prefill's tiled attention, on random q and cache rows, no model file. Kernels (--kernel, default all):
   dense   kernels/pf_q35_swift.hip q35p_attn_wm through caminus.prefill.q35own.Ops.attn_wm (the dense line: F16 KV)
   moe     kernels/pf_q35m.hip q35mp_attn through caminus.prefill.q35moe.Ops.attn_wm (Qwen3.6-35B-A3B, F16 KV)
-  moe-q8  q35mp_attn_q8 from the Q8 object (kernels/pf_q35m_kvq8.hip), over Q8_0 rows (ref_kv's encode of random
+  moe-q8  q35mp_attn_q8 from the Q8 object (kernels/objects.tsv pf_q35m_kvq8), over Q8_0 rows (ref_kv's encode of random
           rows; the reference reads the decoded values)
   q3m     kernels/pf_q3m.hip q3mp_attn through caminus.prefill.q3m_ops.Ops.attn (Qwen3-30B-A3B: head dim 128, fp16 q
           and out, in the prefill driver's launch splits; kernels/pf_attn_g8.h, the 35B kernel's source)
-  q3m-q8  q3mp_attn_q8 from kernels/pf_q3m_kvq8.hip over Q8_0 rows
+  q3m-q8  q3mp_attn_q8 from kernels/objects.tsv pf_q3m_kvq8 over Q8_0 rows
 Each runs:
   - against float64 causal attention (the q rounded to fp16 as the kernel reads it): max / mean |difference| of the
     reference's rms, at chunks from position 0, past the 32-position staging tiles, from an odd position (the first

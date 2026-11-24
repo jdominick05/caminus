@@ -1,4 +1,4 @@
-// Own Q8-only dense attention helpers. Included only by K3_Q35_KV_Q8 wrappers;
+// Own Q8-only dense attention helpers. Included only by the K3_Q35_KV_Q8 builds (kernels/objects.tsv);
 // the F16 objects do not acquire either dispatch or scratch from this header.
 #pragma once
 #include "kv_codec_ops.h"

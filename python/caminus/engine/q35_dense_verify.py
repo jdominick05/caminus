@@ -1,5 +1,5 @@
 """The dense qwen35 line (Swift 1.5): T-token verify passes for speculative decoding, on the verify module
-(kernels/dec_q35_swift_ver.hip: the Swift decode module's ops with their T-token forms).
+(kernels/objects.tsv dec_q35_swift_ver: the Swift decode module's ops with their T-token forms).
 
 A pass runs T tokens at positions pos0 .. pos0 + T - 1 in one launch, on the decode engine's weights, KV caches and
 Gated DeltaNet states. Token t's logits, its KV rows and the recurrent states it leaves are bit for bit what T decode

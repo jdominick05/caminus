@@ -549,7 +549,7 @@ extern "C" __global__ void __launch_bounds__(256) q3p_swiglu(const float * __res
 // block 128. par: q_norm [128] | k_norm [128] | theta_scale | eps (the decode's block; the YaRN objects, Q3P_YARN: then
 // freq [64] | attention factor, caminus.rope.yarn_table). The host checks the positions against the cache's rows.
 #ifdef Q3P_KV_Q8
-// q3p_qk_rope_q8 (the Q8 KV object, kernels/pf_q3m_kvq8.hip): the same statements; the kv heads' K and V go to the
+// q3p_qk_rope_q8 (the Q8 KV object, kernels/objects.tsv pf_q3m_kvq8): the same statements; the kv heads' K and V go to the
 // cache row as Q8_0 blocks (kernels/kv_codec_ops.h's wave encode: wave w of a kv head's workgroup = block w of its K and
 // of its V), the decode Q8 module's row. K is the fp16-rounded values this kernel's F16 form stores, rotated by the head's
 // Walsh-Hadamard transform (kernels/kv_rot128.h); V the fp16-rounded values, unrotated. q16 is fp16 of the same

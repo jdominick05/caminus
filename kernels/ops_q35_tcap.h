@@ -6,7 +6,7 @@
 //                body, the grids in LDS, the record layout), IQ2_S (quant_iq2s.h, its packed grid in LDS, the record
 //                layout), Q5_K (quant_q5k.h, blocks in place), Q6_K (quant.h, the plane layout). No gate|up
 //                fusion (the feed-forward's gate and up differ in format in most of this file's blocks).
-//   OP_OWN_EMB   q35t_op_emb: the IQ2_S embedding row, decoded as caminus.own_dequant iq2_s (bitwise), or Q4_K (k3_own_ops).
+//   OP_OWN_EMB   q35t_op_emb: the IQ2_S embedding row, decoded as caminus.own_dequant iq2_s (bitwise), or Q4_K (ops_own.h).
 //   the launch hook: every workgroup stages the grids the tape's matvecs read (bits in the tape's first segment, the
 //                embedding's Seg.out_f32: 1 IQ3_XXS, 2 IQ3_S, 8 IQ2_S; set by the host, engine/k3.py).
 // The Swift and qwen3moe modules don't include this header: their code objects are unchanged.
@@ -23,7 +23,7 @@
 #include "quant_q2k.h"
 #include "quant_iq1m.h"
 #endif
-#ifdef K3_Q3M_VER   // (the verify module, kernels/dec_q35_tcap_ver.hip: the T-token tiles; the decode module never sees them)
+#ifdef K3_Q3M_VER   // (the verify module, kernels/objects.tsv dec_q35_tcap_ver: the T-token tiles; the decode module never sees them)
 #include "quant_tcap_ver.h"
 #ifdef K3_Q35_GSQ
 #include "quant_gsq_ver.h"
@@ -83,20 +83,20 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
             }                                                                                                          \
         }                                                                                                              \
     }
-#if defined(K3_Q35_DF) && defined(K3_Q35_GSQ)   // (the GSQ files' DFlash drafter module, kernels/dec_q35_gsq_dflash.hip: the target's Q4_K
+#if defined(K3_Q35_DF) && defined(K3_Q35_GSQ)   // (the GSQ files' DFlash drafter module, kernels/objects.tsv dec_q35_gsq_dflash: the target's Q4_K
                                                //  head's T-token matvec alone; no grid is staged there)
     { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_Q4_K: host-checked)
-#elif defined(K3_Q35_GSQ_M)   // (the GSQ files' IQ1_M verify module, kernels/dec_q35_gsq_ver_m.hip: their one IQ1_M matrix's T-token
+#elif defined(K3_Q35_GSQ_M)   // (the GSQ files' IQ1_M verify module, kernels/objects.tsv dec_q35_gsq_ver_m: their one IQ1_M matrix's T-token
                             //  matvec alone; with the other formats in dec_q35_gsq_ver, k3_run passed 96 VGPRs)
     { Q35T_MT_LOOP(own_rows_iq1m_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }   // (OWN_IQ1_M: host-checked)
 #else
-#ifndef K3_Q35_MTP   // (ThinkingCap's MTP drafter module, kernels/dec_q35_tcap_mtp.hip: its block is all Q6_K, the head a rows tile:
+#ifndef K3_Q35_MTP   // (ThinkingCap's MTP drafter module, kernels/objects.tsv dec_q35_tcap_mtp: its block is all Q6_K, the head a rows tile:
                      //  the other formats' T-token loops out of its register allocation; the host refuses them there)
     if (fmt == OWN_IQ4_XS) { Q35T_MT_LOOP(own_rows_iq4xs_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_IQ3_XXS || fmt == OWN_IQ3_S) { const int f = fmt == OWN_IQ3_XXS ? 0 : 1; Q35T_MT_LOOP(own_rows_iq3_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm, f)) }
     else if (fmt == OWN_IQ2_S) { Q35T_MT_LOOP(own_rows_iq2s_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q5_K) { Q35T_MT_LOOP(own_rows_q5k_mt<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
-#ifdef K3_Q35_GSQ   // (the GSQ verify module, kernels/dec_q35_gsq_ver.hip: kernels/quant_gsq_ver.h; Q4_K Swift's mt2 form; IQ1_M: dec_q35_gsq_ver_m)
+#ifdef K3_Q35_GSQ   // (the GSQ verify module, kernels/objects.tsv dec_q35_gsq_ver: kernels/quant_gsq_ver.h; Q4_K Swift's mt2 form; IQ1_M: dec_q35_gsq_ver_m)
     else if (fmt == OWN_IQ2_XXS) { Q35T_MT_LOOP(own_rows_iq2xxs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_IQ2_XS) { Q35T_MT_LOOP(own_rows_iq2xs_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
     else if (fmt == OWN_Q2_K) { Q35T_MT_LOOP(own_rows_q2k_mt<2>(sg.W, total, row, lim, x, xo, NT, l, sg.K, rm)) }
@@ -104,7 +104,7 @@ __device__ __forceinline__ void q35t_op_mv(const Seg & sg, int t) {
 #endif
     else
 #endif
-#if defined(K3_Q35_MTP) && defined(K3_Q35_GSQ)   // (the GSQ files' MTP drafter module, kernels/dec_q35_gsq_mtp.hip: their Q4_K head)
+#if defined(K3_Q35_MTP) && defined(K3_Q35_GSQ)   // (the GSQ files' MTP drafter module, kernels/objects.tsv dec_q35_gsq_mtp: their Q4_K head)
     if (fmt == OWN_Q4_K) { Q35T_MT_LOOP(own_rows_q4k_1rt_mt2<2>(sg.W, row, lim, x, xo, NT, l, sg.K, rm)) }
     else
 #endif
@@ -183,7 +183,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #ifdef K3_Q35_MTP   // (ThinkingCap's MTP drafter module: the greedy key, ops_q35.h's op; the host refuses the trunk's other ops)
     if (sg.op == OP_OWN_ARGMAX) { q35_op_argmax(sg, t); return true; }
 #endif
-#ifdef K3_Q35_DF   // (ThinkingCap's DFlash drafter module, kernels/dec_q35_tcap_dflash.hip: ops_q35.h's DF block; the host refuses the rest)
+#ifdef K3_Q35_DF   // (ThinkingCap's DFlash drafter module, kernels/objects.tsv dec_q35_tcap_dflash: ops_q35.h's DF block; the host refuses the rest)
     if (sg.op == OP_DF_CONV) { op_df_conv(sg, t); return true; }
     if (sg.op == OP_DF_TOPK) { op_df_topk(sg, t); return true; }
     if (sg.op == OP_DF_SELECT) { op_df_select(sg, t); return true; }

@@ -62,9 +62,9 @@
 #include "ggml_mmq/mmq.cuh"
 
 #if !defined(K3_DENSE_TYPE)
-#error "prefill_dense.hip: build with -DK3_DENSE_TYPE=<ggml_type> (build.sh)"
+#error "pf_gg_dense.hip: build with -DK3_DENSE_TYPE=<ggml_type> (build.sh)"
 #endif
-static_assert(K3_DENSE_TYPE == GGML_TYPE_Q6_K, "prefill_dense.hip: only Q6_K has a tile product here");
+static_assert(K3_DENSE_TYPE == GGML_TYPE_Q6_K, "pf_gg_dense.hip: only Q6_K has a tile product here");
 
 #define K3_DENSE_PREC GGML_PREC_Q8
 #define K3_DENSE_MAGIC 0x4B400000          // asfloat: 1.5 * 2^23 = 12,582,912.0f

@@ -32,7 +32,7 @@ Placement: every drafter weight on the XT (card 1) except the head, whose shards
 remote inject's weights. Launch kinds: 'step' (accept + inject + draft), 'fused' (inject + draft at pos_i + F, the generic
 loop), 'draft', 'inject'; each an XT launch and (except a local 'inject') an XTX launch. Segments are claimed in tape
 order, so the accept and the draft's first ops come before the inject's matvecs.
-The code object kernels/dec_q4x_dflash.hip holds only the drafter's ops (the trunk-only ops are compiled out: k3.DRAFT_OPS).
+The code object kernels/objects.tsv dec_q4x_dflash holds only the drafter's ops (the trunk-only ops are compiled out: k3.DRAFT_OPS).
 KV: a ring of `ring` positions of f16 K / V per layer, a fixed capacity.dflash_ring(window, T) = 4096 rows whatever max_pos
 (before impl:dflash-ring: the power of two >= max(4096, max_pos), 5,120 MiB at 262,144): logical position p in row p &
 mask, rows rewritten by position, so a rejected draft costs nothing (its rows are re-injected / overwritten by the next

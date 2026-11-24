@@ -1,5 +1,5 @@
 """The DFlash 2 drafter of the dense qwen35 line on Caminus's own code (incoai's Qwen3.8-27B-DFlash2 Q8_0 on Swift 1.5:
-kernels/dec_q35_swift_dflash.hip; the float64 oracle: caminus.ref_dflash). One card, the target engine's card: the drafter reads
+kernels/objects.tsv dec_q35_swift_dflash; the float64 oracle: caminus.ref_dflash). One card, the target engine's card: the drafter reads
 the target's Q6_K head and Q4_K embedding where the target engine holds them (Dense35Own.head / emb_dev), nothing copied.
 
 Two tapes of T = 4 rows on the drafter module:
@@ -24,7 +24,7 @@ from ..device import capacity
 from . import k3
 
 MODULE = 'dec_q35_swift_dflash'
-MODULE_TCAP = 'dec_q35_tcap_dflash'   # (ThinkingCap's: its IQ2_S embedding and Q8_0 head, kernels/dec_q35_tcap_dflash.hip)
+MODULE_TCAP = 'dec_q35_tcap_dflash'   # (ThinkingCap's: its IQ2_S embedding and Q8_0 head, kernels/objects.tsv dec_q35_tcap_dflash)
 T = 4                 # rows per tape: the drafter's block (1 anchor + 3 drafts) and the inject chunk (OWN_MT)
 RING = 4096           # f16 ring rows per drafter layer (>= window 2048 + T)
 ROWS = 512            # the batched prefill inject's rows per pass (inject_rows: a chunk in passes of this many; ~56 MiB of
@@ -114,7 +114,7 @@ class Dflash35:
 
     def __init__(self, path, eng, vram_check=True, per_wgp=None, chunk=0):
         """eng: the target Dense35Own, whose head and embedding the drafter reads in place: Swift 1.5 (Q6_K head, Q4_K
-        embedding: kernels/dec_q35_swift_dflash.hip) or ThinkingCap (Q8_0 head, IQ2_S embedding: kernels/dec_q35_tcap_dflash.hip)"""
+        embedding: kernels/objects.tsv dec_q35_swift_dflash) or ThinkingCap (Q8_0 head, IQ2_S embedding: kernels/objects.tsv dec_q35_tcap_dflash)"""
         gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: Q4_K head, IQ2_S embedding)
         want = ('Q4_K', 'IQ2_S') if gsq else ('Q8_0', 'IQ2_S') if eng.tcap else ('Q6_K', 'Q4_K')
         if (eng.head['fmt'], eng.emb.type) != want:

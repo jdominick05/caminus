@@ -994,11 +994,11 @@ class Q35MoE(OneCard):
     """qwen35moe (Qwen3.6-35B-A3B) on Caminus's own code: Moe35Own's tape on one card, T = 1 (kernels/dec_q35m.hip:
     the router, the BF16 embedding, the grouped Q2_0 expert tiles), the own reader and tokenizer. The prompt goes through
     the own batched prefill (caminus.prefill.q35moe.Q35MoEPrefill, kernels/pf_q35m.hip) in every mode: --kv q8 adds
-    kernels/pf_q35m_kvq8.hip's rows and attention, the YaRN mode pf_gg_attn_q35m_yarn's rope. No drafter for this
+    kernels/objects.tsv pf_q35m_kvq8's rows and attention, the YaRN mode pf_gg_attn_q35m_yarn's rope. No drafter for this
     line yet."""
     engine = 'engine.q35_moe:Moe35Own'
     rope_facts = QWEN35_ROPE
-    kv_formats = ('f16', 'q8')  # (the Q8 KV object: kernels/dec_q35m_kvq8.hip, half the bytes per position)
+    kv_formats = ('f16', 'q8')  # (the Q8 KV object: kernels/objects.tsv dec_q35m_kvq8, half the bytes per position)
     kv_fixed = None            # (F16 unless --kv q8: the choice builds dec_q35m_kvq8)
     drafter = 'off'
     tokenizer = 'own'          # (caminus.bpe: the qwen35 pre-tokenizer)

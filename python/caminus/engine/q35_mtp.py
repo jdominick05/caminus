@@ -1,5 +1,5 @@
 """The dense qwen35 line's multi-token-prediction drafter (Swift 1.5: blk.<n_layer>, all Q4_0) on the drafter module
-(kernels/dec_q35_swift_mtp.hip), beside a Dense35Own trunk on the same card.
+(kernels/objects.tsv dec_q35_swift_mtp), beside a Dense35Own trunk on the same card.
 
 The block (llama.cpp's pairing, src/models/qwen35.cpp): MTP position j reads the trunk's normed final hidden state of
 position j - 1 (h_{j-1}: output_norm of the last block's residual, Dense35Own's buf['h'] / Dense35Verify's buf['h'] rows)

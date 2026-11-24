@@ -10,7 +10,7 @@
 //                   ops_own.h OP_OWN_ADD_RMS16, whose weighted slot sum takes the eight routed experts and the gated
 //                   shared expert as a 9th (OWN_ADD_MAX_S: the dense line's any-length form has no slots)
 // What it does NOT have, deliberately: no ggml format tiles, no verify (T-token) forms and no drafter ops. The Q8 KV
-// cache is its own object (kernels/dec_q35m_kvq8.hip, #define K3_Q35_KV_Q8), as on the dense line. The host refuses a
+// cache is its own object (kernels/objects.tsv dec_q35m_kvq8, #define K3_Q35_KV_Q8), as on the dense line. The host refuses a
 // tape outside its set (caminus.k3.Q35MOE_OPS and MODULE_CAPS).
 //
 // One k3_run body holds the trunk's ~18 ops plus OP_ROUTER and the 9-slot add, against the 30B lean module's 7; an op
@@ -34,7 +34,7 @@
 #define ATTN_QL              // OP_ATTN_PART (kernels/ops_attn_split.h): the query heads in LDS, 4 V values per load round:
 #ifndef ATTN_COMB_U
 #define ATTN_COMB_U 12       // OP_ATTN_COMB: split records loaded ahead per round (the same additions in the same order);
-#endif                       // the Q8 build 16 (dec_q35m_kvq8.hip). F16: 16 spills 3 more SGPRs (short +0.7 %)
+#endif                       // the Q8 build 16 (dec_q35m_kvq8). F16: 16 spills 3 more SGPRs (short +0.7 %)
 #define ATTN_VU 4            // the same bits; per 128-cell task 86 -> 61 (VU) -> 50 us (QL) at 32K (XT, Q8); VU 8 spills
 #define OWN_ADD_MAX_S 9
 #define OWN_ADD_S 3           // the 9-slot add's slots per load round trip (kernels/ops_own.h): 1 -> 3 measured (XT,

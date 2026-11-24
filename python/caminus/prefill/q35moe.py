@@ -43,7 +43,7 @@ from .glue import Glue
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MODULE = 'pf_q35m'
-KVQ8_MODULE = 'pf_q35m_kvq8'   # the Q8 KV cache's append and attention (kernels/pf_q35m_kvq8.hip)
+KVQ8_MODULE = 'pf_q35m_kvq8'   # the Q8 KV cache's append and attention (kernels/objects.tsv pf_q35m_kvq8)
 WIDE_MODULE = 'pf_q35m_mm'   # the routed experts' wide Q2_0 tiles and fused gate | up (kernels/pf_q35m_mm.hip)
 ROUTER_FLOOR = 6.103515625e-5   # (the router's clamp on the top-k sum: Moe35Own's router_shexp default)
 # T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Unmeasured: q35own's value until a speed

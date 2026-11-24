@@ -1,4 +1,4 @@
-"""One-card probe of the qwen3moe two-card decode module (kernels/dec_q3m_tp.hip: K3_TP + K3_Q3M_TP, push-only
+"""One-card probe of the qwen3moe two-card decode module (kernels/objects.tsv dec_q3m_tp: K3_TP + K3_Q3M_TP, push-only
 OP_XCHG and OP_OWN_SLOT_SUM in the lean module's k3_run) before any two-card run: on ONE card
 (HIP_VISIBLE_DEVICES=<the non-display card>), nothing sent to a peer.
   - Q3MoEOne runs STEPS greedy steps on dec_q3m at its card's grid, then rebuilds the same tape on dec_q3m_tp and

@@ -71,7 +71,7 @@
 #include "ggml_mmq/mmq.cuh"
 
 #if defined(K3_MOE_TYPE) == defined(K3_MOE_GLUE)
-#error "prefill_moe.hip: build with exactly one of -DK3_MOE_TYPE=<ggml_type> or -DK3_MOE_GLUE (build.sh)"
+#error "pf_gg_moe.hip: build with exactly one of -DK3_MOE_TYPE=<ggml_type> or -DK3_MOE_GLUE (build.sh)"
 #endif
 
 #define K3_ROUTE_RANGE 2    // caminus.prefill_ops ROUTE_RANGE: an expert id out of [0, n_exp)

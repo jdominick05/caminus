@@ -1,5 +1,5 @@
 // T-token forms of the plain Qwen3.8-27B GSQ-RCO files' one-round-trip tiles (the GSQ verify module,
-// kernels/dec_q35_gsq_ver.hip, through kernels/ops_q35_tcap.h q35t_op_mv under K3_Q3M_VER + K3_Q35_GSQ): IQ2_XXS
+// kernels/objects.tsv dec_q35_gsq_ver, through kernels/ops_q35_tcap.h q35t_op_mv under K3_Q3M_VER + K3_Q35_GSQ): IQ2_XXS
 // (quant_iq.h own_rows_iqg_1rt, format 2), IQ2_XS (quant_iq2xs.h), Q2_K (quant_q2k.h), IQ1_M
 // (quant_iq1m.h). Q4_K has Swift's (quant_ver.h own_rows_q4k_1rt_mt2).
 // As quant_tcap_ver.h's forms: a pass's weight words are loaded once for the pass's tokens, one row at a time; per
@@ -192,7 +192,7 @@ __device__ __forceinline__ void own_rows_q2k_mt(const uint8_t * __restrict__ Wm,
 }
 
 // IQ1_M (record 8: 4 index bytes | 2 qh bytes | the two scales; header d), for the IQ1_M verify module
-// (kernels/dec_q35_gsq_ver_m.hip, alone in its dispatch): only the record is held across the pass; each group's grid entry,
+// (kernels/objects.tsv dec_q35_gsq_ver_m, alone in its dispatch): only the record is held across the pass; each group's grid entry,
 // delta, d (2 s + 1) and activation sum are read / recomputed per token, the one-token tile's own lookups and operations in
 // its order, so the same bits. k3_run: 92 VGPRs there (holding the row's grid words packed 99, the one-token tile run per
 // token 101); beside the other formats' loops in dec_q35_gsq_ver every form passed 96 (97 .. 120)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build every kernels/*.hip into a gfx1100 code object (build/<name>.hsaco), then the C++ runtime tests.
+# Build every kernels/*.hip and every kernels/objects.tsv row (a source with defines) into a gfx1100 code object
+# (build/<name>.hsaco), then the C++ runtime tests.
 # Code objects are runtime-neutral: PyTorch's HIP 7.2 runtime and TheRock's both load them via hipModuleLoadData.
 # BUILD_JOBS compiles run at once (default: the CPU count, at most 8; 1 = one after another). Every object is its own
 # compiler run with its own intermediates, so the count changes no byte of any output, and the output's order (this
@@ -104,6 +105,26 @@ for src in kernels/*.hip; do
     name=$(basename "$src" .hip)
     case "$name" in pf_gg_mmq|pf_gg_moe|pf_gg_dense) continue ;; esac   # below: their own pipeline
     build_one "$name" "$name.hip"
+done
+# kernels/objects.tsv: the objects built from another source with defines (OBJECT SOURCE DEFINES; the table's head says
+# how a row reads). A row's defines come first, then its SOURCE row's, as the include chain of define files did
+declare -A row_src row_defs; rows=()
+while IFS=$'\t' read -r obj src defs; do
+    case "$obj" in ''|'#'*) continue ;; esac
+    if [ -e "kernels/$obj.hip" ] || [ -n "${row_src[$obj]+x}" ] || [ -z "$defs" ]; then
+        echo "build.sh: kernels/objects.tsv row '$obj': a kernels/$obj.hip, a second row or no defines" >&2; exit 1
+    fi
+    row_src[$obj]=$src; row_defs[$obj]=$defs; rows+=("$obj")
+done < kernels/objects.tsv
+for obj in "${rows[@]}"; do
+    o=$obj; args=()
+    while [ -n "${row_src[$o]+x}" ]; do
+        IFS=';' read -ra ds <<< "${row_defs[$o]}"
+        for d in "${ds[@]}"; do case "$d" in *=*) args+=("-D$d") ;; *) args+=("-D$d=") ;; esac; done
+        o=${row_src[$o]}
+    done
+    [ -f "kernels/$o.hip" ] || { echo "build.sh: kernels/objects.tsv row '$obj': no kernels/$o.hip" >&2; exit 1; }
+    build_one "$obj" "$o.hip" "${args[@]}"
 done
 # kernels/pf_gg_mmq.hip (the batched prefill's quantized GEMMs: ggml-cuda's MMQ vendored in kernels/ggml_mmq, MIT): one
 # code object per format and one for the glue, each built the way ignite builds the same kernels (its compile_commands

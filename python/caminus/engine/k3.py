@@ -87,7 +87,7 @@ OP_QK_NR, OP_KV_APPEND, OP_ATTN_DEC, OP_GATE_MUL = 17, 18, 19, 20
 OP_PLE_GATE, OP_PLE_CONV, OP_ADD_SUM, OP_HADAMARD = 21, 22, 23, 24
 OP_HC_POST_RMS, OP_XCHG, OP_GDN_SAVE, OP_HC_AVG, OP_GG_GU_DENSE = 25, 26, 27, 28, 29
 OP_BF16_MV = 30   # the dec_q4x_gsq modules only (docs/specs/spec-gsq-port.md 4c, S2): llama.cpp's mul_mat_vec_f order
-# the DFlash 2 drafter's module only (kernels/dec_q4x_dflash.hip, kernels/ops_q4x_dflash.h; python/caminus/decode/dflash.py)
+# the DFlash 2 drafter's module only (kernels/objects.tsv dec_q4x_dflash, kernels/ops_q4x_dflash.h; python/caminus/decode/dflash.py)
 OP_DF_CONV, OP_DF_TOPK, OP_DF_SELECT, OP_DF_EMBED, OP_DF_MVCONV, OP_DF_ACCEPT = 31, 32, 33, 34, 35, 36
 DF_OPS = {OP_DF_CONV: 'CONV', OP_DF_TOPK: 'TOPK', OP_DF_SELECT: 'SELECT', OP_DF_EMBED: 'EMBED', OP_DF_MVCONV: 'MVCONV',
           OP_DF_ACCEPT: 'ACCEPT'}
@@ -130,11 +130,11 @@ Q3N_MODULES = ('dec_q3n', 'dec_q3n_ver')
 Q35H_MODULES = ('dec_q35m_hh', 'dec_q35m_hh_ver', 'dec_q35m_hh_trace')
 Q35D_MODULES = ('dec_q35_arex', 'dec_q35_arex_ver')   # the dense qwen35 line (AREX-2): one card; _ver: T > 1 (verify passes)   # (_trace: K3_TRACE timestamps, measurement only)
 Q35G_MODULES = ('dec_q35m_gg', 'dec_q35m_gg_ver')   # the 2-bit GSQ checkpoint (kernels/dec_q35m_gg.hip)
-OWN_MODULES = ('dec_q35_arex_own',)   # experimental: dec_q35_arex + OP_OWN_MV (kernels/dec_q35_arex_own.hip; T = 1 only)
-# qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/dec_q3m_gg.hip; engine/q3moe_one.py): the own ops plus the
+OWN_MODULES = ('dec_q35_arex_own',)   # experimental: dec_q35_arex + OP_OWN_MV (kernels/objects.tsv dec_q35_arex_own; T = 1 only)
+# qwen3moe (Qwen3-30B-A3B) on Caminus's own math (kernels/objects.tsv dec_q3m_gg; engine/q3moe_one.py): the own ops plus the
 # engine's non-split attention (OP_ATTN_DEC: head dim 128, 8 query heads per kv head); T = 1 only
 Q3M_LEAN_MODULES = ('dec_q3m', 'dec_q3m_trace')   # (kernels/dec_q3m.hip: the decode tape's ops only, no ggml headers; Q3M_LEAN_OPS below)
-# its Q8_0 KV builds (kernels/dec_q3m_kvq8.hip, and the two-card kernels/dec_q3m_tp_kvq8.hip: OP_OWN_ATTS writes and
+# its Q8_0 KV builds (kernels/objects.tsv dec_q3m_kvq8, and the two-card kernels/objects.tsv dec_q3m_tp_kvq8: OP_OWN_ATTS writes and
 # reads Q8_0 rows, kv_codec_ops.h's format with K and q through the head's Hadamard128, kv_rot128.h; a refused block sets
 # the sticky word after Sync, Engine.kv_error). Q8 module -> its F16 module: the same ops, pairs and dispatch (separate
 # objects, so the F16 ones keep their code); decode only (no verify build); served by caminus serve --kv q8 (one card or
@@ -145,7 +145,7 @@ Q3M_KV_Q8_BASE = {'dec_q3m_kvq8': 'dec_q3m', 'dec_q3m_tp_kvq8': 'dec_q3m_tp'}
 Q3M_KV_Q8_OF = {base: name for name, base in Q3M_KV_Q8_BASE.items()}
 Q3M_KV_Q8_MODULES = tuple(Q3M_KV_Q8_BASE)
 Q3M_LEAN_MODULES += ('dec_q3m_kvq8',)
-# their two-card builds (kernels/dec_q3m_tp.hip: K3_Q3M_TP adds OP_XCHG, push-only, and OP_OWN_SLOT_SUM; issue #86):
+# their two-card builds (kernels/objects.tsv dec_q3m_tp: K3_Q3M_TP adds OP_XCHG, push-only, and OP_OWN_SLOT_SUM; issue #86):
 # one-card module -> two-card module. engine/q3moe_tp.py builds its tapes on them (caminus serve --cards 2; the _trace build
 # is measurement only, outside the installed runtime set; the Q8 KV build, Q3MoETP(q8=True), serves --cards 2 --kv q8)
 Q3M_TP_OF = {'dec_q3m': 'dec_q3m_tp', 'dec_q3m_trace': 'dec_q3m_tp_trace', 'dec_q3m_kvq8': 'dec_q3m_tp_kvq8'}
@@ -180,15 +180,15 @@ Q3M_VER_MODULES = ('dec_q3m_ver', 'dec_q3m_ver_trace')   # (kernels/dec_q3m_ver.
 Q35RV_MODULES = ('dec_q35_gsq_ver',)
 Q35RVM_MODULES = ('dec_q35_gsq_ver_m',)
 Q35TV_MODULES = ('dec_q35_tcap_ver', 'dec_q35_tcap_ver_trace') + Q35RV_MODULES + Q35RVM_MODULES
-Q35RDF_MODULES = ('dec_q35_gsq_dflash',)   # (kernels/dec_q35_gsq_dflash.hip: the DFlash 2 drafter on the GSQ files' module: IQ2_S embedding, their Q4_K head)
+Q35RDF_MODULES = ('dec_q35_gsq_dflash',)   # (kernels/objects.tsv dec_q35_gsq_dflash: the DFlash 2 drafter on the GSQ files' module: IQ2_S embedding, their Q4_K head)
 Q35TDF_MODULES = ('dec_q35_tcap_dflash',) + Q35RDF_MODULES
-Q35RM_MODULES = ('dec_q35_gsq_mtp',)   # (kernels/dec_q35_gsq_mtp.hip: the GSQ files' MTP drafter: ThinkingCap's Q6_K block form, their Q4_K head)
-Q35TM_MODULES = ('dec_q35_tcap_mtp',) + Q35RM_MODULES   # (kernels/dec_q35_tcap_mtp.hip: ThinkingCap's MTP drafter: its Q6_K block, Q8_0 head, IQ2_S embedding)   # (kernels/dec_q35_tcap_dflash.hip: the DFlash 2 drafter on ThinkingCap's module: its IQ2_S embedding, Q8_0 head)   # (kernels/dec_q35_tcap_ver.hip: ThinkingCap's module with its T-token tiles, kernels/quant_tcap_ver.h)
+Q35RM_MODULES = ('dec_q35_gsq_mtp',)   # (kernels/objects.tsv dec_q35_gsq_mtp: the GSQ files' MTP drafter: ThinkingCap's Q6_K block form, their Q4_K head)
+Q35TM_MODULES = ('dec_q35_tcap_mtp',) + Q35RM_MODULES   # (kernels/objects.tsv dec_q35_tcap_mtp: ThinkingCap's MTP drafter: its Q6_K block, Q8_0 head, IQ2_S embedding)   # (kernels/objects.tsv dec_q35_tcap_dflash: the DFlash 2 drafter on ThinkingCap's module: its IQ2_S embedding, Q8_0 head)   # (kernels/objects.tsv dec_q35_tcap_ver: ThinkingCap's module with its T-token tiles, kernels/quant_tcap_ver.h)
 Q35R_MODULES = ('dec_q35_gsq',)   # (kernels/dec_q35_gsq.hip: the Qwen3.8-27B GSQ-RCO files; ThinkingCap's module + K3_Q35_GSQ's formats)
 Q35T_MODULES = ('dec_q35_tcap', 'dec_q35_tcap_trace', 'dec_q35_tcap_tp', 'dec_q35_tcap_tp_trace', 'dec_q35_tcap_tp_ver') + Q35TV_MODULES + Q35TDF_MODULES + Q35TM_MODULES + Q35R_MODULES   # (kernels/dec_q35_tcap.hip: ThinkingCap's formats on the same tape; kernels/ops_q35_tcap.h)
-Q35M_MODULES = ('dec_q35_swift_mtp',)   # (kernels/dec_q35_swift_mtp.hip: Swift's multi-token-prediction block, the drafter: engine/q35_mtp.py)
-Q35DF_MODULES = ('dec_q35_swift_dflash',)   # (kernels/dec_q35_swift_dflash.hip: the DFlash 2 drafter on Swift's ops + kernels/ops_q35_dflash.h: engine/q35_dflash.py)
-Q35SV_MODULES = ('dec_q35_swift_ver', 'dec_q35_swift_ver_trace') + Q35M_MODULES + Q35DF_MODULES   # (kernels/dec_q35_swift_ver.hip: the Swift module's ops with their T-token forms, for verify passes: engine/q35_dense_verify.py)
+Q35M_MODULES = ('dec_q35_swift_mtp',)   # (kernels/objects.tsv dec_q35_swift_mtp: Swift's multi-token-prediction block, the drafter: engine/q35_mtp.py)
+Q35DF_MODULES = ('dec_q35_swift_dflash',)   # (kernels/objects.tsv dec_q35_swift_dflash: the DFlash 2 drafter on Swift's ops + kernels/ops_q35_dflash.h: engine/q35_dflash.py)
+Q35SV_MODULES = ('dec_q35_swift_ver', 'dec_q35_swift_ver_trace') + Q35M_MODULES + Q35DF_MODULES   # (kernels/objects.tsv dec_q35_swift_ver: the Swift module's ops with their T-token forms, for verify passes: engine/q35_dense_verify.py)
 Q35M_ALL = Q35M_MODULES + Q35TM_MODULES   # (the MTP drafter modules of both lines)
 Q35TPV_MODULES = ('dec_q35_swift_tp_ver', 'dec_q35_tcap_tp_ver')   # (kernels/dec_q35_{swift,tcap}_tp_ver.hip: the two-card modules with the verify T-token forms, for two-card verify passes: engine/q35_dense_verify_tp.py)
 Q35V_MODULES = Q35SV_MODULES + Q35TV_MODULES + Q35TDF_MODULES + Q35TM_MODULES + Q35TPV_MODULES   # (every module with the T-token forms: Swift's and ThinkingCap's verify modules, the drafters)
@@ -276,7 +276,7 @@ MODULE_CAPS.update({m: CAPS_GSQ for m in ('dec_q4x_gsq', 'dec_q4x_gsq_trace', 'd
 # sidecar (op_f32_mv is compiled into every GGUF module) and OP_BF16_MV's fp32 swiglu stage (work 2, bf16_mv(swiglu_mul=))
 MTP_MODULES = ('dec_q4x_gsq_mtp', 'dec_q4x_gsq_mtp_ver')
 MODULE_CAPS.update({m: CAPS_GSQ | {('F32_MV', 'F32')} for m in MTP_MODULES})
-# the DFlash 2 drafter's module (kernels/dec_q4x_dflash.hip): MV Q8_0 (its layers, selector gate) and Q6_K (the target's head
+# the DFlash 2 drafter's module (kernels/objects.tsv dec_q4x_dflash): MV Q8_0 (its layers, selector gate) and Q6_K (the target's head
 # shards), the Q8_0 gate/up pair as GU_DENSE, the q8_1 glue incl. mode 3 (PERM: the inject's [L][T][D] features read as
 # [T][L * D]) and the drafter ops; no MoE. The flagged ATTN_DEC / KV_APPEND (window, non-causal, ring) are this module's too:
 # other modules would run them unflagged, so dflash_k3 builds its tapes only with this module
@@ -564,7 +564,7 @@ def check_resident(module, grid, fn='k3_run'):
 
 
 def module_for(module, T):
-    """the code object for T tokens per pass: dec_q4x_gg{,_trace} -> dec_q4x_gg_ver{,_trace} for T > 1 (kernels/dec_q4x_gg_ver.hip:
+    """the code object for T tokens per pass: dec_q4x_gg{,_trace} -> dec_q4x_gg_ver{,_trace} for T > 1 (kernels/objects.tsv dec_q4x_gg_ver:
     the multi-token fast paths live only there, so the one-token k3_run keeps its code); env K3_MT=0 keeps the plain one.
     env K3_QSA_ENTRY=1: the GSQ trunk modules' QSA variants (QSA_OF).
     dec_q4x_gsq at T > 1 -> dec_q4x_gsq_qsa_ver (the trunk's multi-token QSA module: the same trunk ops, the same bits): with

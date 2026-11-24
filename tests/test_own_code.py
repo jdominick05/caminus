@@ -1,7 +1,7 @@
 """The own-code gate of the qwen3moe line (Qwen3-30B-A3B), CPU only:
-  - the decode module (kernels/dec_q3m.hip, + _trace) and the prefill objects (kernels/pf_q3m.hip; the two-card
-    prefill's pf_q3m_tp.hip and the exchange's pf_tp.hip): no ggml /
-    llama.cpp header in their include closure (every #include "..." followed inside kernels/), and build.sh gives them no
+  - the decode module (kernels/dec_q3m.hip, + its kernels/objects.tsv builds) and the prefill objects (kernels/pf_q3m.hip;
+    the two-card prefill's pf_q3m_tp.hip and the exchange's pf_tp.hip): no ggml /
+    llama.cpp header in their sources' include closure (every #include "..." followed inside kernels/), and build.sh gives them no
     ggml include path (no pattern of its GGUF-build case names them; the own decode modules get max-ilp)
   - the serve path for the architecture imports neither gguf (gguf-py) nor tokenizers: the modules caminus serve loads
     for it, imported under a hook that refuses both, and arch.Q3MoE selects the own BPE ('own')
@@ -23,34 +23,34 @@ def check(c, msg):
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
 
 
-TOPS = ('dec_q3m.hip', 'dec_q3m_trace.hip', 'dec_q3m_kvq8.hip', 'pf_q3m_kvq8.hip', 'dec_q3m_tp.hip', 'dec_q3m_tp_trace.hip',   # (+ its two-card build)
-            'dec_q3m_tp_kvq8.hip',                       # (the two-card Q8 KV build)
-            'dec_q3m_yarn.hip', 'dec_q3m_kvq8_yarn.hip', 'dec_q3m_tp_yarn.hip', 'dec_q3m_tp_kvq8_yarn.hip',
-            'pf_q3m_yarn.hip', 'pf_q3m_kvq8_yarn.hip',   # (the long-context mode's YaRN builds)
-            'dec_q3m_ver.hip', 'dec_q3m_ver_trace.hip', 'pf_q3m.hip',
-            'pf_q3m_tp.hip', 'pf_tp.hip',          # (its two-card prefill: the slot sum, and the exchange's add)
-            'dec_q3m_iq.hip', 'dec_q3m_iq_trace.hip', 'pf_q3m_iq.hip',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
-            'dec_q3m_rs4.hip', 'dec_q3m_rs2.hip', 'bench_own_mv_rs.hip',            # (the row-scale study's: docs/dev/row-scale-study.md)
-            'dec_q35_swift.hip', 'dec_q35_swift_trace.hip',    # (the dense qwen35 line's decode module: the same rule)
-            'bench_own_mv_q35.hip',                                 # (its standalone own tiles: ThinkingCap's formats, IQ2_S included)
-            'bench_own_mv_q2_0.hip',                                # (the standalone own Q2_0 tiles: Qwen3.6's experts, the Coder's down)
-            'dec_q35_tcap.hip', 'dec_q35_tcap_trace.hip',      # (ThinkingCap's decode module: the same rule)
-            'dec_q35m.hip',                                 # (the qwen35moe decode module: the same rule, its Q2_0 tile included)
-            'pf_q35m.hip', 'pf_q35m_kvq8.hip', 'pf_gg_attn_q35m.hip', 'pf_gg_attn_q35m_yarn.hip', 'pf_gg_glue_q35m.hip',   # (its batched prefill's objects)
-            'pf_q35_tcap.hip',                           # (its prefill object: Swift's + the IQ GEMMs)
-            'pf_q35_swift.hip', 'pf_gg_attn_q35.hip', 'pf_gg_gdn_q35.hip', 'pf_gg_glue_q35.hip',
-            'kv_codec.hip',    # (staged own Q8 KV codec and cache-specialized dense modules)
-            'dec_q35_gsq_kvq8.hip', 'dec_q35_swift_kvq8.hip', 'dec_q35_swift_ver_kvq8.hip',
-            'dec_q35_tcap_kvq8.hip', 'dec_q35_tcap_ver_kvq8.hip')
+TOPS = ('dec_q3m', 'dec_q3m_trace', 'dec_q3m_kvq8', 'pf_q3m_kvq8', 'dec_q3m_tp', 'dec_q3m_tp_trace',   # (+ its two-card build)
+            'dec_q3m_tp_kvq8',                       # (the two-card Q8 KV build)
+            'dec_q3m_yarn', 'dec_q3m_kvq8_yarn', 'dec_q3m_tp_yarn', 'dec_q3m_tp_kvq8_yarn',
+            'pf_q3m_yarn', 'pf_q3m_kvq8_yarn',   # (the long-context mode's YaRN builds)
+            'dec_q3m_ver', 'dec_q3m_ver_trace', 'pf_q3m',
+            'pf_q3m_tp', 'pf_tp',          # (its two-card prefill: the slot sum, and the exchange's add)
+            'dec_q3m_iq', 'dec_q3m_iq_trace', 'pf_q3m_iq',   # (the IQ study's objects: docs/dev/iq-quant-study.md)
+            'dec_q3m_rs4', 'dec_q3m_rs2', 'bench_own_mv_rs',            # (the row-scale study's: docs/dev/row-scale-study.md)
+            'dec_q35_swift', 'dec_q35_swift_trace',    # (the dense qwen35 line's decode module: the same rule)
+            'bench_own_mv_q35',                                 # (its standalone own tiles: ThinkingCap's formats, IQ2_S included)
+            'bench_own_mv_q2_0',                                # (the standalone own Q2_0 tiles: Qwen3.6's experts, the Coder's down)
+            'dec_q35_tcap', 'dec_q35_tcap_trace',      # (ThinkingCap's decode module: the same rule)
+            'dec_q35m',                                 # (the qwen35moe decode module: the same rule, its Q2_0 tile included)
+            'pf_q35m', 'pf_q35m_kvq8', 'pf_gg_attn_q35m', 'pf_gg_attn_q35m_yarn', 'pf_gg_glue_q35m',   # (its batched prefill's objects)
+            'pf_q35_tcap',                           # (its prefill object: Swift's + the IQ GEMMs)
+            'pf_q35_swift', 'pf_gg_attn_q35', 'pf_gg_gdn_q35', 'pf_gg_glue_q35',
+            'kv_codec',    # (staged own Q8 KV codec and cache-specialized dense modules)
+            'dec_q35_gsq_kvq8', 'dec_q35_swift_kvq8', 'dec_q35_swift_ver_kvq8',
+            'dec_q35_tcap_kvq8', 'dec_q35_tcap_ver_kvq8')
 for top in TOPS:
     cl, missing, bad = audit(top)
-    check(not bad and not missing, f'{top}: includes {sorted(cl - {top})} (no ggml header; every one in kernels/)')
-ref = audit('dec_q3m_gg.hip')[2]
-check(bool(ref), f'the detector itself: the full GGUF module (dec_q3m_gg.hip) is flagged ({ref})')
+    check(not bad and not missing, f'{top}: its source includes {sorted(cl)} (no ggml header; every one in kernels/)')
+ref = audit('dec_q3m_gg')[2]
+check(bool(ref), f'the detector itself: the full GGUF module (dec_q3m_gg, a kernels/objects.tsv row) is flagged ({ref})')
 bs = open(os.path.join(ROOT, 'build.sh')).read()
 gg = re.search(r'^\s*(dec_q4x_\*\|[^)\n]*)\)\n\s*extra=\(-DGGML_USE_HIP', bs, re.M)
 gg_pats = gg.group(1).split('|') if gg else []
-named = sorted(t for t in TOPS for p in gg_pats if fnmatch.fnmatchcase(t[:-len('.hip')], p))
+named = sorted(t for t in TOPS for p in gg_pats if fnmatch.fnmatchcase(t, p))
 check(bool(gg_pats) and not named and fnmatch.fnmatchcase('dec_q3m_gg', gg.group(1).split('|')[4])
       and re.search(r'^\s*dec_q3m\|dec_q3m_\*\|dec_q35_\*\) extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs, re.M) is not None,
       f'build.sh: no GGUF-build pattern ({gg_pats}) names an object above ({named}); the own decode modules get max-ilp, pf_q3m the default')

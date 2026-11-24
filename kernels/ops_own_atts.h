@@ -102,7 +102,7 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
 #error "YaRN is built for the decode modules only (one card, two cards, F16 and Q8), not the verify module"
 #endif
 #ifdef K3_Q3M_KV_Q8
-// The Q8_0 KV build (kernels/dec_q3m_kvq8.hip): the cache rows are kernels/kv_codec_ops.h's wire format ([K blocks |
+// The Q8_0 KV build (kernels/objects.tsv dec_q3m_kvq8): the cache rows are kernels/kv_codec_ops.h's wire format ([K blocks |
 // V blocks], 32 values per block: a half scale and 32 signed codes, 34 bytes). K is rotated: a row is
 // caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the fp16-rounded K / V the F16 object stores (kernels/kv_rot128.h),
 // and q gets the same transform after its RoPE, so the scores are q . k in exact arithmetic. V is not rotated (llama.cpp
@@ -110,11 +110,11 @@ __device__ __forceinline__ void ats_layout(int npos, int S, int Lmin, int & L, i
 // 1.87e-3 against 2.09e-3 for K and Q alone, inside the draws' spread, and K's encode was most of the error: 4.49e-3 for K
 // alone, 2.15e-3 for V alone). Every other statement of the op is the F16 one; the position's own k / v in LDS are the
 // decoded codes (what every later pass reads).
-// Decode only: the verify build keeps the F16 cache. The two-card module's Q8 build (kernels/dec_q3m_tp_kvq8.hip) runs
+// Decode only: the verify build keeps the F16 cache. The two-card module's Q8 build (kernels/objects.tsv dec_q3m_tp_kvq8) runs
 // this text at ATS_MAXS 128 (the V scales below sit in sc[512 .. 768) while the chunks run; the 128 merge reuses q + scores
 // only after the last chunk), 33 spilled scalars against dec_q3m_tp's 66. k3_run beside dec_q3m's (96 VGPRs, 0 spilled, 53
 // spilled scalars): before the rotation 96, 0, 54 with this op alone, 31 with the module's K3_Q3M_ADD_RMS_PIN
-// (kernels/dec_q3m_kvq8.hip; the F16 object with the same pin: 33); with the rotation 31, and 19 with this op's own
+// (kernels/objects.tsv dec_q3m_kvq8; the F16 object with the same pin: 33); with the rotation 31, and 19 with this op's own
 // pin of its counts (below). Measured on the way: the V offsets left unpinned per chunk spilled 15 VGPRs; the
 // K / V half selects as 64-bit shifts spilled 1; the error word's address kept live across k3_run, 2 more spilled scalars.
 #ifdef K3_Q3M_VER

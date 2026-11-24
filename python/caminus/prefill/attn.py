@@ -37,7 +37,7 @@ from ..device.bufcheck import ALIGN, LaunchCheck, aligned, view_bytes   # noqa: 
 F32, F16, I32, U8 = torch.float32, torch.float16, torch.int32, torch.uint8
 _check = LaunchCheck('pf_gg_attn', align=4)   # every launch: each buffer stated once (fp32 / int32 pointers 4-byte aligned by default)
 ATTN_SS, ATTN_G, ATTN_D, ATTN_RS = 32, 12, 256, 260        # = kernels/pf_gg_attn.hip / ops_attn_split.h
-ATTN_G_OF = {'pf_gg_attn': 12, 'pf_gg_attn_q35m': 8, 'pf_gg_attn_q35': 6,     # query heads per kv head of each code object (pf_gg_attn_q35m.hip)
+ATTN_G_OF = {'pf_gg_attn': 12, 'pf_gg_attn_q35m': 8, 'pf_gg_attn_q35': 6,     # query heads per kv head of each code object (pf_gg_attn_q35m)
              'pf_gg_attn_q35m_yarn': 8}                                         # (pf_gg_attn_q35m with pf_qk_nr's YaRN form)
 YARN_ATTN = ('pf_gg_attn_q35m_yarn',)   # the objects whose pf_qk_nr takes the YaRN table (PF_QK_YARN): qk_nr(yarn=...) only there
 ROWS_PER_BLOCK = 64                                        # attention rows per record block (52 MiB of records at 65 splits)

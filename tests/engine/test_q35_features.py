@@ -1,5 +1,5 @@
 """Dense35Verify's feature export (a DFlash drafter's target layers: the residual entering each layer, llama.cpp's layer
-input) on the dense qwen35 line (Swift 1.5, kernels/dec_q35_swift_ver.hip), bit for bit:
+input) on the dense qwen35 line (Swift 1.5, kernels/objects.tsv dec_q35_swift_ver), bit for bit:
   1. the logits of a T = 4 pass with the export on equal the same pass with it off (the copies change nothing else);
   2. the own prefill's export (Q35OwnPrefill(feature_layers=)) over the same tokens is close to the verify export at the
      same positions: not bitwise, by design (the prefill's GEMMs sum in WMMA order; the copy itself is exact). Reported:

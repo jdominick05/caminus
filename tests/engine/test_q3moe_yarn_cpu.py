@@ -129,13 +129,14 @@ check(all(n in kernels.RUNTIME_SET for n in ship) and 'dec_q3m_kvq8' in kernels.
       and q3m_ops.YARN_MODULE == {False: 'pf_q3m_yarn', True: 'pf_q3m_kvq8_yarn'},
       'runtime set: the four YaRN decode objects, the two YaRN prefill objects and pf_q3m_kvq8 (the Q8 attention the mode '
       'runs); the native Q8 decode module ships too (caminus serve --kv q8)')
-src_ok = True
-for name, (define, inc) in {'dec_q3m_yarn': ('K3_Q3M_YARN', 'dec_q3m.hip'), 'dec_q3m_kvq8_yarn': ('K3_Q3M_YARN', 'dec_q3m_kvq8.hip'),
-                            'dec_q3m_tp_yarn': ('K3_Q3M_YARN', 'dec_q3m_tp.hip'), 'dec_q3m_tp_kvq8_yarn': ('K3_Q3M_YARN', 'dec_q3m_tp_kvq8.hip'),
-                            'pf_q3m_yarn': ('Q3P_YARN', 'pf_q3m.hip'), 'pf_q3m_kvq8_yarn': ('Q3P_YARN', 'pf_q3m_kvq8.hip')}.items():
-    src = [ln.strip() for ln in open(os.path.join(HERE, '..', '..', 'kernels', name + '.hip')) if ln.strip() and not ln.strip().startswith('//')]
-    src_ok &= src == [f'#define {define}', f'#include "{inc}"']
-check(src_ok, 'each YaRN module file is its define over its base, nothing else (the base objects keep their code)')
+sys.path.append(os.path.join(HERE, '..', '..', 'tools'))   # (after python/: tools/caminus.py would shadow the package)
+from own_closure import rows   # noqa: E402
+TABLE = rows()
+check(all(TABLE.get(name) == (base, [(define, '')]) for name, (define, base) in {
+          'dec_q3m_yarn': ('K3_Q3M_YARN', 'dec_q3m'), 'dec_q3m_kvq8_yarn': ('K3_Q3M_YARN', 'dec_q3m_kvq8'),
+          'dec_q3m_tp_yarn': ('K3_Q3M_YARN', 'dec_q3m_tp'), 'dec_q3m_tp_kvq8_yarn': ('K3_Q3M_YARN', 'dec_q3m_tp_kvq8'),
+          'pf_q3m_yarn': ('Q3P_YARN', 'pf_q3m'), 'pf_q3m_kvq8_yarn': ('Q3P_YARN', 'pf_q3m_kvq8')}.items()),
+      'each YaRN module is a kernels/objects.tsv row: its define over its base, nothing else (the base objects keep their code)')
 
 # ---- the engines (one card) -------------------------------------------------------------------------------------------------------
 P = os.path.join(A.scratch, 'tiny-q3m.gguf'); tiny_q3m.write(P)

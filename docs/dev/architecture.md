@@ -19,7 +19,7 @@ the prompt path        the decode engine
 (prefill/: reads a     (engine/: one persistent GPU launch per pass,
  prompt in chunks)      decode/: the drafters)
           |
-the GPU kernels                        (kernels/*.hip, built by build.sh)
+the GPU kernels                        (kernels/*.hip + kernels/objects.tsv, built by build.sh)
 ```
 
 ## The decode engine

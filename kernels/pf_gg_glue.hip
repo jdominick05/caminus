@@ -47,7 +47,7 @@ typedef __attribute__((address_space(1))) float GW;         // global stores, as
 typedef __attribute__((address_space(1))) const uint32_t GU32;
 #ifndef GLUE_NI
 #define GLUE_NI 10                                           // n_embd 2560 = GLUE_NI x 256 threads
-#endif                                                       // (pf_gg_glue_q35m.hip: 8, qwen35moe's n_embd 2048)
+#endif                                                       // (pf_gg_glue_q35m: 8, qwen35moe's n_embd 2048)
 
 // ---- helpers, copied from kernels/ops_gg.h (same code, so the same instructions and bits) ----------------------
 template <bool MAX>

@@ -4,7 +4,7 @@
 // kernels/ops_gg.h (the same statements: the module's k3_run is instruction for instruction the one the ggml-include
 // build produced, checked by disassembly when this file changed); the wave reductions are quant.h's wave_sum / wave_max
 // (the xor butterfly, partners 16 .. 1: the order every reference and gate of these ops was recorded with).
-// The two-card build (kernels/dec_q3m_tp.hip, K3_Q3M_TP) adds OP_XCHG (kernels/ops_xchg.h) and OP_OWN_SLOT_SUM inside
+// The two-card build (kernels/objects.tsv dec_q3m_tp, K3_Q3M_TP) adds OP_XCHG (kernels/ops_xchg.h) and OP_OWN_SLOT_SUM inside
 // the dispatch block below, so neither the one-card modules nor the dense modules that take these ops (ops_q35.h,
 // K3_OPS_NO_DISPATCH) change.
 #pragma once

@@ -711,7 +711,7 @@ extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float *
 }
 
 #ifdef Q35P_KV_Q8
-// q35p_kv_append_q8 (the Q8 KV object, kernels/pf_q35m_kvq8.hip): OP_KV_APPEND's Q8_0 rows, the decode Q8 module's
+// q35p_kv_append_q8 (the Q8 KV object, kernels/objects.tsv pf_q35m_kvq8): OP_KV_APPEND's Q8_0 rows, the decode Q8 module's
 // (ops_q35_kvq8.h q35_op_kv_append_q8: one thread per block, own_kv_q8_encode): cache[pos0 + t] = the blocks of k[t]
 // then of v[t], fp32 (the host rotates them first: K by Hadamard256, V by Hadamard64). A refused block ORs 2 into *err
 // and keeps its bytes; a row at or past `rows` is not written and ORs 1. Grid T.

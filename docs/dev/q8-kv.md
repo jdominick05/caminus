@@ -129,7 +129,7 @@ speed, matching prefill, cache park/restore, the GSQ verify objects and two card
 `Moe35Own(..., q8=True)` stores the KV cache as Q8_0 rows on `dec_q35m_kvq8` (`k3.Q35MOE_KV_Q8_OF`), with the dense
 line's format and rotations above (`kv_format_id` `q8_0-v1:qk-hadamard256:v-hadamard64-v1`; eight query heads per KV
 head). Its batched prefill `Q35MoEPrefill` follows the engine: the rotations run as `pf_gg_attn_q35m`'s `pf_hadamard`
-(the decode op's butterflies), `kernels/pf_q35m_kvq8.hip` (`kernels/pf_q35_swift.hip` and `kernels/pf_q35m.hip` under `Q35P_KV_Q8`) adds the
+(the decode op's butterflies), `kernels/objects.tsv pf_q35m_kvq8` (`kernels/pf_q35_swift.hip` and `kernels/pf_q35m.hip` under `Q35P_KV_Q8`) adds the
 append (`q35p_kv_append_q8`: the decode's `own_kv_q8_encode`, one thread per block) and the tiled attention over the rows
 (`q35mp_attn_q8`: each staged value fp16(code x scale), one rounding more than the decode's reader; at F16's speed, 48 TF
 at 30K: docs/dev/yardsticks.md). A
@@ -305,7 +305,7 @@ that row.
 ## Qwen3-30B-A3B (two cards)
 
 `Q3MoETP(..., q8=True)` stores each card's KV cache (its 2 of the 4 kv heads) as Q8_0 rows on `dec_q3m_tp_kvq8`:
-`kernels/dec_q3m_tp.hip` (the push-only `OP_XCHG`, `OP_OWN_SLOT_SUM`) with `K3_Q3M_KV_Q8` and `K3_Q3M_ADD_RMS_PIN`,
+`kernels/objects.tsv dec_q3m_tp` (the push-only `OP_XCHG`, `OP_OWN_SLOT_SUM`) with `K3_Q3M_KV_Q8` and `K3_Q3M_ADD_RMS_PIN`,
 the one-card Q8 module's two defines. `k3.Q3M_KV_Q8_BASE` maps it to `dec_q3m_tp`, `k3.Q3M_TP_OF` maps
 `dec_q3m_kvq8` to it, so it takes the two-card modules' ops, pairs, push-only check and 128 attention splits, and
 the Q8 modules' error word and byte cache. Its batched prefill `Q3MPrefillTP` runs the one-card Q8 kernels

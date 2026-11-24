@@ -1,7 +1,7 @@
-"""The qwen3moe decode module's two-card build (kernels/dec_q3m_tp.hip, + _trace; issue #86, PR 1) without a card:
+"""The qwen3moe decode module's two-card build (kernels/objects.tsv dec_q3m_tp, + _trace; issue #86, PR 1) without a card:
   - the device text: kernels/ops_q3m.h dispatches OP_XCHG and OP_OWN_SLOT_SUM only under K3_Q3M_TP, inside its
     K3_OPS_NO_DISPATCH block (so the dense modules that take its ops, ops_q35.h, never see them), with the exchange's
-    warm word and claim-time store under the same macro; only the two wrappers define K3_Q3M_TP / K3_XCHG_PUSH_ONLY; the
+    warm word and claim-time store under the same macro; only the two kernels/objects.tsv rows define K3_Q3M_TP / K3_XCHG_PUSH_ONLY; the
     slot sum is OP_OWN_MOE_SUM's fma chain with the sum stored; the op number is the host's
   - the host: k3.Q3M_TP_OF maps the lean modules (and the one-card Q8 KV module) to the two-card ones, their .hip files exist and build.sh compiles them as
     the other own decode modules (max-ilp, no ggml include path); their capabilities are lean's plus OWN_SLOT_SUM;
@@ -52,7 +52,7 @@ check(len(blocks) == 4 and '#include "ops_xchg.h"' in inside and 'own_op_slot_su
       and re.search(r'if \(sg\.op == OP_OWN_SLOT_SUM\) \{ own_op_slot_sum\(sg, t\); return true; \}', inside)
       and 'return xchg_warm(sg);' in inside and 'xchg_prefetch(sg);' in inside,
       'ops_q3m.h: the exchange header, the slot sum, both dispatch lines, the warm word and the claim-time store under K3_Q3M_TP')
-check(not re.search(r'OP_XCHG|OP_OWN_SLOT_SUM|xchg_warm|xchg_prefetch|k3_xchg\.h', code(outside)),
+check(not re.search(r'OP_XCHG|OP_OWN_SLOT_SUM|xchg_warm|xchg_prefetch|ops_xchg\.h', code(outside)),
       'ops_q3m.h: no exchange or slot sum outside K3_Q3M_TP (the one-card modules\' dispatch is unchanged)')
 disp = nd[nd.index('__device__ __forceinline__ bool k3_extra_op('):]; disp = disp[:disp.index('\n}\n')]
 check(disp.count('OP_XCHG') == 1 and disp.count('OP_OWN_SLOT_SUM') == 1, 'ops_q3m.h: k3_extra_op dispatches each new op once')
@@ -71,17 +71,22 @@ check(m and int(m.group(1)) == k3.OP_OWN_SLOT_SUM and nums.count(k3.OP_OWN_SLOT_
 xh = src('ops_xchg.h')
 check(xh.count('#if defined(K3_MT) || defined(K3_XCHG_PUSH_ONLY)') == 2 and '#ifdef K3_MT' not in xh,
       'kernels/ops_xchg.h: K3_XCHG_PUSH_ONLY selects the multi-token module\'s push-only form (both places)')
+sys.path.append(os.path.join(ROOT, 'tools'))   # (after python/: tools/caminus.py would shadow the package)
+from own_closure import rows   # noqa: E402
+TABLE = rows()
 defs = {}
 for f in sorted(os.listdir(os.path.join(ROOT, 'kernels'))):
     if f.endswith(('.hip', '.h')):
         for mac in ('K3_Q3M_TP', 'K3_XCHG_PUSH_ONLY'):
             if re.search(r'#define ' + mac + r'\b', src(f)): defs.setdefault(mac, []).append(f)
-check(defs == {'K3_Q3M_TP': ['dec_q3m_tp.hip'], 'K3_XCHG_PUSH_ONLY': ['dec_q3m_tp.hip']},
-      f'only kernels/dec_q3m_tp.hip defines K3_Q3M_TP and K3_XCHG_PUSH_ONLY ({defs})')
-tp, tpt = src('dec_q3m_tp.hip'), src('dec_q3m_tp_trace.hip')
-check(all(re.search(r'#define ' + mac + r'\b', tp) for mac in ('K3_TP', 'K3_Q3M_TP', 'K3_XCHG_PUSH_ONLY'))
-      and tp.rstrip().endswith('#include "dec_q3m.hip"') and '#define K3_TRACE' in tpt and tpt.rstrip().endswith('#include "dec_q3m_tp.hip"'),
-      'the wrappers: dec_q3m_tp = K3_TP + K3_Q3M_TP + K3_XCHG_PUSH_ONLY over dec_q3m; _trace = K3_TRACE over it')
+for obj, (_, ds) in TABLE.items():
+    for mac in ('K3_Q3M_TP', 'K3_XCHG_PUSH_ONLY'):
+        if mac in dict(ds): defs.setdefault(mac, []).append(obj)
+check(defs == {'K3_Q3M_TP': ['dec_q3m_tp'], 'K3_XCHG_PUSH_ONLY': ['dec_q3m_tp']},
+      f'only the kernels/objects.tsv row dec_q3m_tp defines K3_Q3M_TP and K3_XCHG_PUSH_ONLY, no kernels/ file ({defs})')
+check(TABLE.get('dec_q3m_tp') == ('dec_q3m', [('K3_TP', ''), ('K3_Q3M_TP', ''), ('K3_XCHG_PUSH_ONLY', '')])
+      and TABLE.get('dec_q3m_tp_trace') == ('dec_q3m_tp', [('K3_TRACE', '')]),
+      'the table rows: dec_q3m_tp = K3_TP + K3_Q3M_TP + K3_XCHG_PUSH_ONLY over dec_q3m; _trace = K3_TRACE over it')
 
 # ---- the host: names, build.sh, capabilities, the build check ---------------------------------------------------------------
 bs = open(os.path.join(ROOT, 'build.sh')).read()
@@ -89,10 +94,11 @@ NATIVE_TP_OF = {k: v for k, v in k3.Q3M_TP_OF.items() if k not in k3.Q3M_YARN_MO
 check(NATIVE_TP_OF == {'dec_q3m': 'dec_q3m_tp', 'dec_q3m_trace': 'dec_q3m_tp_trace', 'dec_q3m_kvq8': 'dec_q3m_tp_kvq8'}
       and all(k3.Q3M_TP_OF[k3.Q3M_YARN_OF[b]] == k3.Q3M_YARN_OF[k3.Q3M_TP_OF[b]] for b in ('dec_q3m', 'dec_q3m_kvq8'))
       and k3.Q3M_TP_MODULES == tuple(k3.Q3M_TP_OF.values())
-      and all(os.path.exists(os.path.join(ROOT, 'kernels', m + '.hip')) for m in k3.Q3M_TP_MODULES)
-      and 'for src in kernels/*.hip; do' in bs and re.search(r'^\s*dec_q3m\|dec_q3m_\*\|[^)\n]*\) extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs, re.M),
+      and all(m in TABLE or os.path.exists(os.path.join(ROOT, 'kernels', m + '.hip')) for m in k3.Q3M_TP_MODULES)
+      and 'for src in kernels/*.hip; do' in bs and 'done < kernels/objects.tsv' in bs and re.search(r'^\s*dec_q3m\|dec_q3m_\*\|[^)\n]*\) extra=\(-mllvm -amdgpu-sched-strategy=max-ilp\); std=c\+\+17', bs, re.M),
       'k3.Q3M_TP_OF: the native pairs, and each YaRN build\'s two-card form is the YaRN build of its native two-card module; '
-      'kernels/<name>.hip for each two-card module; build.sh compiles every kernels/*.hip, dec_q3m* with max-ilp and no ggml path')
+      'a kernels/objects.tsv row or kernels/<name>.hip for each two-card module; build.sh compiles every kernels/*.hip and '
+      'every table row, dec_q3m* with max-ilp and no ggml path')
 check(all(m in k3.Q3M_MODULES and k3.MODULE_CAPS[m] == k3.MODULE_CAPS['dec_q3m'] | {('OWN_SLOT_SUM', '-')} for m in k3.Q3M_TP_MODULES)
       and ('OWN_SLOT_SUM', '-') not in k3.MODULE_CAPS['dec_q3m'] and k3.Q3M_TP_OPS == k3.Q3M_LEAN_OPS | {k3.OP_XCHG, k3.OP_OWN_SLOT_SUM},
       'capabilities: the lean module\'s plus OWN_SLOT_SUM; ops: the lean set plus OP_XCHG and OP_OWN_SLOT_SUM')

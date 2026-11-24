@@ -32,7 +32,7 @@
 #include "ggml_mmq/mmq.cuh"
 
 #if defined(K3_MMQ_TYPE) == defined(K3_MMQ_GLUE)
-#error "prefill_mmq.hip: build with exactly one of -DK3_MMQ_TYPE=<ggml_type> or -DK3_MMQ_GLUE (build.sh)"
+#error "pf_gg_mmq.hip: build with exactly one of -DK3_MMQ_TYPE=<ggml_type> or -DK3_MMQ_GLUE (build.sh)"
 #endif
 
 #if defined(K3_MMQ_TYPE)

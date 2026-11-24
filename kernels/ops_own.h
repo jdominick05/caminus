@@ -9,7 +9,7 @@
 #include "quant.h"
 #ifdef K3_Q3M_VER
 #include "quant_ver.h"   // the T-token tiles: a pass's weight words held, each token's sums in turn
-#ifdef K3_Q35_MTP   // (the dense qwen35 drafter module, kernels/dec_q35_swift_mtp.hip: Swift's prediction block is Q4_0)
+#ifdef K3_Q35_MTP   // (the dense qwen35 drafter module, kernels/objects.tsv dec_q35_swift_mtp: Swift's prediction block is Q4_0)
 #include "quant_q4_0.h"
 enum { OWN_Q4_0 = 14 };   // (k3.py OWN_MTP_FMT)
 #endif
@@ -278,7 +278,7 @@ __device__ __forceinline__ void own_op_moe_sum(const Seg & sg, int t) {
         x[i] += acc;
     }
 }
-#ifdef K3_OWN_Q3M   // the qwen3moe engine's ops (kernels/dec_q3m_gg.hip): out of the other own module's register allocation
+#ifdef K3_OWN_Q3M   // the qwen3moe engine's ops (kernels/objects.tsv dec_q3m_gg): out of the other own module's register allocation
 // OP_OWN_EMB: x fp32 [N] = the Q4_K row tok of the embedding matrix W (raw GGUF blocks, Seg.K = row bytes), tok =
 // ((const int *)Seg.a)[0] clamped to [0, Seg.pad2) (the vocabulary). The arithmetic is caminus.own_dequant's, rounded
 // the same way (no fma: (d * sc) * q - dmin * m, each product and the difference rounded to fp32), so the device row is

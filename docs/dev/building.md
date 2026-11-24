@@ -25,7 +25,7 @@ git clone https://github.com/jdominick05/caminus && cd caminus
 ```bash
 export ROCM_PATH=/path/to/therock IGNITE=/path/to/ignite-llama PATCHELF=$(command -v patchelf)
 export TORCHLIB=$(python -c 'import torch, os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))')
-./build.sh                                   # every kernels/*.hip -> build/*.hsaco, then the C++ runtime tests
+./build.sh                                   # every kernels/*.hip and kernels/objects.tsv row -> build/*.hsaco, then the C++ runtime tests
 (cd panel && go build -o caminus-panel .)    # the panel
 ```
 

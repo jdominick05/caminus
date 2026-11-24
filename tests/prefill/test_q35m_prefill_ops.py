@@ -8,7 +8,7 @@ line's (those are tests/prefill/test_q35_prefill_ops.py's), over a chunk's rows,
   embedding  q35mp_emb_bf16 == OP_OWN_EMB on the BF16 table (Engine.own_emb), BITWISE
   yarn rope  pf_qk_nr of pf_gg_attn_q35m_yarn (PF_QK_YARN) == OP_QK_NR's YaRN form on dec_q35m (the same table and
              magnitude scale: engine.q35_moe.yarn_table, x4), BITWISE, k and q heads at positions past the native window
-  kv q8      q35p_kv_append_q8 (the Q8 KV object, kernels/pf_q35m_kvq8.hip) == OP_KV_APPEND on the Q8 decode module
+  kv q8      q35p_kv_append_q8 (the Q8 KV object, kernels/objects.tsv pf_q35m_kvq8) == OP_KV_APPEND on the Q8 decode module
              (dec_q35m_kvq8), BITWISE: a chunk's rows of rotated-looking fp32 K / V (an all-zero block among them) at a
              position offset; a non-finite value refuses its block (error bit 2), a row past the cache sets bit 1
   experts    q35mp_mm_q2_0 grouped by q3p_group's Q3P_GROUP_Y9 form (gate K 2048 and down K 512 of a block's experts): every (token, slot)

@@ -196,7 +196,7 @@ The llama.cpp column is `llama-server`'s own decode timing (`timings.predicted_p
 Both are measured through their servers below. llama.cpp's MTP output differed from its plain
 output on the code prompt from token 42; Caminus's is the plain loop's token for token.
 
-`engine/q35_mtp.py` runs the block on its own module (`kernels/dec_q35_swift_mtp.hip`). A round writes the block's rows
+`engine/q35_mtp.py` runs the block on its own module (`kernels/objects.tsv dec_q35_swift_mtp`). A round writes the block's rows
 for the last round's accepted drafts and the newest token from the verify pass's h rows, then chains 3 drafts on the
 card. The verify pass of 4 tokens keeps the drafts its own greedy tokens equal. `tools/guard.sh LOG 1800 python -I
 benchmarks/q35_mtp_spec.py GGUF --prompt 48 --n 128 --ids IDS.json` runs plain greedy decoding and the speculative loop
@@ -258,7 +258,7 @@ was recorded), so `--draft mtp` stays opt-in until it is explained (the default 
 #### Speculative decoding with DFlash 2 (served)
 
 The base model's DFlash 2 drafter (incoai's Qwen3.8-27B-DFlash2 Q8_0: 5 non-causal blocks reading 5 of the target's
-layers) on Caminus's own code: `kernels/dec_q35_swift_dflash.hip` (the Swift module's T-token matvecs plus
+layers) on Caminus's own code: `kernels/objects.tsv dec_q35_swift_dflash` (the Swift module's T-token matvecs plus
 `kernels/ops_q35_dflash.h`: the drafter's conv, top-k, selector, windowed attention and ring), `engine/q35_dflash.py`,
 `decode/dflash35.py`. The verify pass of 4 tokens checks its 3 drafts on the host. Every pass on the target feeds the
 drafter its features: the verify passes, the one-token passes and the batched prefill's chunks.
@@ -326,7 +326,7 @@ Measured 2026-11-11; llama.cpp with `llama-bench -fa 1` on the same card. The gr
 
 #### Speculative decoding with its own prediction block (served)
 
-ThinkingCap's multi-token-prediction block (`blk.64`, all Q6_K) on `kernels/dec_q35_tcap_mtp.hip` (the planes' T-token
+ThinkingCap's multi-token-prediction block (`blk.64`, all Q6_K) on `kernels/objects.tsv dec_q35_tcap_mtp` (the planes' T-token
 tiles, its Q8_0 head as a rows tile, the IQ2_S embedding reading the argmax key on the card for the chained steps),
 `engine/q35_mtp.py`, 3 drafts a round, verified by the 4-token pass. `tools/guard.sh LOG 3600 python -I
 benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --draft mtp --max-ctx 12288`, measured
@@ -360,8 +360,8 @@ and the rest acceptance.
 
 #### Speculative decoding with DFlash 2 (served)
 
-The same drafter on ThinkingCap's module (`kernels/dec_q35_tcap_dflash.hip`: its IQ2_S embedding, its Q8_0 head) and its
-verify module (`kernels/dec_q35_tcap_ver.hip`, the T-token tiles of `kernels/quant_tcap_ver.h`). `tools/guard.sh LOG
+The same drafter on ThinkingCap's module (`kernels/objects.tsv dec_q35_tcap_dflash`: its IQ2_S embedding, its Q8_0 head) and its
+verify module (`kernels/objects.tsv dec_q35_tcap_ver`, the T-token tiles of `kernels/quant_tcap_ver.h`). `tools/guard.sh LOG
 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --max-ctx 12288`, measured
 2026-11-12 with nothing else on the cards; the prompts are the 48-token inputs llama.cpp's own drafter was measured on;
 llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time). The Caminus columns are not rerun for 0.3.0 (inputs lost).
@@ -466,8 +466,8 @@ and part of its feed-forward rows (by the cards' bandwidth: 53 % on the XTX), an
 
 #### Speculative decoding on two cards (served)
 
-`caminus serve --cards 2` with `--draft mtp` or `--draft dflash`: the two-card verify tape (`kernels/dec_q35_swift_tp_ver.hip`,
-`kernels/dec_q35_tcap_tp_ver.hip`) on both cards, the one-card drafter and a full copy of the output head on one of them (MTP
+`caminus serve --cards 2` with `--draft mtp` or `--draft dflash`: the two-card verify tape (`kernels/objects.tsv dec_q35_swift_tp_ver`,
+`kernels/objects.tsv dec_q35_tcap_tp_ver`) on both cards, the one-card drafter and a full copy of the output head on one of them (MTP
 on card 0; DFlash on the card with more room left). DFlash is the two-card default for both models. Measured 2026-11-15
 on an RX 7900 XTX + RX 7900 XT with `tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS
 --scratch DIR --card 0,1 --cards 2 --draft KIND --max-ctx 40960`: three interleaved rounds, 128 greedy tokens. Every

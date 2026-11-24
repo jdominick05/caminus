@@ -45,7 +45,13 @@ CLAUDE.md imports this file.
 
 ## Layout (the parts that need a reason)
 
-- `kernels/*.hip`: device code only; `./build.sh` writes `build/*.hsaco` and records provenance.
+- `kernels/*.hip`: device code only; `./build.sh` writes `build/*.hsaco` and records provenance. A variant of a source
+  (a define over it: `_trace`, `_tp`, `_ver`, `_kvq8`, `_yarn`, ...) is a row of `kernels/objects.tsv` (object, source,
+  defines), not a file; `tools/own_closure.py` reads the same table. Names: `<stage>_<arch>[_<model>][_<variant>...]`,
+  stage `dec` (K3 decode modules), `pf` (prefill), `ops` / `quant` / `kv` (headers), `bench` / `ref` (tools only),
+  `train` (the S1 stack), `samp` (the sampler); arch the GGUF architecture (`q3m` qwen3moe, `q35` qwen35, `q35m`
+  qwen35moe, `q4x` qwen4exp, `q3n` qwen3next; `gg`: llama.cpp's math); variants in the order `tp`, `ver` | `mtp` |
+  `dflash`, `kvq8`, `yarn`, `trace`.
 - The builds of `kernels/dec_q4x_gg.hip` (`dec_q4x_*`, `dec_q35_arex*`, `dec_q35m_gg*`, `dec_q35m_hh*`, `dec_q3m_gg*`, `dec_q3n*`:
   `k3.GGUF_BUILDS`) are ONE engine compiled with different op / format whitelists: a persistent kernel has one
   register allocation for all its ops (budget 96 VGPRs, 0 spills) and a ~120-160 KB body against a 32 KB I-cache.
@@ -82,7 +88,7 @@ CLAUDE.md imports this file.
   `ops_q35.h`'s ops under `K3_Q35_NO_DISPATCH` and adds the IQ4_XS / IQ3_XXS / IQ3_S / IQ2_S / Q5_K / Q6_K
   one-round-trip matvec, the IQ2_S embedding and a launch hook staging the IQ grids; an edit there must leave
   `dec_q35_swift`'s `.text` unchanged. `engine/q35_dense.py module_of` picks the module from the file's formats.
-  Their two-card builds `dec_q35_swift_tp.hip` / `dec_q35_tcap_tp.hip` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
+  Their two-card builds `dec_q35_swift_tp` / `dec_q35_tcap_tp` (`k3.Q35_TP_OF`, `engine/q35_dense_tp.py`,
   `caminus serve --cards 2`) define `K3_TP`, which adds OP_XCHG from `kernels/ops_xchg.h` (the same exchange the GGUF
   modules include from `ops_gg.h`); the one-card modules' `.text` must stay unchanged by anything under `K3_TP`.
   Two-card drafting (`caminus serve --cards 2 --draft mtp|dflash`) is served for Swift 1.5 and ThinkingCap, DFlash2 by
@@ -95,30 +101,30 @@ CLAUDE.md imports this file.
   the card `Dense35TP.draft_card` picks once at placement from `context_fit` (stored in `opt['placement']`, read back by
   build). Its head copy and the drafter weights load through the trunk's uploader (`Uploader.loading` frames them in
   `CAMINUS_UPLOAD_LOG`). The two `_tp_ver` objects are in the installed runtime set; the drafters are the one-card objects.
-  `dec_q35_swift_ver.hip` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
+  `dec_q35_swift_ver` (`k3.Q35V_MODULES`, `engine/q35_dense_verify.py`) is the Swift module with `K3_Q3M_VER`: the
   T-token verify passes for speculative decoding, on the decode engine's weights and states (`Dense35Own(spec_T=4)`
   keeps 4 tokens' saved inputs per DeltaNet block and lets its guard take commits up to 4; the served engine keeps
   spec_T 1). Its T-token statements sit under `#ifdef K3_Q3M_VER` in `ops_q35.h`, so `dec_q35_swift`'s `.text`
   stays unchanged; `tests/engine/test_q35_verify.py` is its bitwise gate.
-  `dec_q35_swift_mtp.hip` (`k3.Q35M_MODULES`, `engine/q35_mtp.py`) is Swift's drafter: its multi-token-prediction block
+  `dec_q35_swift_mtp` (`k3.Q35M_MODULES`, `engine/q35_mtp.py`) is Swift's drafter: its multi-token-prediction block
   (all Q4_0: `kernels/quant_q4_0.h`) in T-row tapes plus `OP_OWN_ARGMAX`, whose key the next chained step's embedding
   reads on the device. Its device dispatch keeps the trunk's ops (without them `k3_run` took 96 VGPRs and spilled 5);
   `k3.Q35M_OPS` and its `MODULE_CAPS` are what refuse them, and Q4_K is compiled out of its matvec op.
   `tests/engine/test_q35_mtp.py` is its gate (T-row rounds bitwise one-row rounds; drafts against the fp32 block).
-  `dec_q35_tcap_mtp.hip` (`k3.Q35TM_MODULES`, `k3.Q35TM_OPS`) is ThinkingCap's: its Q6_K block on the planes' T-token
+  `dec_q35_tcap_mtp` (`k3.Q35TM_MODULES`, `k3.Q35TM_OPS`) is ThinkingCap's: its Q6_K block on the planes' T-token
   tiles (`ops_q35_tcap.h` compiles only that format's loop under `K3_Q35_MTP`), its Q8_0 head as a rows tile, the IQ2_S
   embedding reading the argmax key; the same gate runs it.
-  `dec_q35_swift_dflash.hip` (`k3.Q35DF_MODULES`, `engine/q35_dflash.py`) is Swift's DFlash2 drafter: the Swift module's T-token
+  `dec_q35_swift_dflash` (`k3.Q35DF_MODULES`, `engine/q35_dflash.py`) is Swift's DFlash2 drafter: the Swift module's T-token
   matvecs (Q8_0 weights, the target's Q6_K head and Q4_K embedding read in place) plus `kernels/ops_q35_dflash.h`
   (`K3_Q35_DF`: the drafter's conv, top-k, selector, ring KV append and non-causal windowed attention, fp32, no ggml types;
   the Coder's `ops_q4x_dflash.h` stays untouched). Its ring is 4096 rows per drafter layer, position p in row p & 4095;
   `decode/dflash35.py` keeps the injected interval on the host and drafts only where it covers the window.
   `tests/engine/test_q35_dflash.py` is its gate (against `caminus/ref_dflash.py`'s float64 drafter; grids bitwise).
-  `dec_q35_tcap_ver.hip` (`k3.Q35TV_MODULES`) is ThinkingCap's verify module: `dec_q35_tcap.hip` with `K3_Q3M_VER`, its
+  `dec_q35_tcap_ver` (`k3.Q35TV_MODULES`) is ThinkingCap's verify module: `dec_q35_tcap.hip` with `K3_Q3M_VER`, its
   formats' T-token tiles in `kernels/quant_tcap_ver.h` (each token the one-token tile's statements in order; the IQ
   tiles decode one row at a time to stay inside 96 VGPRs) behind `ops_q35_tcap.h`'s `q35t_op_mv` (one row loop per
   format). `tests/engine/test_q35_verify.py GGUF` gates both lines; `benchmarks/q35_verify_trace.py` splits a pass's
-  time per segment kind. `dec_q35_tcap_dflash.hip` (`k3.Q35TDF_MODULES`) is the DFlash2 drafter on ThinkingCap's module
+  time per segment kind. `dec_q35_tcap_dflash` (`k3.Q35TDF_MODULES`) is the DFlash2 drafter on ThinkingCap's module
   (IQ2_S embedding, Q8_0 head as a rows tile; no OWN_MV and no IQ grids in its LDS: 11 KB a workgroup); the IQ2_S grid
   sits in LDS as magnitude bytes (8 KB): the verify module takes 16.7 KB a workgroup, so 7 per WGP fit, not 8
   (`k3.resident_grid` and every `Engine.run` refuse a grid whose workgroups' LDS passes a WGP's 128 KB: `k3.check_resident`);
@@ -126,7 +132,7 @@ CLAUDE.md imports this file.
   DFlash one (the MTP drafter's too), as `dec_q35_swift.hip` does.
   The two-card path imports no gguf-py: its slots are `engine/tp_slots.py`, its prefill exchange `prefill/xchg.py`
   (`tests/engine/test_q35_tp_cpu.py` checks the imports with gguf-py and tokenizers refused).
-  ThinkingCap's TP verify wrapper alone defines `K3_Q35_GDN_LOCAL_BASE`: empty asm operands keep GDN STEP/SAVE
+  ThinkingCap's TP verify row (`dec_q35_tcap_tp_ver`) alone defines `K3_Q35_GDN_LOCAL_BASE`: empty asm operands keep GDN STEP/SAVE
   geometry and replay pointers inside their dispatch branches. Preserve the addresses and floating-point statements;
   check the whole build's object isolation and register budget before running its TP bitwise gates.
   Plain Qwen3.8-27B GSQ-RCO uses `dec_q35_gsq` / `pf_q35_gsq` and `Q35R_*` host names; `Q35G_*` belongs to
@@ -194,7 +200,7 @@ CLAUDE.md imports this file.
   stays Q8 in either mode. F16 target append and split attention use `pf_gg_attn_f16`; keep the default Q8 object
   unchanged. `tests/prefill/test_prefill_attn.py` / `test_prefill_qsa.py --kv f16` are its bitwise gates.
   `q3m.py` (qwen3moe), `q35own.py` (the dense qwen35 line on own code) and `q35moe.py` (qwen35moe: Qwen3.6-35B-A3B on
-  `Moe35Own`, F16 or Q8 KV (`kernels/pf_q35m_kvq8.hip`: docs/dev/q8-kv.md), the native rope or YaRN (`kernels/pf_gg_attn_q35m_yarn.hip`: `pf_qk_nr` under `PF_QK_YARN`); `kernels/pf_q35m.hip` adds the router with the gated shared weight, the
+  `Moe35Own`, F16 or Q8 KV (`kernels/objects.tsv pf_q35m_kvq8`: docs/dev/q8-kv.md), the native rope or YaRN (`kernels/objects.tsv pf_gg_attn_q35m_yarn`: `pf_qk_nr` under `PF_QK_YARN`); `kernels/pf_q35m.hip` adds the router with the gated shared weight, the
   9-slot grouping (`q3p_group` under `Q3P_GROUP_Y9`) and the grouped Q2_0 expert GEMM to `pf_q35_swift.hip`'s; `tests/prefill/test_q35m_prefill_ops.py` (G1)
   and `tests/prefill/test_q35_prefill.py` (G-model, both lines)) are the exceptions: their own WMMA GEMMs
   (`kernels/pf_q3m.hip` with the 30B's wide tiles and fused gate | up in their own max-ilp object `kernels/pf_q3m_mm.hip`

@@ -501,7 +501,7 @@ __device__ __forceinline__ void q35_op_argmax(const Seg & sg, int t) {
 }
 #endif
 
-#ifdef K3_Q35_DF   // (the DFlash drafter module, kernels/dec_q35_swift_dflash.hip: its fp32 ops on own code)
+#ifdef K3_Q35_DF   // (the DFlash drafter module, kernels/objects.tsv dec_q35_swift_dflash: its fp32 ops on own code)
 #include "ops_q35_dflash.h"
 #endif
 
