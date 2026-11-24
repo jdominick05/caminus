@@ -321,7 +321,8 @@ for M in MS:
                 if t.type not in ('Q4_K', 'Q6_K', 'Q8_0'): continue
                 pre = {'Q4_K': 'q4k', 'Q6_K': 'q6k', 'Q8_0': 'q8'}[t.type]
                 y2 = torch.zeros(M, R, device=dev)
-                routed = 'wide' if -(-M // 64) * -(-R // q35own.MMW_N) >= q35own.MMW_MIN_PER_CU * ops.cus else 'narrow'
+                floor = ops.q8_wide_min_wg() if t.type == 'Q8_0' else q35own.MMW_MIN_PER_CU * ops.cus   # (q35moe.Ops: its own Q8_0 rule)
+                routed = 'wide' if -(-M // 64) * -(-R // q35own.MMW_N) >= floor else 'narrow'
                 setattr(ops, pre + '_force_wide', True)   # (the A/B compares the two kernels on every shape; `routed` is what Ops.mm serves)
                 setattr(ops, pre + '_narrow', False); ops.mm(W, x16, K, y, R, n=M)
                 setattr(ops, pre + '_narrow', True); ops.mm(W, x16, K, y2, R, n=M); torch.cuda.synchronize(dev)

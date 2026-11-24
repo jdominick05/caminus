@@ -75,9 +75,9 @@ class Ops(q35own.Ops):
     def q8_wide_min_wg(self):
         """the dense Q8_0 GEMMs go wide from half the card's compute units in workgroups (q3m_ops.Ops.wide_min_wg, the 30B's
         rule) where the dense line's rule asks for 4 per unit: on the XT at 2048 tokens the shared expert's gate / up and
-        the k / v projections (512 x 2048, 64 workgroups) take 11.85 ms a chunk wide against 12.97; at 512 tokens ssm_out
-        (2048 x 4096, 64) 8.77 against 9.75 and the shared expert's down (2048 x 512, 64) 1.39 against 1.47, while the
-        512 x 2048 GEMMs (16) ran 6.35 against 4.23 and stay narrow. wide = False: the dense line's rule (the narrow arm)"""
+        the k / v projections (512 x 2048, 64 workgroups) take 11.85 ms a chunk wide against 12.97 (Q8_0 alone); at 512
+        tokens ssm_out (2048 x 4096, 64) 8.77 against 9.75 and the shared expert's down (2048 x 512, 64) 1.39 against 1.47,
+        while the 512 x 2048 GEMMs (16) ran 6.35 against 4.23 and stay narrow. wide = False: the dense line's rule (the narrow arm)"""
         return self.wide_min_wg if self.wide else super().q8_wide_min_wg()
 
     def kv_append_q8(self, k, ldk, v, ldv, cache, M, pos0, n, rows, err):
