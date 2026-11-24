@@ -525,6 +525,34 @@ __device__ __forceinline__ void op_router_shexp(const Seg & sg, int tt) {
 }
 #endif
 
+#ifdef K3_Q35_MOE
+// OP_PREFETCH (57, the qwen35moe module): brings weight ranges into the Infinity Cache (the memory-side cache: 80 MB
+//   on the XT, 96 on the XTX) ahead of their matvecs, by plain loads of one dword per 128-byte line (a plain load allocates there; a nontemporal
+//   one, slc dlc, does not: measured, a 27 MB range read after a 4-workgroup plain touch at 1,283 GB/s against 579 cold).
+//   It writes nothing (the XOR of the loads goes to Seg.y only on an impossible value, which keeps the loads). Seg.W = K
+//   range records (int64 base address, int64 lines; bases 128-byte aligned), Seg.K = their count, Seg.N = the lines of
+//   all of them; task t = the lines [t L, (t + 1) L) of their concatenation, L = ceil(N / ntask); Seg.rows_per_task = the
+//   threads that load (0: all; fewer: fewer misses in flight). A few tasks on a whole layer's weights: that many
+//   workgroups stream them while the latency-bound ops run.
+enum { OP_PREFETCH = 57 };
+__device__ __forceinline__ void q35_op_prefetch(const Seg & sg, int t) {
+    const long long * rec = (const long long *)sg.W;
+    const int per = (sg.N + sg.ntask - 1) / sg.ntask, lo = t * per, hi = min(sg.N, lo + per);
+    uint32_t acc = 0;
+    int r0 = 0;
+    const int nth = sg.rows_per_task > 0 ? sg.rows_per_task : (int)blockDim.x;
+    if ((int)K3TID >= nth) return;
+    for (int r = 0; r < sg.K; r++) {
+        const int n = (int)rec[2 * r + 1], a = max(lo, r0), b = min(hi, r0 + n);
+        const uint32_t * p = (const uint32_t *)rec[2 * r] - (size_t)r0 * 32;
+#pragma unroll 8
+        for (int i = a + (int)K3TID; i < b; i += nth) acc ^= p[(size_t)i * 32];
+        r0 += n;
+    }
+    if (acc == 0x9e3779b9u) ((uint32_t *)sg.y)[0] = acc;
+}
+#endif
+
 #ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
@@ -547,6 +575,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     // any-length form below has no slots or weights. OP_ROUTER is the 30B's softmax top-k, renormalised.)
     if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg OWN_TK_ARG); return true; }
     if (sg.op == OP_ROUTER) { op_router_shexp(sg, t); return true; }
+    if (sg.op == OP_PREFETCH) { q35_op_prefetch(sg, t); return true; }
 #else
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
 #endif
