@@ -121,10 +121,14 @@ __device__ __forceinline__ void aq_fill(const float * x, int n, int mode, float 
 // wave-wide xor-butterfly reductions on DPP / permlanex16 (VALU) instead of ds_bpermute (an LDS round trip per step):
 // the same partners in the same order (16, 8, 4, 2, 1), and each step's op (add, fmaxf) is commutative, so every lane
 // gets warp_reduce_sum<32> / warp_reduce_max<32>'s bits. All 32 lanes must be active (as for the shuffles).
-template <bool MAX>
+// PIN: the permlanex16 row selects made at each use through an opaque copy (OP_OWN_ATTS, kernels/ops_own_atts.h: as
+// constants LLVM kept one in an SGPR across all of k3_run, 3 more spilled scalars in dec_q3m; made in place, none)
+template <bool MAX, bool PIN = false>
 __device__ __forceinline__ float wred(float x) {
     const unsigned u = __builtin_bit_cast(unsigned, x);
-    float y = __builtin_bit_cast(float, __builtin_amdgcn_permlanex16(u, u, 0x76543210u, 0xfedcba98u, false, false));
+    unsigned lo = 0x76543210u, hi = 0xfedcba98u;
+    if constexpr (PIN) asm volatile("" : "+s"(lo), "+s"(hi));
+    float y = __builtin_bit_cast(float, __builtin_amdgcn_permlanex16(u, u, lo, hi, false, false));
     x = MAX ? fmaxf(x, y) : x + y;
 #pragma unroll
     for (int m = 8; m >= 1; m >>= 1) {   // row_xmask:m (DPP16 0x160 | m): lane ^ m within each row of 16

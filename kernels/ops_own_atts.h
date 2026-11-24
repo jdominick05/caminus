@@ -5,7 +5,8 @@
 // one read of the split's K / V rows serves the GH query heads of the group, the splits run on as many workgroups as the
 // depth needs, and the last task of (g, hs) to finish merges the splits' partial softmax states in split order (no
 // second segment, no extra hop). Shallow positions use few splits and small head groups (8 x 4 tasks of one head, as
-// OP_OWN_ATTN: in the model one task of 8 heads took 13.8 us against 6.7 for one head, XT trace at position ~34); deep
+// OP_OWN_ATTN: in the model one task of 8 heads took 13.8 us against 6.7 for one head, XT trace at position ~34; 10.3 us
+// since its wave sums moved to DPP and its own-position scores run side by side, F16 cache, positions 9 .. 18); deep
 // ones many splits of all 8 heads (one read of the rows).
 //
 // Not bitwise OP_OWN_ATTN (the splits change the summation order); q's norm + RoPE and the cache row ARE its bits (the
@@ -67,6 +68,12 @@ typedef __attribute__((address_space(1))) const uint8_t AtsG;
 template <int CTRL> __device__ __forceinline__ float ats_quad(float x) {    // a quad_perm DPP move of x
     return __builtin_bit_cast(float, __builtin_amdgcn_mov_dpp(__builtin_bit_cast(int, x), CTRL, 0xf, 0xf, false));
 }
+// the wave sums / maxima: wred (kernels/ops_q3m.h, kernels/ops_gg.h: DPP and v_permlanex16, the shuffles' partners in
+// their order, the same bits). __shfl_xor compiled to ds_bpermute, an LDS round trip per step: the prologue's five wave
+// sums were 25 of them back to back, the softmax's max and sum 10 more per chunk.
+// The Q8 KV build keeps the shuffles and __syncthreads (ats_bar below): in dec_q3m_kvq8 the DPP sums measured slower
+// (XT decode, ms per token at position 8: 4.972 against 4.928) and the LDS-only barrier alone no different (4.933)
+#ifdef K3_Q3M_KV_Q8
 __device__ __forceinline__ float ats_wsum(float v) {
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor(v, o, 32);
@@ -77,16 +84,22 @@ __device__ __forceinline__ float ats_wmax(float v) {
     for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
     return v;
 }
+#else
+__device__ __forceinline__ float ats_wsum(float v) { return wred<false, true>(v); }
+__device__ __forceinline__ float ats_wmax(float v) { return wred<true, true>(v); }
+#endif
 // a workgroup barrier for LDS only: waits for this wave's LDS operations (lgkmcnt), not its global loads, and does not
 // invalidate L0. __syncthreads() drains every outstanding load first (vmcnt(0)) and invalidates L0: each chunk's V loads
-// then completed at the barrier before the softmax instead of during it, and the prologue's barriers serialized too
+// then completed at the barrier before the softmax instead of during it, and the prologue's barriers serialized too. No
+// barrier here orders global memory: the task reads no global data another wave of it wrote (the cache row it stores is
+// read back from LDS), and the merge's counter keeps its own __syncthreads and agent fences
 __device__ __forceinline__ void ats_bar() {
-#ifdef ATS_LDS_BAR
+#ifdef K3_Q3M_KV_Q8
+    __syncthreads();
+#else
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup", "local");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
-#else
-    __syncthreads();
 #endif
 }
 // fp32 -> fp16 of x without the backend fusing a preceding multiply into v_fma_mix (one rounding instead of two)
@@ -332,8 +345,11 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
 #pragma unroll
         for (int j = 0; j < 4; j++) kr[j] = *(const __attribute__((address_space(1))) uint4 *)(cb + (kl + 16u * j));
 #endif
-        // (loading the first chunk's K before the prologue, or the next chunk's at the end of this one, spilled k3_run:
-        //  13 / 395 VGPRs: the loads stay at the chunk's start)
+        // (the loads stay at the chunk's start. Under the old 96-VGPR budget, the first chunk's K loaded before the
+        //  prologue, or the next chunk's at the end of this one, spilled k3_run 13 / 395 VGPRs. Under the 144 cap of 5
+        //  workgroups per WGP: the first chunk's K before the prologue with the next chunk's after the scores took 109
+        //  VGPRs, 0 spilled, but 4 more spilled scalars, and was no faster (XT decode, ms per token: -0.005 at position
+        //  8, +0.016 at 4,096, +0.10 at 16,384); the next chunk's at the end of this one still spilled 112 VGPRs)
         __builtin_amdgcn_sched_barrier(0);
         {
             float a[ATS_G];
@@ -377,6 +393,10 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
 #pragma unroll
                 for (int h = 0; h < ATS_G; h++) { if (h >= GH) break; sc[tp * ATS_G + h] = a[h] * sg.rs; }
             }
+#ifdef K3_Q3M_KV_Q8
+            // (the Q8 module keeps the heads one after another in quad 0: the F16 form below spilled one more scalar in
+            //  k3_run there, 19 -> 20, in every form tried, with or without the DPP sums: a head per wave, a pinned head
+            //  index, a head per quad)
             if (nc < n && wave == 0) {                   // the position's own k, from LDS (quad 0 of wave 0)
 #pragma unroll
                 for (int h = 0; h < ATS_G; h++) {
@@ -387,6 +407,20 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
                     if (lane == 0) sc[nc * ATS_G + h] = v * sg.rs;
                 }
             }
+#else
+            // the position's own k, from LDS: quad h of wave 0 takes head h (lane qq dims 32 qq .. 32 qq + 31 in order, then
+            // the quad's sum: each head's statements as when quad 0 took the 8 heads one after another). That serial loop
+            // held wave 0, and the barrier every other wave waits at, for 8 chains of 32 LDS loads and fmas: the task took
+            // 12.4 us with it, 10.3 with the heads side by side (XT, positions 9 .. 18, with the DPP wave sums above; a
+            // head per wave instead: 10.4)
+            if (nc < n && wave == 0 && qd < GH) {
+                const int h = qd;
+                float v = 0.0f;
+                { const AtsL * qh = qs + h * 4 * ATS_QP + qq * ATS_QP; for (int d = 0; d < 32; d++) v = __builtin_fmaf(qh[d], kk[qq * 32 + d], v); }
+                v += ats_quad<0xB1>(v); v += ats_quad<0x4E>(v);
+                if (qq == 0) sc[nc * ATS_G + h] = v * sg.rs;
+            }
+#endif
         }
 #ifdef K3_Q3M_KV_Q8
         {   // the chunk's V scales into LDS past the scores (sc holds [ATS_CH][8] scores of its 1024 floats)
@@ -396,8 +430,9 @@ __device__ __forceinline__ void own_op_atts(const Seg & sg, int t) {
         uint32_t vl = (uint32_t)(pq * (int)pb) + ((KB + (uint32_t)((g * 4 + (dp >> 4)) * 34 + 2 + 2 * (dp & 15))) & ~3u);
         asm volatile("" : "+v"(vl));             // (as the F16 build's kl / vl: its 16 offsets must not leave the loop)
 #endif
-        // V loads now, in flight across the barrier and the softmax (issued with K's they spilled k3_run: 16 more VGPRs
-        // live through the scores)
+        // V loads now, in flight across the barrier and the softmax (issued with K's: under the 96 budget they spilled
+        // k3_run, 16 more VGPRs live through the scores; under the 144 cap 97 VGPRs, 0 spilled, the same bits, and slower:
+        // XT decode +0.02 ms per token at position 8, +0.11 at 4,096, +0.19 at 16,384)
         uint32_t vr[ATS_CH / 4];                 // this thread's positions pq + 4 e (V)
 #pragma unroll
         for (int e = 0; e < ATS_CH / 4; e++)
