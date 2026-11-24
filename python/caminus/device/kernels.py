@@ -54,7 +54,8 @@ DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35
 # Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (their YaRN
 # mode is the same objects: the table is a buffer), the prefill's own object, its Q8 rows and attention, and the prefill
 # attention object's YaRN build (pf_qk_nr's table)
-Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn')
+Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn',
+              'q35m_prefill_mm')   # (the one-card prefill's wide expert tiles: caminus.prefill.q35moe.WIDE_MODULE)
 RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + Q35MOE_OWN + ('own_topk', 'smoke')
 
 

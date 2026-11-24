@@ -25,8 +25,10 @@ expert, work items, their fill. --ref-module NAME (an object in the kernel dir, 
 q3m_prefill.hsaco as q3m_prefill_base.hsaco): ours on both objects, interleaved rep by rep, every output compared bitwise.
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_gemm.py GGUF --engine --tokens REF.npz [--M 2048]
       [--arms own,torch,flydsl] [--ref-module NAME] [--set A=1,..] [--ref-set A=0,..] [--only REGEX] [--tokens-from GGUF]
---set / --ref-set set Ops attributes (the A / B flags: q3m_ops.Ops wide, gu, wide_min_wg) on the own / ref arm; a ref arm
-without the fused gate | up replays a fused launch as the gate GEMM, the up GEMM and q3p_swiglu.
+--set / --ref-set set Ops attributes (the A / B flags: q3m_ops.Ops / q35moe.Ops wide, gu, wide_min_wg) on the own / ref arm;
+an arm without the fused gate | up replays a fused launch as the gate GEMM, the up GEMM and q3p_swiglu. --wide-module /
+--ref-wide-module NAME: the arm's wide tiles from that object (a measurement build of the wide object copied into the
+kernel dir under another name; A / B of one tile change).
 FlyDSL picks its tiles by its heuristic, or by a search with FLYDSL_AUTOTUNE=1 (FLYDSL_AUTOTUNE_CACHE_DIR keeps them)."""
 import argparse, collections, os, re, sys, types
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -48,6 +50,8 @@ ap.add_argument('--ref-module', default=None, help='--engine: ours on this objec
 ap.add_argument('--only', default=None, help='--engine: the groups whose key matches this regex')
 ap.add_argument('--set', default=None, help='--engine: NAME=INT,... attributes of the prefill\'s Ops before the chunk (e.g. wide=0,gu=0)')
 ap.add_argument('--ref-set', default=None, help='--engine: the same for the ref arm (its module: --ref-module, default the own one)')
+ap.add_argument('--wide-module', default=None, help='--engine: the own arm\'s wide tiles from this object (the prefill\'s Ops.wmod)')
+ap.add_argument('--ref-wide-module', default=None, help='--engine: the same for the ref arm')
 A = ap.parse_args()
 if not A.gguf: sys.exit('q35_prefill_gemm: give the GGUF path (or export SWIFT)')
 ARMS = A.arms.split(','); MS = [int(v) for v in A.M.split(',')]
@@ -161,7 +165,11 @@ def engine_mode():
             nm, v = kv.split('='); setattr(o_, nm, int(v))
             if nm in ('wide', 'gu') and int(v) and getattr(o_, 'wmod', None) is None:
                 raise SystemExit(f'--set {nm}=1: {o_.module} was built without the wide tiles (q3m_ops.Ops(wide=None) loads them with q3m_prefill)')
-    setattrs(O, A.set)
+    def widemod(o_, name):   # (--wide-module / --ref-wide-module: the arm's wide tiles from a measurement build)
+        if name:
+            from caminus.device import hip
+            with torch.cuda.device(dev): o_.wmod = hip.Module(name)
+    setattrs(O, A.set); widemod(O, A.wide_module)
     eng.reset(); pf.run(toks, 0, 0, M); torch.cuda.synchronize(dev)
     for meth in list(YW) + [gname]:
         if meth in O.__dict__: delattr(O, meth)
@@ -175,8 +183,8 @@ def engine_mode():
     mid = cnt[len(cnt) // 2]
     groups = collections.OrderedDict()
     for i, c in enumerate(calls): groups.setdefault(c['key'], []).append(i)
-    ref = type(O)(O.dev, module=A.ref_module or O.module) if (A.ref_module or A.ref_set) else None
-    if ref is not None: setattrs(ref, A.ref_set)
+    ref = type(O)(O.dev, module=A.ref_module or O.module) if (A.ref_module or A.ref_set or A.ref_wide_module) else None
+    if ref is not None: setattrs(ref, A.ref_set); widemod(ref, A.ref_wide_module)
     mods = [('own', O)] + ([('ref', ref)] if ref is not None else [])
     gu_buf = None
     def replay(ops_, idx):
@@ -189,7 +197,9 @@ def engine_mode():
                     need = 2 * M * k * ldy_ * 4 / 2 ** 20 + 16
                     capacity.check([dev.index or 0], [need], f'q35_prefill_gemm: gate / up outputs ({need:.0f} MiB)')
                     gu_buf = torch.empty(2, M * k * ldy_, dtype=torch.float32, device=dev)
-                ops_.mm(Wg, x16_, ldx_, gu_buf[0], ldy_, work=work_); ops_.mm(Wu, x16_, ldx_, gu_buf[1], ldy_, work=work_)
+                if isinstance(Wg, dict) and Wg['fmt'] == 'Q2_0':   # (the 35B's experts: q35moe.Ops.mm_q2_0)
+                    ops_.mm_q2_0(Wg, x16_, ldx_, gu_buf[0], ldy_, work_); ops_.mm_q2_0(Wu, x16_, ldx_, gu_buf[1], ldy_, work_)
+                else: ops_.mm(Wg, x16_, ldx_, gu_buf[0], ldy_, work=work_); ops_.mm(Wu, x16_, ldx_, gu_buf[1], ldy_, work=work_)
                 ops_.swiglu(gu_buf[0], gu_buf[1], y16_, M * k * ldy_)
                 continue
             getattr(ops_, c['meth'])(*c['a'], **c['kw'])

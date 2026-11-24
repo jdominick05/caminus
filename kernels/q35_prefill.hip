@@ -99,6 +99,7 @@ __device__ __forceinline__ void q8_pair_block(const Q8Pair & PR, int j, bool rok
 #endif
 }
 
+#ifndef Q35P_WIDE_OBJECT   // (kernels/q35m_prefill_mm.hip: the helpers above only; under max-ilp q35p_mm_q8_0_w spills 18 VGPRs)
 extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
         const uint8_t * __restrict__ W, int R, int K, const _Float16 * __restrict__ X, int ldx, const int * __restrict__ xsrc,
         float * __restrict__ Y, int ldy, const int * __restrict__ ydst, const MMItem * __restrict__ items, const int * __restrict__ nitems,
@@ -992,3 +993,4 @@ extern "C" __global__ void __launch_bounds__(256) q35p_gate_mul16(const float * 
         y[i] = (_Float16)v;
     }
 }
+#endif   // Q35P_WIDE_OBJECT
