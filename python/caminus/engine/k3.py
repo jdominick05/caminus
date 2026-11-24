@@ -2,15 +2,55 @@
 import ctypes, os
 import numpy as np
 import torch
+from ..device import hip as _hip
 from ..device.hip import Module
 
 _mod = {}
 
+GRID_WGS = 200   # the engine's grid on a card: the workgroups-per-WGP count whose grid is nearest this many workgroups
+                 # (RX 7900 XTX, 48 WGPs: 4 = 192 workgroups; RX 7900 XT, 42 WGPs: 5 = 210), with the attention split
+                 # into as many tasks as that grid runs at once (splits_for). Interleaved at the same positions, 3
+                 # rounds of 24 tokens, with the link keep-alive in the tape, ms per token at depth 8 / 1,024 / 4,096 /
+                 # 16,384 / 40,900 (workgroups per WGP, splits):
+                 #   XTX  6, 64 (the grid and the layout before): 4.110 / 4.331 / 5.085 / 6.675 / 9.393
+                 #        5, 60: 3.932 / 4.215 / 4.735 / 6.242 / 9.141     4, 48: 3.968 / 4.206 / 4.679 / 6.183 / 8.986
+                 #        3, 36: 4.076 / 4.334 / 4.812 / 6.230 / 8.969     4, 40: 3.975 / 4.191 / 4.665 / 6.220 / 9.147
+                 #   XT   6, 64 (before): 4.775 / 5.147 / 5.858 / 7.612    6, 63: 4.709 / 5.130 / 5.782 / 7.560
+                 #        5, 52: 4.768 / 5.024 / 5.646 / 7.345             4, 42: 4.816 / 5.116 / 5.637 / 7.412
+                 # A segment's hop costs each active wave its share of the SIMD, so fewer workgroups than fit hop faster;
+                 # the attention's tasks must fit the grid at once (XTX, 5 per WGP with 64 splits at 40,900: 10.634).
+
+
+def card_per_wgp():
+    """workgroups per WGP of the engine's grid on the current card (GRID_WGS); env K3_CARD_PER_WGP sets it (a test of
+    another card's grid and objects on this one)"""
+    if os.environ.get('K3_CARD_PER_WGP'): return int(os.environ['K3_CARD_PER_WGP'])
+    wgps = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return max(1, min(8, int(GRID_WGS / wgps + 0.5)))
+
+
+def card_object(name):
+    """the code object file a module loads on the current card: <name>_w<N> when build.sh made one for this card's grid
+    (N = card_per_wgp(): the own decode modules' _w4, VGPR cap 192 for the XTX's 4 per WGP, kernels/k3.hip K3_PER_WGP),
+    else <name> itself. The module keeps its name everywhere else (the engine's module lists, the tapes); env
+    K3_CARD_OBJECTS=0 always loads <name>"""
+    if os.environ.get('K3_CARD_OBJECTS', '1') == '0' or not torch.cuda.is_available(): return name
+    alt = f'{name}_w{card_per_wgp()}'
+    return alt if os.path.isfile(os.path.join(_hip.BUILD, alt + '.hsaco')) else name
+
 
 def _m(name):
     dev = torch.cuda.current_device()
-    if (dev, name) not in _mod: _mod[(dev, name)] = Module(name)
+    if (dev, name) not in _mod: _mod[(dev, name)] = Module(card_object(name))
     return _mod[(dev, name)]
+
+
+def per_wgp_fits(module, fn='k3_run'):
+    """workgroups of `fn` one WGP holds at once: by LDS (WGP_LDS / its static LDS) and by VGPRs (256 threads = 2 wave32
+    waves on each of the WGP's 4 SIMDs; 1536 VGPRs per SIMD lane in granules of 24, at most 16 waves per SIMD)"""
+    k = getattr(_m(module), fn)
+    v = -(-max(1, k.vgprs()) // 24) * 24
+    return min(WGP_LDS // max(1, k.lds_bytes()), min(16, 1536 // v) // 2)
 
 
 def repack_mv(q):
@@ -488,16 +528,16 @@ def bounds_status(st):
 
 
 def resident_grid(module, per_wgp=None):
-    """workgroups that are all resident at once on the current device: k3_run in the GGUF builds is capped at 96 VGPRs
-    (16 waves per SIMD, K3_OPAQUE_TID) with ~13 KB of LDS, so 8 fit per WGP (a -DK3_NO_OPAQUE_TID build is capped at
-    144: 5 per WGP); extra workgroups only start after the first ones exit and then walk the whole tape (K3_PER_WGP
-    overrides)"""
+    """workgroups that are all resident at once on the current device: per_wgp per WGP (env K3_PER_WGP; default 8 for the
+    GGUF builds, capped at 96 VGPRs, else 4), refused past what the loaded object holds (per_wgp_fits: its VGPRs and LDS);
+    extra workgroups would only start after the first ones exit and then walk the whole tape"""
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     per_wgp = per_wgp or int(os.environ.get('K3_PER_WGP', 0)) or (8 if module.startswith('k3_gguf') else 4)
-    lds_cap = WGP_LDS // max(1, _m(module).k3_run.lds_bytes()) if torch.cuda.is_available() else per_wgp   # (CPU stand-ins: nothing launches)
-    if per_wgp > lds_cap:   # (a persistent grid must be resident at once: the rest would wait out limit_us and bail)
-        raise ValueError(f'resident_grid: {per_wgp} workgroups per WGP of {module} need {per_wgp} x '
-                         f'{_m(module).k3_run.lds_bytes()} B of LDS > the WGP\'s {WGP_LDS} B: at most {lds_cap}')
+    fits = per_wgp_fits(module) if torch.cuda.is_available() else per_wgp   # (CPU stand-ins: nothing launches)
+    if per_wgp > fits:   # (a persistent grid must be resident at once: the rest would wait out limit_us and bail)
+        k = _m(module).k3_run
+        raise ValueError(f'resident_grid: {per_wgp} workgroups per WGP of {module} ({card_object(module)}: {k.vgprs()} VGPRs, '
+                         f'{k.lds_bytes()} B of LDS) do not fit: at most {fits}')
     return per_wgp * props.multi_processor_count
 
 
@@ -506,17 +546,18 @@ _RESIDENT_OK = set()
 
 
 def check_resident(module, grid, fn='k3_run'):
-    """refuse a persistent grid whose workgroups cannot all be resident at once by LDS (ceil(grid / WGPs) per WGP x the
-    kernel's static LDS > WGP_LDS): the resident ones would wait out limit_us for the rest and bail. Checked once per
+    """refuse a persistent grid whose workgroups cannot all be resident at once (ceil(grid / WGPs) per WGP > per_wgp_fits:
+    its VGPRs and static LDS): the resident ones would wait out limit_us for the rest and bail. Checked once per
     (device, module, grid)"""
     if not torch.cuda.is_available(): return   # (a CPU stand-in: nothing launches)
     dev = torch.cuda.current_device(); key = (dev, module, int(grid), fn)
     if key in _RESIDENT_OK: return
     wgps = torch.cuda.get_device_properties(dev).multi_processor_count
-    per = -(-int(grid) // wgps); lds = getattr(_m(module), fn).lds_bytes()
-    if per * lds > WGP_LDS:
-        raise ValueError(f'k3 {module}: a grid of {grid} on {wgps} WGPs puts {per} workgroups on a WGP: {per} x {lds} B of '
-                         f'LDS > {WGP_LDS} B, so not all are resident at once (at most {WGP_LDS // max(1, lds)} per WGP)')
+    per = -(-int(grid) // wgps); fits = per_wgp_fits(module, fn)
+    if per > fits:
+        k = getattr(_m(module), fn)
+        raise ValueError(f'k3 {module}: a grid of {grid} on {wgps} WGPs puts {per} workgroups on a WGP; {card_object(module)} '
+                         f'({k.vgprs()} VGPRs, {k.lds_bytes()} B of LDS) holds at most {fits} at once')
     _RESIDENT_OK.add(key)
 
 
