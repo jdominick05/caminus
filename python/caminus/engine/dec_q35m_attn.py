@@ -70,6 +70,8 @@ class DecQ35mAttn:
                                                  err=(self.err, torch.int32, 1, 4)), ('out', 'ws', 'err'))
         if not isinstance(cache, torch.Tensor) or not cache.is_cuda or not cache.is_contiguous() or cache.data_ptr() % 16:
             raise ValueError('dec_q35m_attn: the cache must be a contiguous, 16-byte-aligned device tensor')
+        if cache.device != self.ws.device:   # the raw pointer is passed as is: another card's rows would fault here
+            raise ValueError(f'dec_q35m_attn: the cache is on {cache.device}, the launcher on {self.ws.device}')
         self.fn((ns * GROUPS,), (NW * 32,), q, cache, pos, ctypes.c_int(rows), ctypes.c_float(float(scale)), ctypes.c_int(ns),
                 self.ws, out, self.err, stream=stream)
 
