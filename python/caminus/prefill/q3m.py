@@ -6,7 +6,7 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
   h16 = add_rms16(x (+ the previous layer's 8 weighted expert rows), attn_norm)
   q | k | v = the Q4_K / Q6_K GEMMs (WMMA, the weights exact, fp16 x, fp32 sums) into one row per token
   q / k RMS norm + NEOX RoPE (OP_OWN_ATTS's statements), k / v -> the cache rows p .. p + n - 1 (fp16)
-  attention: causal over cache rows 0 .. p + t (q3p_attn: fp16 q / k / v / p, fp32 scores and softmax state), split
+  attention: causal over cache rows 0 .. p + t (q3mp_attn: fp16 q / k / v / p, fp32 scores and softmax state), split
              into launches of at most ATTN_TP token-positions (each launch well under the 200 ms bound at any depth)
   o = attn_output GEMM; x += o; h, h16 = norm(x, ffn_norm)
   router logits (fp32), the top 8 (OP_ROUTER's gating), the (token, slot) pairs grouped by expert
@@ -20,7 +20,7 @@ The hand-off is the shared driver's (caminus.prefill.driver.PrefillDriver): run(
 [i0 - commit, p1) (the KV rows written in place; no recurrent state), sets m.fresh and returns (i0 = p1, commit = 0).
 No drafter yet (draft must be None).
 A Q8 KV engine (Q3MoEOne(q8=True)): the same chunk with the rows written as Q8_0 blocks and the attention reading them
-(q3m_prefill_kvq8's q3p_qk_rope_q8 / q3p_attn_q8: each row the encode of the fp16 values the F16 kernels store, K after
+(q3m_prefill_kvq8's q3p_qk_rope_q8 / q3mp_attn_q8: each row the encode of the fp16 values the F16 kernels store, K after
 the head's Walsh-Hadamard transform (caminus.ref_kv.hadamard128), the decode Q8 module's rows; q16 is the same transform
 of the F16 kernel's q16, rounded to fp16, so the attention scores rotated q against rotated K; it rounds the decoded
 values to fp16 for its WMMA operands). A refused block (a non-finite
@@ -38,7 +38,11 @@ from .driver import PrefillDriver, PrefillRefused
 # XTX, chunk 2048, from empty, medians of 5; K3 ~4.35 ms a token there): span 4: 28.6 ms (K3 17.4); 6: 29.4 (26.1); 8: 34.0
 # (34.8); 16: 37.6 (69.6); 32: 43.4 (139)
 CROSSOVER = 8
-ATTN_TP = 1 << 24          # token-positions per attention launch (tokens x the deepest position they read)
+# token-positions per attention launch (tokens x the deepest position they read): a 2048-row chunk in one launch up to
+# 64K positions (q3mp_attn, XT, P0 30720: 1 launch 17.3 ms, 61 TF; 2 launches 19.0; 4 launches (1 << 24) 22.6: 128
+# workgroups a launch against 126 resident slots leave a second, nearly empty round); at 131,072 (the long-context mode)
+# two launches of 64 blocks
+ATTN_TP = 1 << 27
 ROUTER_FLOOR = 6.103515625e-5
 
 

@@ -213,15 +213,15 @@ check(not bad and seen_mm == want_mm,
       f'every GEMM reads card c\'s own slice in place at its local shape (rows per matrix, K, Q6_K total rows; Q4_K and Q6_K, '
       f'{len(seen_mm)} (card, matrix, format) pairs)' + (f'; wrong {bad[:4]}' if bad else ''))
 rope = [(c, int(a[5].value), grid) for c, k_, grid, a in Lg if k_ == 'q3p_qk_rope']
-att = [(c, grid, int(a[2].value), int(a[3].value), int(a[5].value)) for c, k_, grid, a in Lg if k_ == 'q3p_attn']
+att = [(c, grid, int(a[2].value), int(a[3].value), (int(a[5].value), int(a[6].value))) for c, k_, grid, a in Lg if k_ == 'q3mp_attn']
 cover = {(c, L): np.zeros(300, int) for c in (0, 1) for L in range(nl)}
 li = {c: 0 for c in (0, 1)}
 for c, pos0, grid in rope:
     n = grid[0]; cover[(c, li[c] // len(micro_bounds(300, 2, min_piece=128)))][pos0:pos0 + n] += 1; li[c] += 1
 good = all(grid[1] == 16 + 2 for _, _, grid in rope) and all(v.min() == 1 == v.max() for v in cover.values())
-good &= all(grid[1] == 2 and nkv == 2 for _, grid, _, _, nkv in att) and len(att) == 2 * (nl - 1) * 2
+good &= all(grid[1] == 2 and hk == (16, 2) for _, grid, _, _, hk in att) and len(att) == 2 * (nl - 1) * 2
 check(good, f'qk_rope runs each card\'s 16 query + 2 kv heads and writes every position\'s cache rows once per layer and card; '
-      f'the attention runs 2 kv heads per card ({len(att)} launches: none on the last layer)')
+      f'the attention runs 16 query heads over 2 kv heads per card ({len(att)} launches: none on the last layer)')
 ss = [(c, grid, a) for c, k_, grid, a in Lg if k_ == 'q3p_slot_sum']
 good = len(ss) == 2 * (nl - 1) * 2 and all(int(a[2].value) == KU and int(a[4].value) == D for _, _, a in ss)
 ffp = [pf.B[c]['ffp'] for c in (0, 1)]

@@ -1,15 +1,15 @@
 """The own prefill's attention for one chunk at depth: a chunk of N rows at positions P0 .. P0 + N - 1 attends to the cache
 rows 0 .. its own position. Geometries: the dense qwen35 line by default (Swift 1.5 / ThinkingCap / AREX-2: 24 query heads
 over 4 kv heads, head dim 256, f16 KV cache); --heads 16 --kv-heads 2 --module q35m_prefill is Qwen3.6-35B-A3B's (its
-prefill object's q35mp_attn; --kv q8 its Q8_0 rows, q35mp_attn_q8); --hd 128 --heads 32 --kv-heads 4 is Qwen3-30B-A3B's (q3m_prefill q3p_attn).
+prefill object's q35mp_attn; --kv q8 its Q8_0 rows, q35mp_attn_q8); --hd 128 --heads 32 --kv-heads 4 is Qwen3-30B-A3B's (q3m_prefill q3mp_attn; --kv q8 q3mp_attn_q8).
 Ours: the kernels the prefill drivers run, in their launch splits:
   wm      prefill/q35own.py Ops.attn_wm (kernels/q35_prefill.hip q35p_attn_wm; the 35B's object: kernels/q35m_prefill.hip
           q35mp_attn, q35mp_attn_q8 over Q8 rows: WMMA tiles, a workgroup = 8 positions x one kv head's query heads, wave
           pairs over the 256 dims; launches of at most ATTN_WM_TP row-positions)
   attn16  Ops.attn16 (q35p_attn16: one workgroup per (row, query head) walks every position up to its own; the kernel wm
           replaced; f16 only, slow at depth: --skip attn16)
-  q3p     (head dim 128) prefill/q3m_ops.py Ops.attn (q3p_attn: WMMA tiles, 16 positions x 8 query heads; launches of
-          prefill/q3m.py's ATTN_TP token-positions)
+  q3p     (head dim 128) prefill/q3m_ops.py Ops.attn (q3mp_attn: the 35B's kernel source at head dim 128, 16 positions x 8
+          query heads; launches of prefill/q3m.py's ATTN_TP token-positions)
 Yardstick: torch.nn.functional.scaled_dot_product_attention (fp16, GQA; f16 KV only) restricted to its tiled backends
 (flash / memory-efficient; never the math path, which would materialize the N x L x heads scores: 17.5 GB at L 32K). An
 explicit causal-with-offset mask has no tiled kernel here, so the chunk runs as the two tiled calls it splits into: the
@@ -38,12 +38,12 @@ ap.add_argument('--kv', default='f16', choices=('f16', 'q8')); ap.add_argument('
 A = ap.parse_args()
 H, NKV, D, N, Q8 = A.heads, A.kv_heads, A.hd, A.n, A.kv == 'q8'
 SKIP = set(v for v in A.skip.split(',') if v)
-if D == 128 and (Q8 or H != 8 * NKV): sys.exit('q35_prefill_attn: head dim 128 runs q3p_attn (f16, 8 query heads per kv head)')
+if D == 128 and H != 8 * NKV: sys.exit('q35_prefill_attn: head dim 128 runs q3mp_attn (8 query heads per kv head)')
 dev = torch.device('cuda:0')
-if D == 128: ops = q3m_ops.Ops(dev, module=A.module or 'q3m_prefill')
+if D == 128: ops = q3m_ops.Ops(dev, module=A.module or 'q3m_prefill', q8=Q8)
 elif Q8 or A.module == q35moe.MODULE: ops = q35moe.Ops(dev, q8=Q8)
 else: ops = q35own.Ops(dev, module=A.module or q35own.MODULE)
-WM = ops.WM_KERNEL[Q8] if D == 256 else 'q3p_attn'
+WM = ops.WM_KERNEL[Q8] if D == 256 else ('q3mp_attn_q8' if Q8 else 'q3mp_attn')
 print(torch.cuda.get_device_name(dev), f'| chunk {N} rows, {H} q heads / {NKV} kv heads x {D}, {A.kv} KV, {ops.module} {WM}', flush=True)
 
 
