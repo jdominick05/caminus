@@ -429,6 +429,27 @@ class RuntimeKernels(unittest.TestCase):
         self.assertNotIn('gg_mmvf_ref', names)
 
 
+
+class CardObjects(unittest.TestCase):
+    """one register cap per card (kernels/k3.hip K3_PER_WGP): the XTX's <name>_w4 objects ship and load by card"""
+
+    def test_every_own_decode_module_ships_its_xtx_object(self):
+        own = [n for n in kernels.RUNTIME_SET if n.startswith('k3_q3m_') and not n.endswith('_w4')]
+        self.assertTrue(own)
+        self.assertEqual(sorted(n + '_w4' for n in own), sorted(kernels.CARD_W4))
+
+    def test_card_object_follows_the_grid_and_the_files(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, 'k3_q3m_lean_w4.hsaco'), 'wb').close()
+            with patch.object(hip, 'BUILD', d), patch.object(k3.torch.cuda, 'is_available', lambda: True):
+                for per, name, want in ((4, 'k3_q3m_lean', 'k3_q3m_lean_w4'), (5, 'k3_q3m_lean', 'k3_q3m_lean'),
+                                        (4, 'k3_q3m_iq', 'k3_q3m_iq')):   # (no k3_q3m_iq_w4 file: the module itself)
+                    with patch.dict(os.environ, {'K3_CARD_PER_WGP': str(per)}):
+                        self.assertEqual(k3.card_object(name), want, (per, name))
+                with patch.dict(os.environ, {'K3_CARD_PER_WGP': '4', 'K3_CARD_OBJECTS': '0'}):
+                    self.assertEqual(k3.card_object('k3_q3m_lean'), 'k3_q3m_lean')
+
 if __name__ == '__main__':
     result = unittest.main(exit=False).result
     print('RESULT', 'PASS' if result.wasSuccessful() else 'FAIL')

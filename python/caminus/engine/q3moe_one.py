@@ -21,6 +21,7 @@ import torch
 from .. import ggufio
 from ..device import capacity, hip
 from . import k3
+from .k3 import GRID_WGS, card_per_wgp   # (the per-card grid lives with the module loader: it picks the object for it)
 from .own_layout import q6k_planes, iq_records, IQ_REC, rs_planes, RS_CONT
 
 MODULE = 'k3_gguf_q3m_own'         # every tape form (the unfused ones, the five-segment attention: tests and A/Bs)
@@ -38,27 +39,6 @@ ATS_SPLITS, ATS_LMIN = 64, 64   # OP_OWN_ATTS: the most splits per kv head (the 
                                 # 322 / 631; S 64 Lmin 64: 10.3 / 14.0 / 24.9 / 35.0 (Lmin 128: 10.8 / 16.1 / 30.5 / 35.2).
                                 # Measured and dropped: copies of the tape with fewer splits and smaller head groups for
                                 # shallow positions (slower at every depth tried: XT 4.79 -> 4.99 ms at positions 8 .. 48)
-GRID_WGS = 200   # the engine's grid on a card: the workgroups-per-WGP count whose grid is nearest this many workgroups
-                 # (RX 7900 XTX, 48 WGPs: 4 = 192 workgroups; RX 7900 XT, 42 WGPs: 5 = 210), with the attention split
-                 # into as many tasks as that grid runs at once (splits_for). Interleaved at the same positions, 3
-                 # rounds of 24 tokens, with the link keep-alive in the tape, ms per token at depth 8 / 1,024 / 4,096 /
-                 # 16,384 / 40,900 (workgroups per WGP, splits):
-                 #   XTX  6, 64 (the grid and the layout before): 4.110 / 4.331 / 5.085 / 6.675 / 9.393
-                 #        5, 60: 3.932 / 4.215 / 4.735 / 6.242 / 9.141     4, 48: 3.968 / 4.206 / 4.679 / 6.183 / 8.986
-                 #        3, 36: 4.076 / 4.334 / 4.812 / 6.230 / 8.969     4, 40: 3.975 / 4.191 / 4.665 / 6.220 / 9.147
-                 #   XT   6, 64 (before): 4.775 / 5.147 / 5.858 / 7.612    6, 63: 4.709 / 5.130 / 5.782 / 7.560
-                 #        5, 52: 4.768 / 5.024 / 5.646 / 7.345             4, 42: 4.816 / 5.116 / 5.637 / 7.412
-                 # A segment's hop costs each active wave its share of the SIMD, so fewer workgroups than fit hop faster;
-                 # the attention's tasks must fit the grid at once (XTX, 5 per WGP with 64 splits at 40,900: 10.634).
-
-
-def card_per_wgp():
-    """workgroups per WGP of the engine's grid on the current card (GRID_WGS), at most the 8 a 96-VGPR module keeps
-    resident"""
-    wgps = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-    return max(1, min(8, int(GRID_WGS / wgps + 0.5)))
-
-
 def splits_for(nkv, cap=ATS_SPLITS):
     """OP_OWN_ATTS splits per kv head on the current card: as many as the card's own grid (card_per_wgp) runs at once
     (one workgroup per (split, kv head) task), at most cap (ATS_SPLITS; a two-card module takes up to k3.ATS_MAXS_TP). A second round of attention tasks costs a whole

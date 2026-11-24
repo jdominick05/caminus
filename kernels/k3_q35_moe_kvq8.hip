@@ -7,4 +7,5 @@
 // objects already sit above their F16 ones (k3_q35_gsq_kvq8 vs k3_q35_gsq: SGPR spills 71 vs 65). Budget: 96 VGPRs,
 // 0 spills (tools/gates/objcheck.py).
 #define K3_Q35_KV_Q8
+#define ATTN_COMB_U 16       // (kernels/k3_q35_moe.hip): Q8 128K 10.96 -> 10.86 ms on the XT, its spilled SGPRs unchanged
 #include "k3_q35_moe.hip"

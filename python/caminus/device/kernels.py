@@ -51,12 +51,15 @@ DENSE35_OWN = ('k3_q35_swift', 'k3_q35_swift_tp', 'k3_q35_swift_tp_ver', 'k3_q35
                'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash')   # paused plain 27B: packaging does not unpause the catalog
 # The two-card verify objects (*_tp_ver) serve two-card drafting; its drafters are the one-card MTP / DFlash objects.
 # Trace, ablation and standalone probes are deliberately outside the runtime set.
+# The XTX's objects of the own decode modules: build.sh's <name>_w4 (a 4-workgroups-per-WGP grid, VGPR cap 192 instead of
+# the XT's 144: kernels/k3.hip K3_PER_WGP); caminus.engine.k3.card_object loads one on a card whose grid is 4 per WGP
+CARD_W4 = tuple(n + '_w4' for n in Q3_OWN if n.startswith('k3_q3m_'))
 # Qwen3.6-35B-A3B on own code (engine/q35_moe.py, prefill/q35moe.py): its decode module and the Q8 KV build (their YaRN
 # mode is the same objects: the table is a buffer), the prefill's own object, its Q8 rows and attention, and the prefill
 # attention object's YaRN build (pf_qk_nr's table)
 Q35MOE_OWN = ('k3_q35_moe', 'k3_q35_moe_kvq8', 'q35m_prefill', 'q35m_prefill_kvq8', 'prefill_attn_q35_yarn',
               'q35m_prefill_mm')   # (the one-card prefill's wide expert tiles: caminus.prefill.q35moe.WIDE_MODULE)
-RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + Q35MOE_OWN + ('own_topk', 'smoke')
+RUNTIME_SET = K3 + PREFILL + Q3_OWN + DENSE35_OWN + CARD_W4 + Q35MOE_OWN + ('own_topk', 'smoke')
 
 
 def checkout_build():
