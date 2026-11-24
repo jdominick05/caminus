@@ -388,7 +388,7 @@ the times are the routed experts' GEMMs (gate | up and down) of one 2048-token c
   At 2048 tokens that moves the shared expert's gate / up and the k / v projections (512 x 2048): 12.97 -> 11.84 ms (Q8_0-only runs; 13.22 -> 12.11 in the full run below).
   At 512 tokens it moves ssm_out (9.91 -> 8.92) and the shared expert's down (1.47 -> 1.39) and leaves the 512 x 2048
   GEMMs narrow (16 workgroups: 4.23 narrow, 6.35 wide). The dense Q8_0 tile under max-ilp spills 18 VGPRs, so it stays
-  in `pf_q35m`.
+  in `pf_q35m`. (Superseded from one workgroup per WGP by the LDS tile below.)
 
 The 35B after, ms per chunk (one run on the final build: before = `Ops(wide=False)`, the narrow tiles and the dense line's
 rule, interleaved with the wide tiles, every output bitwise):
@@ -416,6 +416,55 @@ End to end, the 35B (`benchmarks/q3moe_prefill.py GGUF35 --chunk 2048 --ab`: pre
 | 16,384 | Q8 | 5,423 tok/s | 4,833 tok/s | 1.12x |
 | 32,768 | Q8 | 4,764 tok/s | 4,301 tok/s | 1.11x |
 
+### The 35B's dense Q8_0 GEMMs on an LDS tile
+
+`q35mp_mm_q8_0_l` (`kernels/pf_q35m_mm.hip`) follows FlyDSL's fp16 GEMM pipeline: x and the weights' fp16 q of one Q8_0
+block in two LDS buffers, the next block's loads under this one's WMMAs, one barrier per block. Each weight is unpacked
+once per workgroup instead of once per wave, and the per-block scale step runs one token tile behind the WMMAs. Every
+output stays bitwise the wide tile's (the G1 test and the benchmark compare them). Per main-loop k-step, from the
+disassembly (FlyDSL: its 2048 x 8192 x 2048 tile; ours: per Q8_0 block of 32 values):
+
+| | FlyDSL fp16 (128 x 128 x 32) | wide tile `q35p_mm_q8_0_w` | LDS tile `q35mp_mm_q8_0_l` |
+|---|---|---|---|
+| workgroup / wave tile | 128 x 128, 4 waves of 64 x 64 | 64 tokens x 256 rows, 8 waves of 64 x 32 | 128 tokens x 64 rows, 4 waves of 64 x 32 |
+| WMMAs per wave per k-step | 32 (2 k-steps of 16 accumulators) | 16 | 16 |
+| WMMA chain | each accumulator every 16th WMMA | P from zero over 2 WMMAs, then 8 fma | the same; the fmas one tile behind |
+| ds_load_b128 per WMMA | 1.0 | 1.0 (x only) | 1.5 (x and weights) |
+| VALU instructions per WMMA (main loop) | ~0.4 (addresses) | ~10.6 (unpack ~6.6, scale step ~3.4) | ~4.5 (scale step ~2.6, unpack ~1.4) |
+| weights | global -> LDS (buffer_load_b128) | global -> registers, unpacked per wave | global -> registers -> fp16 in LDS, unpacked once |
+| barriers per k-step | 1 | 1 per block pair | 1 |
+| VGPRs, spills, LDS | 256, 4 spilled, 40,960 B | 222, 0, 33,792 B (x) | 208, 0, 31,232 B |
+| grid | persistent, swizzled | (tokens / 64, rows / 256) | (tokens / 128, rows / 64) |
+
+A real 2048-token chunk on the XT (`benchmarks/q35_prefill_gemm.py --engine --only Q8_0`, `--set q8l=1` against
+`q8l=0`, the wide tile; ms, median of 3 interleaved runs, one with the arms swapped; FlyDSL from one `--arms own,flydsl`
+run):
+
+| Group (R x K) | wide tile | LDS tile | change | FlyDSL fp16 | LDS tile / FlyDSL |
+|---|---|---|---|---|---|
+| Q8_0 8192 x 2048 | 51.24 | 48.40 | -5.5 % | 36.75 | 1.32x |
+| Q8_0 4096 x 2048 | 20.84 | 18.89 | -9.4 % | 15.03 | 1.26x |
+| Q8_0 2048 x 4096 | 28.88 | 25.38 | -12.1 % | 21.09 | 1.20x |
+| Q8_0 512 x 2048 | 11.86 | 11.15 | -6.0 % | 9.77 | 1.14x |
+| Q8_0 2048 x 512 | 4.22 | 3.93 | -6.9 % | 3.19 | 1.23x |
+| **per chunk** | **117.0** | **107.6** | **-8.0 %** | **85.8** | **1.25x** |
+
+- At 512 tokens the tile everywhere took 32.4 ms against 35.8, but 4.36 against 4.25 on the 512 x 2048 GEMMs (32
+  workgroups), so it runs from one workgroup per WGP (`q35moe.Ops.q8l_min_wg`; measured on the XT only): 35.8 -> 32.2 ms
+  at 512 tokens, 15.3 -> 14.6 at 128.
+- End to end (`benchmarks/q3moe_prefill.py GGUF35 --chunk 2048`, F16 KV, the tile off in a second process, two runs each,
+  ABBA): 4,096 tokens 6,220 -> 6,427 tok/s (1.033x), 32,768 tokens 4,855 -> 4,970 tok/s (1.024x). `--ab` against
+  `Ops(wide=False)` (the tile off there too): 6,425 against 5,462 tok/s at 4,096, 4,970 against 4,371 at 32,768, the
+  last attention layer's KV rows bitwise equal at both.
+- The steps, each against the one before: 128 x 128 workgroups of 8 waves 112.4 ms; 128 x 64 of 4 waves 110.1 (more
+  workgroups resident); the scale step one tile behind 107.6. Slower: 8 token tiles a wave (128 x 256: 113.6, spills),
+  16 waves (124.4).
+- What is left: a measurement build with fp16(d q) staged and no scale step (not bitwise) took 99.5 ms against 112.4, so
+  the scale step is ~12 % of the chunk; the rest is mostly the wave tile. FlyDSL's 64 x 64 wave tile holds 128
+  accumulator VGPRs and spills 4 with no scale step. Ours with 16 accumulator tiles a wave (8 token tiles x 2 row tiles)
+  took 256 VGPRs and spilled (2 and 18); a 4 x 4 wave tile with the scale step's P and four row tiles' B operands is
+  estimated past 256 VGPRs (not built).
+
 ## Summary: where the outside kernels say we stand (XT)
 
 | Op | ours | best yardstick measured | gap |
@@ -426,7 +475,7 @@ End to end, the 35B (`benchmarks/q3moe_prefill.py GGUF35 --chunk 2048 --ab`: pre
 | Verify attention (T 4), split pair, 32K | 1.29 ms / layer with the packed PART (1.52 ms before; T 1: 0.48 ms) | rocKE, GQA-packed: 0.22 ms | 5.9x (each row's arithmetic is still its own: decode's bits) |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
 | Prefill GEMMs, 30B chunk of 2048 (grouped experts) | 243.4 ms, swiglu inside (283.0 ms before, 292.1 with its swiglu launch) | FlyDSL fp16 at the aggregate M: 160.8 ms | 1.51x (1.76x before) |
-| Prefill GEMMs, 35B chunk of 2048 (grouped experts) | 208.4 ms, swiglu inside (250.4 ms before, 255.1 with its swiglu launch) | FlyDSL fp16 at the aggregate M: 144.5 ms | 1.44x (1.74x before) |
+| Prefill GEMMs, 35B chunk of 2048 (grouped experts) | ~199 ms: the dense Q8_0 GEMMs 107.6 (LDS tile) + the experts 91.2, swiglu inside (208.4 ms before the LDS tile, 255.1 with the narrow tiles) | FlyDSL fp16 at the aggregate M: 144.5 ms | 1.38x (1.44x, 1.74x before) |
 | Prefill attention, chunk at 30K | 79.7 ms (964 ms before the tiles) | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.6 ms) | 2.8x (34x before) |
 | Prefill attention, 35B chunk at 30K | 20.95 ms (`q35mp_attn`; 41.3 ms before) | rocKE WMMA prefill: 19.60 ms | 1.07x (2.1x before) |
 | Prefill attention, 30B chunk at 30K | 17.38 ms (`q3mp_attn`; 30.0 ms before) | rocKE d128: 18.62 ms | 0.93x (1.6x before) |

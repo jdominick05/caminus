@@ -2,7 +2,7 @@
 
 Caminus is Copyright (C) 2026 jdominick05, licensed under the GNU Affero General Public License v3.0 or later
 ([LICENSE](LICENSE)). It includes, builds against or derives from the third-party code below: MIT-licensed (llama.cpp / ggml,
-Strata, flash-linear-attention, rocKE) and Apache-2.0-licensed (Hugging Face transformers, Qwen3-30B-A3B's chat template; the license text is in
+Strata, flash-linear-attention, rocKE) and Apache-2.0-licensed (Hugging Face transformers, FlyDSL, Qwen3-30B-A3B's chat template; the license text is in
 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt)). Their terms require keeping these notices with the code. Model weights are
 not part of this repository and stay under their own licenses (the last section).
 
@@ -210,6 +210,32 @@ https://github.com/huggingface/transformers. Apache-2.0 is compatible with the A
 
 ```
 Copyright 2024 The HuggingFace Team. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+## FlyDSL (Apache-2.0)
+
+https://github.com/ROCm/FlyDSL (tag v0.5.0, commit 226cde8). A design followed, no code copied; measured as a yardstick
+only (docs/dev/yardsticks.md, `benchmarks/q35_prefill_gemm.py --arms flydsl`; not a dependency). The license text is in
+[LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt).
+
+| Where | What follows FlyDSL |
+|---|---|
+| `kernels/pf_q35m_mm.hip` (`q35mp_mm_q8_0_l`) | the pipeline of its RDNA3 fp16 GEMM (`kernels/gemm/rdna3_f16_gemm.py`): a k-tile of both operands in two LDS buffers, the next k-tile's global loads issued before this one's WMMAs and stored into the other buffer after them, one barrier per k-tile, LDS rows of 32 + 8 fp16 (its K padding); written from that design on Caminus's own Q8_0 decode and per-block scale step (each output bitwise the wide tile's). The notice is in the kernel's comment |
+
+```
+Copyright (c) 2026 FlyDSL Project Contributors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
