@@ -34,8 +34,12 @@ enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
 // walking every position: 26-31x the bandwidth floor at every depth, 64 ms of a token at 32K on the XTX) is not in these
 // modules; caminus.k3.Engine.attn_dec emits the pair on them. Not bitwise OP_ATTN_DEC (another summation order);
 // bitwise k3_gguf_q35d's pair on the same cache, and the same bits at T = 1 and T = 4.
+#ifndef ATTN_G   // (kernels/k3_q35_moe.hip: qwen35moe's 8 query heads per kv head; the dense line's 6)
 #define ATTN_G 6
+#endif
+#ifndef ATTN_VH   // (one V pass over every query head: 6 here, 8 in the qwen35moe module)
 #define ATTN_VH 6
+#endif
 #define K3_ATTN_COMB_FAST
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #include "k3_attn_split.h"
@@ -352,11 +356,24 @@ __device__ __forceinline__ void q35_op_qk_nr(const Seg & sg, int t) {
     for (int i = tid; i < D; i += blockDim.x) nrm[i] = (scale * x[i]) * w[i];
     __syncthreads();
     const float pos = (float)(((const int *)sg.asum)[0] + t / (sg.N / seg_T(sg)));   // task t = token * heads + head
+#ifdef K3_Q35_YARN
+    // (YaRN: Seg.aux = the per-dim frequency factor m[j] (fp32 [n_rot / 2]), Seg.work = the magnitude scale's bits;
+    //  aux NULL: the plain rope, bit for bit. theta = pos * rs^j * m[j], cos / sin scaled by mscale: llama.cpp's
+    //  rope_yarn with theta_interp * (1 - ramp) + theta_extrap * ramp folded into m. Both are loop-invariant: hoisted,
+    //  or the extra live values cost this object a spilled SGPR over its pin)
+    const float * mt = (const float *)sg.aux;   // (always present in this module: the host passes all-ones for the plain rope)
+    const float ms = __builtin_bit_cast(float, sg.work);
+#endif
     for (int i = tid; i < D; i += blockDim.x) {
         if (i >= nrot) { y[i] = nrm[i]; continue; }
         const int j = i < nrot / 2 ? i : i - nrot / 2;
+#ifdef K3_Q35_YARN
+        const float theta = pos * powf(sg.rs, (float)j) * mt[j];
+        const float c = cosf(theta) * ms, sn = sinf(theta) * ms;
+#else
         const float theta = pos * powf(sg.rs, (float)j);
         const float c = cosf(theta), sn = sinf(theta);
+#endif
         const float x0 = nrm[j], x1 = nrm[j + nrot / 2];
         y[i] = i < nrot / 2 ? x0 * c - x1 * sn : x0 * sn + x1 * c;
     }
@@ -441,6 +458,26 @@ __device__ __forceinline__ void q35_op_argmax(const Seg & sg, int t) {
 #include "k3_df_own_ops.h"
 #endif
 
+#ifdef K3_Q35_MOE
+// OP_OWN_EMB on the qwen35moe module: the GSQ file's token_embd is BF16, so a row is N * 2 bytes and value i is the
+// high half of a float32 (bf16 -> f32 is a shift, exact). The dense form below decodes Q4_K blocks of 256 values.
+__device__ __forceinline__ void own_op_emb_bf16(const Seg & sg) {
+    const int tok = min(max(((const int *)sg.a)[0], 0), sg.pad2 - 1);
+    const uint16_t * row = (const uint16_t *)sg.W + (size_t)tok * sg.N;
+    float * x = (float *)sg.y;
+    for (int i = (int)K3TID; i < sg.N; i += blockDim.x)
+        x[i] = __builtin_bit_cast(float, (uint32_t)row[i] << 16);
+}
+
+// OP_ROUTER on the qwen35moe module: the 30B's softmax top-k (op_router, kernels/k3_q3m_ops.h), then the gated shared
+// expert's weight as slot k, which own_op_add_rms16's 9th slot reads. The shared gate logit arrives in sg.W, one fp32
+// (the OP_F32_MV of ffn_gate_inp_shexp); the weights buffer is k + 1 wide. T = 1 (tt = 0: the router's stride is k).
+__device__ __forceinline__ void op_router_shexp(const Seg & sg, int tt) {
+    op_router(sg, tt);
+    if (K3TID == 0) ((float *)sg.gs)[tt * sg.pad1 + sg.pad1] = 1.0f / (1.0f + expf(-((const float *)sg.W)[0]));
+}
+#endif
+
 #ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
@@ -458,7 +495,14 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     if (sg.op == OP_ATTN_DEC && sg.pad2) { df_op_attn(sg, t); return true; }
 #endif
     if (sg.op == OP_OWN_MV16) { q35_op_mv16(sg, t); return true; }
+#ifdef K3_Q35_MOE   // (kernels/k3_q35_moe.hip: qwen35moe's tape. Its add_rms16 is the k3_own_ops.h form, whose weighted
+    // sum takes the routed experts' slots plus the gated shared expert as a 9th (OWN_ADD_MAX_S); the dense line's
+    // any-length form below has no slots or weights. OP_ROUTER is the 30B's softmax top-k, renormalised.)
+    if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg OWN_TK_ARG); return true; }
+    if (sg.op == OP_ROUTER) { op_router_shexp(sg, t); return true; }
+#else
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
+#endif
     if (sg.op == OP_F32_MV) { op_f32_mv(sg, t); return true; }
     if (sg.op == OP_GDN_CONV) { q35_op_gdn_conv(sg, t); return true; }
     if (sg.op == OP_GDN_L2) { q35_op_gdn_l2(sg, t); return true; }
@@ -481,7 +525,11 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
 #endif
     if (sg.op == OP_GATE_MUL16) { q35_op_gate_mul16(sg, t); return true; }
     if (sg.op == OP_OWN_SWIGLU16) { own_op_swiglu16(sg, t); return true; }
+#ifdef K3_Q35_MOE
+    if (sg.op == OP_OWN_EMB) { own_op_emb_bf16(sg OWN_TK_ARG); return true; }
+#else
     if (sg.op == OP_OWN_EMB) { own_op_emb(sg OWN_TK_ARG); return true; }
+#endif
 #ifdef K3_TP
     if (sg.op == OP_XCHG) { op_xchg(sg, sy, limit_us, seg, tr); return true; }
 #endif

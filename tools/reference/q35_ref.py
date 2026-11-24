@@ -32,9 +32,9 @@ def opt(args, name):
 
 if __name__ == '__main__':
     args = [a for a in sys.argv[1:] if a not in ('--trace', '--census')]; trace = [] if '--trace' in sys.argv else None
-    tokfile, threads = opt(args, '--tokens'), opt(args, '--threads')
+    tokfile, threads, yarn = opt(args, '--tokens'), opt(args, '--threads'), opt(args, '--yarn')
     path, out = args[0], args[1]; N = int(args[2]) if len(args) > 2 else 128
-    m = reference(path, threads=int(threads) if threads else None)
+    m = reference(path, threads=int(threads) if threads else None, yarn=float(yarn) if yarn else None)
     seq = [int(v) for v in open(tokfile).read().split()][:N] if tokfile else BPE(m.F.meta).encode(TEXT)[:N]
     if len(seq) < N: raise SystemExit(f'the {"token file" if tokfile else "text"} has {len(seq)} tokens < {N}')
     if '--census' in sys.argv: m.census = {}

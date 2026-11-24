@@ -82,8 +82,10 @@ def rope_sections_ok(sec, nrot):
 class Q35Ref:
     gdn_gate = staticmethod(silu)   # the Gated DeltaNet output gate on z (the Coder's reference, caminus.ref_coder: sigmoid)
     UNREAD = r'(\.scale|_s(\.weight)?|ffn_gate_up_exps(\.weight)?)$'   # tensor names of forms no reference here reads
+    yarn_m, yarn_s = None, 1.0      # (the native rope; __init__ sets YaRN's per-pair multipliers and cos / sin magnitude)
 
-    def __init__(self, path, threads=None):
+    def __init__(self, path, threads=None, yarn=None):
+        self.yarn = yarn          # (the long-context factor; _trunk builds the rope table from it)
         self.F = F = ggufio.GGUFFile(path)
         if F.arch not in ('qwen35', 'qwen35moe'): raise ValueError(f'ref_q35: architecture {F.arch!r} (qwen35 and qwen35moe only)')
         self.moe = F.arch == 'qwen35moe'
@@ -106,6 +108,16 @@ class Q35Ref:
         self.H, self.HKV, self.HD = int(hp('attention.head_count')), int(hp('attention.head_count_kv')), int(hp('attention.key_length'))
         self.NK, self.NV, self.S, self.DC = int(hp('ssm.group_count')), int(hp('ssm.time_step_rank')), int(hp('ssm.state_size')), int(hp('ssm.conv_kernel'))
         self.eps, self.base, self.nrot = float(hp('attention.layer_norm_rms_epsilon')), float(hp('rope.freq_base')), int(hp('rope.dimension_count'))
+        # (YaRN: the same recipe and the same native context the engine uses, so both sides of a gate row rotate alike.
+        #  getattr: a subclass (the Coder's CoderRef) sets up its own trunk and need not take the factor at all)
+        yarn = getattr(self, 'yarn', None)
+        if yarn:
+            from caminus.rope import mscale, yarn_freqs
+            self.yarn_s = mscale(float(yarn))   # (the magnitude on cos / sin of the rotated dims: the engine's op scales both)
+            j = np.arange(self.nrot // 2, dtype=np.float64)
+            n_ctx = int(hp('context_length'))
+            self.yarn_m = (yarn_freqs(self.nrot, self.base, float(yarn), n_ctx)
+                           / self.base ** (-2.0 * j / self.nrot)).astype(np.float64)
         rec = hp('attention.recurrent_layers'); fai = int(hp('full_attention_interval', 4))
         self.gdn = [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(self.L)]
         if int(hp('ssm.inner_size')) != self.NV * self.S or self.NV % self.NK or self.H % self.HKV or self.nrot > self.HD or self.nrot % 2:
@@ -159,7 +171,8 @@ class Q35Ref:
         """x [N, heads, HD] at positions pos [N]: the first nrot dims rotate (pairs i, i + nrot / 2), the rest stay"""
         half = self.nrot // 2
         th = pos[:, None, None] * self.base ** (-2.0 * np.arange(half) / self.nrot)
-        c, s = np.cos(th), np.sin(th)
+        if self.yarn_m is not None: th = th * self.yarn_m
+        c, s = np.cos(th) * self.yarn_s, np.sin(th) * self.yarn_s
         a, b = x[..., :half], x[..., half:self.nrot]
         return np.concatenate([a * c - b * s, a * s + b * c, x[..., self.nrot:]], axis=-1)
 
@@ -276,14 +289,14 @@ class Q35Ref:
         return np.concatenate([hN @ self.W('output.weight', r0, min(R, r0 + HEAD_ROWS)).T for r0 in range(0, R, HEAD_ROWS)], axis=1)
 
 
-def reference(path, threads=None):
+def reference(path, threads=None, yarn=None):
     """the float64 reference of a GGUF, by its architecture: Q35Ref (qwen35, qwen35moe) or caminus.ref_coder.CoderRef
     (qwen4exp, the Coder)"""
     F = ggufio.GGUFFile(path); arch = F.arch; F.close()
     if arch == 'qwen4exp':
         from caminus.ref_coder import CoderRef
         return CoderRef(path, threads=threads)
-    return Q35Ref(path, threads=threads)
+    return Q35Ref(path, threads=threads, yarn=yarn)
 
 
 def main(argv=None):

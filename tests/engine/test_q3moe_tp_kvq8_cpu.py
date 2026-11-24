@@ -352,13 +352,13 @@ finally:
 check(q8_seen is True and f16_seen is False, f"qwen3moe-tp build passes q8 to the engine ({q8_seen} with kv q8, {f16_seen} without)")
 bad = []
 for name, a in arch.ARCHS.items():
-    if name in ('qwen3moe', 'qwen3moe-tp'): continue
+    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen35moe-own'): continue   # (the own MoE line has its own Q8 object)
     for what, fn in (('build', lambda: a.build({'kv': 'q8'})), ('auto_need', lambda: a.auto_need({'kv': 'q8'}, 4))):
         try: fn(); bad.append((name, what, 'no error'))
         except ValueError as e:
             if "kv 'q8'" not in str(e): bad.append((name, what, str(e)[:80]))
         except Exception as e: bad.append((name, what, type(e).__name__ + ' ' + str(e)[:80]))
-check(not bad, f"every other registry entry ({len(arch.ARCHS) - 2}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything"
+check(not bad, f"every other registry entry ({len(arch.ARCHS) - 3}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything"
       + (f' (wrong: {bad})' if bad else ''))
 
 print('RESULT', 'PASS' if ok else 'FAIL')
