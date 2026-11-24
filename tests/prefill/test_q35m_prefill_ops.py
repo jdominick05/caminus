@@ -19,6 +19,9 @@ line's (those are tests/prefill/test_q35_prefill_ops.py's), over a chunk's rows,
              (Ops(wide=False)), BITWISE: gate and down, and the fused gate | up (q35mp_mm_q2_0_gu) against gate, up and
              q3p_swiglu; on the 37-token routing (partial items only) and on 150 tokens: 4 experts with full 64-pair items,
              4 with 5, 20, 40 and 60 pairs (partial items of 1, 2, 3 and 4 token tiles)
+  dense      the dense Q8_0 LDS tile (q35mp_mm_q8_0_l, what Ops serves) against q35own's tiles (Ops(wide=False)), BITWISE:
+             block 0's attn_qkv, ssm_out and ffn_down_shexp at 37 tokens, and at 300 tokens on all but 37 rows (a partial
+             token tile and a partial row tile: their clamped reads never written)
   tools/guard.sh LOG 600 env HIP_VISIBLE_DEVICES=<a non-display card> python -I tests/prefill/test_q35m_prefill_ops.py GGUF
 Prints PASS / FAIL lines and RESULT PASS | FAIL."""
 import os
@@ -35,6 +38,7 @@ from caminus.engine import k3  # noqa: E402
 from caminus.engine.q35_moe import _shapes  # noqa: E402
 
 FAILS = []
+Q8_DENSE = ('attn_qkv', 'ssm_out', 'ffn_down_shexp')   # (block 0's dense Q8_0 weights: 8192 x 2048, 2048 x 4096, 2048 x 512)
 
 
 def check(ok, what):
@@ -74,7 +78,9 @@ def main():
     T2 = 150                                       # (the wide tiles' second routing: full work items)
     RB_G, RB_D = D // 64 * 18, FF // 64 * 18
     mib = (NE * FF * (RB_G * 2) + NE * D * RB_D + V * D * 2 + T * (E + 4 * (KU + 1) * D + 4 * KU * FF) * 4 + E * D * 4
-           + T2 * (D * 2 + KU * FF * (3 * 4 + 2 * 2) + 2 * (KU + 1) * D * 4 + 16 * KU)) / capacity.MIB
+           + T2 * (D * 2 + KU * FF * (3 * 4 + 2 * 2) + 2 * (KU + 1) * D * 4 + 16 * KU)
+           + max(F.T[f'blk.0.{n}.weight'].n_bytes + 300 * F.T[f'blk.0.{n}.weight'].shape[1] * 8
+                 + 300 * F.T[f'blk.0.{n}.weight'].shape[0] * 2 for n in Q8_DENSE)) / capacity.MIB
     capacity.check([dev.index], [mib * 1.5 + 64], 'q35m prefill G1 buffers')    # (before anything is allocated)
     from caminus.prefill.q35moe import Ops, ROUTER_FLOOR
     from caminus.prefill import q3m_ops
@@ -273,6 +279,22 @@ def main():
         same(f'wide, {what}: down (Q2_0 {D} x {FF}) against q35mp_mm_q2_0', dw, dnn)
         check(bool(torch.isfinite(gw).all()) and bool(torch.isfinite(aw).all()) and int(torch.isfinite(dw).sum()) == Pn * D,
               f'wide, {what}: every pair row written (gate, gate | up, down)')
+    # ---- the dense Q8_0 LDS tile against q35own's tiles, bitwise ----------------------------------------------------------
+    check(bool(O.q8l) and not On.q8l, 'Ops serves the dense Q8_0 GEMMs on the LDS tile; Ops(wide=False) on q35own\'s tiles')
+    min_wg, O.q8l_min_wg = O.q8l_min_wg, 0             # (every case on the tile, whatever the card's grid-size rule)
+    for name in Q8_DENSE:
+        t_ = F.T[f'blk.{il}.{name}.weight']
+        K, R = int(t_.shape[0]), int(t_.shape[1])
+        if t_.type != 'Q8_0': sys.exit(f'{name}: {t_.type}, not Q8_0')
+        wq = put(t_.pread(0, R * K // 32 * 34))
+        for Rn, Tn in ((R, T), (R - 37, 300)):           # (rows past a 64-row tile, tokens past a 128-token tile: clamped)
+            Wq = dict(fmt='Q8_0', rows=Rn, K=K, w=wq)
+            xq = put((rng.standard_normal((Tn, K)) * 1.0).astype(np.float16)).view(-1)
+            yl, yn = (torch.full((Tn * Rn,), float('nan'), device=dev) for _ in range(2))
+            O.mm(Wq, xq, K, yl, Rn, n=Tn); On.mm(Wq, xq, K, yn, Rn, n=Tn); torch.cuda.synchronize(dev)
+            same(f'dense Q8_0 {name} ({Rn} x {K}, {Tn} tokens): the LDS tile against q35own\'s', yl, yn)
+            check(bool(torch.isfinite(yl).all()), f'dense Q8_0 {name} ({Rn} x {K}, {Tn} tokens): every output written')
+    O.q8l_min_wg = min_wg
     del On
     bad_ids = ids.copy().reshape(-1); bad_ids[5] = NE + 7
     err.zero_(); O.group9(put(bad_ids), P, KU, NE, xs, yp, y9, items, nitems, err); torch.cuda.synchronize(dev)

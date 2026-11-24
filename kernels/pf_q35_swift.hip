@@ -99,6 +99,21 @@ __device__ __forceinline__ void q8_pair_block(const Q8Pair & PR, int j, bool rok
 #endif
 }
 
+// q8_wb with fp16's exponent byte from v_perm (the same bits): the wide tiles' Q8_0 B operand (q35p_mm_q8_0_w below,
+// kernels/pf_q35m_mm.hip q35mp_mm_q8_0_l)
+__device__ __forceinline__ h16_t q8_wbw(const uint32_t (&q)[4], bool ok) {
+    const h2_t o2 = {(_Float16)(-1152.0f), (_Float16)(-1152.0f)};
+    uint32_t o[8];
+#pragma unroll
+    for (int w = 0; w < 4; w++) {
+        const uint32_t u = ok ? (q[w] ^ 0x80808080u) : 0x80808080u;
+        const uint32_t p01 = __builtin_amdgcn_perm(0x64646464u, u, 0x04010400u);   // bytes: u0, 0x64, u1, 0x64
+        const uint32_t p23 = __builtin_amdgcn_perm(0x64646464u, u, 0x04030402u);
+        o[2 * w] = as_u(as_h2(p01) + o2); o[2 * w + 1] = as_u(as_h2(p23) + o2);
+    }
+    return __builtin_bit_cast(h16_t, o);
+}
+
 #ifndef Q35P_WIDE_OBJECT   // (kernels/pf_q35m_mm.hip: the helpers above only; under max-ilp q35p_mm_q8_0_w spills 18 VGPRs)
 extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
         const uint8_t * __restrict__ W, int R, int K, const _Float16 * __restrict__ X, int ldx, const int * __restrict__ xsrc,
@@ -152,20 +167,9 @@ extern "C" __global__ void __launch_bounds__(256) q35p_mm_q8_0(
 // q35p_mm_q8_0 with two 16-row tiles per wave (64 tokens x 256 rows per workgroup): each A operand feeds both row tiles'
 // WMMAs, each row tile keeps its own block pair one pair ahead. Every row's statements are q35p_mm_q8_0's in its order
 // (per block: two WMMA k-steps from a zero accumulator, then acc += d P), so outputs keep their bits; q8_wbw takes fp16's
-// exponent byte from v_perm (the same bits as q8_wb). Rows past R read row 0 and are never written.
+// exponent byte from v_perm (the same bits as q8_wb; above the guard, so kernels/pf_q35m_mm.hip's q35mp_mm_q8_0_l shares
+// it). Rows past R read row 0 and are never written.
 // Grid (tokens / 64, rows / 256), block 256; X fp16 [ntok][ldx], Y fp32 [ntok][ldy].
-__device__ __forceinline__ h16_t q8_wbw(const uint32_t (&q)[4], bool ok) {
-    const h2_t o2 = {(_Float16)(-1152.0f), (_Float16)(-1152.0f)};
-    uint32_t o[8];
-#pragma unroll
-    for (int w = 0; w < 4; w++) {
-        const uint32_t u = ok ? (q[w] ^ 0x80808080u) : 0x80808080u;
-        const uint32_t p01 = __builtin_amdgcn_perm(0x64646464u, u, 0x04010400u);   // bytes: u0, 0x64, u1, 0x64
-        const uint32_t p23 = __builtin_amdgcn_perm(0x64646464u, u, 0x04030402u);
-        o[2 * w] = as_u(as_h2(p01) + o2); o[2 * w + 1] = as_u(as_h2(p23) + o2);
-    }
-    return __builtin_bit_cast(h16_t, o);
-}
 // block JB of both row tiles' current pairs: q8_pair_block's statements per row tile (for each token tile mt: P from a zero
 // accumulator, the k-steps hf 0 then 1, then acc += d P), one A load per k-step and token tile shared by both row tiles.
 // Token tiles outermost so only one P per row tile is live (each tile's sums are independent: the same bits).

@@ -45,6 +45,7 @@ NULL = ctypes.c_void_p(0)
 MODULE = 'pf_q35m'
 KVQ8_MODULE = 'pf_q35m_kvq8'   # the Q8 KV cache's append and attention (kernels/objects.tsv pf_q35m_kvq8)
 WIDE_MODULE = 'pf_q35m_mm'   # the routed experts' wide Q2_0 tiles and fused gate | up (kernels/pf_q35m_mm.hip)
+Q8L_T, Q8L_R = 128, 64   # (tokens and rows per workgroup of the dense Q8_0 LDS tile, kernels/pf_q35m_mm.hip q35mp_mm_q8_0_l)
 ROUTER_FLOOR = 6.103515625e-5   # (the router's clamp on the top-k sum: Moe35Own's router_shexp default)
 # T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Unmeasured: q35own's value until a speed
 # test sets it
@@ -61,23 +62,44 @@ class Ops(q35own.Ops):
     def __init__(self, dev, module=MODULE, q8=False, wide=None):
         """q8: the KV cache is Q8_0 rows (kernels/kv_codec_ops.h): kv_append_q8 and attn_wm's Q8 kernel run KVQ8_MODULE's
         kernels, every other kernel stays on `module`. wide: the routed experts' Q2_0 GEMMs on WIDE_MODULE's wide tiles and
-        their gate | up fused with the swiglu, and the dense Q8_0 GEMMs wide from q8_wide_min_wg (None: with module
-        pf_q35m; False: q35mp_mm_q2_0, gate, up, swiglu apart and the dense line's rule, the narrow arm the G1 test and
-        the benchmarks compare bitwise). The attributes wide / gu switch them per
-        launch once the object is loaded (q3m_ops.Ops's names: benchmarks/q35_prefill_gemm.py --set)"""
+        their gate | up fused with the swiglu, and the dense Q8_0 GEMMs on its LDS tile (mm; below q8l_min_wg wide from
+        q8_wide_min_wg) (None: with module pf_q35m; False: q35mp_mm_q2_0, gate, up, swiglu apart and the dense line's
+        rule, the narrow arm the G1 test and the benchmarks compare bitwise). The attributes wide / gu / q8l switch them
+        per launch once the object is loaded (q3m_ops.Ops's names: benchmarks/q35_prefill_gemm.py --set)"""
         super().__init__(dev, module)
         self.q8 = bool(q8)
         self.wide = self.gu = (module == MODULE) if wide is None else bool(wide)
+        self.q8l = self.wide      # (the dense Q8_0 GEMMs on the LDS tile: mm)
+        # (its grid-size rule: a workgroup of 128 x 64 per WGP (multi_processor_count), XT: at 512 tokens the 512 x 2048
+        # GEMMs (32 workgroups) took 4.36 ms a chunk against 4.25 on q35own's tiles; at 128 tokens 4096 x 2048 (64) 1.98
+        # against 2.27)
+        self.q8l_min_wg = self.cus
         with torch.cuda.device(dev):
             if self.q8: self.kvmod = hip.Module(KVQ8_MODULE)
             self.wmod = hip.Module(WIDE_MODULE) if self.wide else None
+
+    def mm(self, W, x16, ldx, y, ldy, n=None, work=None):
+        """y[t] = W x16[t] for t < n: q35own.Ops.mm, but the dense Q8_0 GEMMs on WIDE_MODULE's LDS tile (q35mp_mm_q8_0_l:
+        128 tokens x 64 rows a workgroup, each output bitwise q35p_mm_q8_0_w's) from q8l_min_wg workgroups; q8l = 0 (the
+        attribute, benchmarks/q35_prefill_gemm.py --set) keeps them on q35own's tiles"""
+        Wt = (W['fmt'], W['rows'], W['K'], W['w']) if isinstance(W, dict) else W
+        if Wt[0] == 'Q8_0' and work is None and n is not None and self.q8l and self.wmod is not None:
+            R, K, n = int(Wt[1]), int(Wt[2]), int(n)
+            if K % 256: raise ValueError(f'q35moe mm: K {K} is not a multiple of 256')
+            if ldx % 8: raise ValueError(f'q35moe mm: ldx {ldx} (the LDS tile reads x 16 bytes at a time: a multiple of 8)')
+            grid = (-(-n // Q8L_T), -(-R // Q8L_R))
+            if grid[0] * grid[1] >= self.q8l_min_wg:
+                self.wmod.q35mp_mm_q8_0_l(grid, (128,), Wt[3], I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
+                return
+        return super().mm(W, x16, ldx, y, ldy, n=n, work=work)
 
     def q8_wide_min_wg(self):
         """the dense Q8_0 GEMMs go wide from half the card's compute units in workgroups (q3m_ops.Ops.wide_min_wg, the 30B's
         rule) where the dense line's rule asks for 4 per unit: on the XT at 2048 tokens the shared expert's gate / up and
         the k / v projections (512 x 2048, 64 workgroups) take 11.85 ms a chunk wide against 12.97 (Q8_0 alone); at 512
         tokens ssm_out (2048 x 4096, 64) 8.77 against 9.75 and the shared expert's down (2048 x 512, 64) 1.39 against 1.47,
-        while the 512 x 2048 GEMMs (16) ran 6.35 against 4.23 and stay narrow. wide = False: the dense line's rule (the narrow arm)"""
+        while the 512 x 2048 GEMMs (16) ran 6.35 against 4.23 and stay narrow. Since the LDS tile (mm) this rule decides only
+        below q8l_min_wg. wide = False: the dense line's rule (the narrow arm)"""
         return self.wide_min_wg if self.wide else super().q8_wide_min_wg()
 
     def kv_append_q8(self, k, ldk, v, ldv, cache, M, pos0, n, rows, err):

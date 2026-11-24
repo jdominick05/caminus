@@ -8,7 +8,7 @@ local (local: no exchange, each card's own partials: the compute floor, not the 
 per length in turn (interleaved), so the exchange's exposed cost is overlap or serial minus local in the same process.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF [--lengths 512,4096] [--chunk 1024] [--max-ctx N] [--ops] [--prefill-module M]
   CAMINUS_UPLOAD_LOG=ULOG tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py GGUF --cards 2 [--modes overlap,serial,local] [--micro 2]
---ab (one card): every round also on the narrow tiles (Ops.wide / gu False), interleaved, both arms' medians printed and
+--ab (one card): every round also on the narrow tiles (Ops.wide / gu / q8l False), interleaved, both arms' medians printed and
 the last attention layer's KV rows of the last round compared bitwise (RESULT FAIL if they differ).
 --kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True); with --cards 2 Q3MoETP(q8=True) and
 Q3MPrefillTP's Q8 path); runs alternated with an F16 run for the A/B (both caches do not fit at depth)."""
@@ -84,6 +84,7 @@ for L in Ls:
     for r in range(A.rounds + 1):
         for a in arms:
             pf.ops.wide = pf.ops.gu = a
+            if hasattr(pf.ops, 'q8l'): pf.ops.q8l = a   # (the 35B's dense Q8_0 LDS tile: off in the narrow arm, as Ops(wide=False))
             eng.reset(); torch.cuda.synchronize(); t0 = time.perf_counter()
             pf.run(toks, 0, 0, L); torch.cuda.synchronize(); ts[a].append(time.perf_counter() - t0)
             if A.ab and r == A.rounds: last[a] = [L for L in eng.L if 'cache' in L][-1]['cache'].cpu()   # (host memory: the last attention layer's rows)
@@ -96,6 +97,7 @@ for L in Ls:
         print(f'  L {L:6d}: the last layer\'s KV rows {"bitwise equal" if same else "DIFFER"} (wide vs narrow)', flush=True)
         if not same: bad = True
     pf.ops.wide = pf.ops.gu = arms[0]
+    if hasattr(pf.ops, 'q8l'): pf.ops.q8l = arms[0]
     if A.ops:
         acc = collections.defaultdict(float); evs = []
         O = pf.ops
