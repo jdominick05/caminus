@@ -176,6 +176,10 @@ Q35MOE_KV_Q8_MODULES = tuple(Q35MOE_KV_Q8_OF.values())
 Q35MOE_TRACE_MODULES = ('k3_q35_moe_kvq8_trace',)
 Q35MOE_KV_Q8_MODULES += Q35MOE_TRACE_MODULES
 Q35MOE_MODULES += Q35MOE_KV_Q8_MODULES
+# rows per wave of the one-round-trip tiles (kernels/k3_own_ops.h OWN_K3_RW; 2 where a module file does not set it): the
+# qwen35moe modules take 4 (kernels/k3_q35_moe.hip). OWN_GU's gate and up rows of a task must fall to the same wave (the
+# gate sums wait in that wave's LDS slots, unsynchronised): rows_per_task a multiple of 8 waves x this.
+OWN_K3_RW_OF = dict.fromkeys(Q35MOE_MODULES, 4)
 # Every runtime check that asks "does this module keep a Q8 KV cache" uses this: the dense table above stays the dense
 # table (its own tests pin its members and their geometry), and the MoE object joins here.
 Q35_KV_Q8_ALL = Q35_KV_Q8_MODULES + Q35MOE_KV_Q8_MODULES
@@ -777,18 +781,22 @@ class Engine:
                              x.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_FMT[fmt], team, OWN_ACT[act], 0))
         return len(self.segs) - 1
 
-    def own_matvec16(self, w, fmt, nrows, ncols, x16, out, rows_per_task=32, dep=-1, team=-1, tokens=1):
+    def own_matvec16(self, w, fmt, nrows, ncols, x16, out, rows_per_task=32, dep=-1, team=-1, tokens=1, row=False):
         """the general rows tiles on an fp16 activation buffer (OP_OWN_MV16, the dense qwen35 own module): raw GGUF blocks w
         of nrows contiguous rows (Q8_0 / Q5_K: the formats without a one-round-trip tile) times x16 [ncols] -> fp32 out
         [nrows]. T = 1; rows_per_task a multiple of 4 (a wave takes 4 rows). The verify module (Q35V_MODULES): tokens = the
         engine's T (1 .. 4: the tiles' OWN_MT), x16 [tokens, ncols] -> out [tokens, nrows], each token's rows the one-token
-        tile's bits"""
+        tile's bits. row: the qwen35moe modules' wave-per-row Q8_0 tile (kernels/own_quant.h own_row_q8_0_w; K = 1024 n, T = 1;
+        Seg.pad1 bit 16): wave w of a task takes its rows w, w + 8, ..., so rows_per_task in 8s fills the workgroup"""
         # (ThinkingCap's MTP drafter: its Q8_0 head, one token on a T-row tape: the rows tile's one-token form, Seg.pad1 = 0)
         if self.module not in Q35_MODULES + Q35MOE_MODULES or (self.T != 1 or tokens != 1) and not (self.module in Q35V_MODULES and tokens == self.T and 1 <= tokens <= 4) \
                 and not (self.module in Q35TM_MODULES and tokens == 1):
             raise ValueError(f'own_matvec16: T = 1 on {Q35_MODULES}; tokens = T on {Q35V_MODULES} (module {self.module}, T {self.T}, tokens {tokens})')
         if fmt not in OWN_MV16_FMT: raise ValueError(f'own_matvec16: {fmt} ({sorted(OWN_MV16_FMT)})')
         if rows_per_task % 4 or rows_per_task < 4: raise ValueError(f'own_matvec16: rows_per_task {rows_per_task} (a multiple of 4)')
+        if row and (self.module not in Q35MOE_MODULES or fmt != 'Q8_0' or ncols % 1024 or tokens != 1):
+            raise ValueError(f'own_matvec16: the wave-per-row tile is Q8_0 at K = 1024 n, T = 1, on {Q35MOE_MODULES} '
+                             f'({fmt}, K {ncols}, tokens {tokens}, module {self.module})')
         qk, bs = {'Q8_0': (32, 34), 'Q5_K': (256, 176)}[fmt]
         if ncols % qk: raise ValueError(f'own_matvec16: K {ncols} is not a multiple of {fmt} blocks ({qk})')
         assert x16.dtype == torch.float16 and x16.numel() >= tokens * ncols and x16.data_ptr() % 16 == 0, (x16.dtype, x16.numel())
@@ -799,7 +807,7 @@ class Engine:
         strides = (ncols | (nrows << 32)) if tokens > 1 else None   # (Seg.gs: x / out token strides, low | high half)
         self.segs.append(Seg(OP_OWN_MV16, (nrows + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(), strides,
                              x16.data_ptr(), None, out.data_ptr(), 0.0, nrows, ncols, 1, OWN_MV16_FMT[fmt], team,
-                             (tokens << 8) if tokens > 1 else 0, 0))
+                             ((tokens << 8) if tokens > 1 else 0) | (1 << 16 if row else 0), 0))
         return len(self.segs) - 1
 
     def own_matvec_1rt(self, w, fmt, rows, ncols, x16, out, ids=None, total_rows=None, x_per_slot=False, rows_per_task=16,
@@ -852,6 +860,10 @@ class Engine:
         if (scales is not None) != rs: raise ValueError(f'own_matvec_1rt: scales are the row-scale formats\' ({sorted(OWN_RS_FMT)}), and they need them (fmt {fmt})')
         if ncols % 256 or rows % 2 or rows_per_task % 2 or rows_per_task < 2:
             raise ValueError(f'own_matvec_1rt: K {ncols} (a multiple of 256), rows {rows} (even), rows_per_task {rows_per_task}')
+        gu_m = 8 * OWN_K3_RW_OF.get(self.module, 2)   # (a task's gate and up rows on the same wave; the LDS slots: OWN_GU_RPT)
+        if up is not None and (rows_per_task % gu_m or rows_per_task > 64):
+            raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of {gu_m} on {self.module}, at most 64 '
+                             f'(got {rows_per_task})')
         S = 1 if ids is None else ids.numel()
         total = rows if ids is None else int(total_rows)
         if total % rows: raise ValueError(f'own_matvec_1rt: total_rows {total} is not experts x {rows}')
@@ -868,8 +880,6 @@ class Engine:
             assert scales.dtype == torch.float32 and scales.is_cuda and scales.numel() >= total * (2 if up is not None else 1), (scales.numel(), total)
             assert scales.data_ptr() % 4 == 0
         if ids is not None: assert ids.dtype == torch.int32 and ids.is_cuda
-        if up is not None and (rows_per_task % 16 or rows_per_task > 64):   # (the gate sums' LDS slots: OWN_GU_RPT)
-            raise ValueError(f'own_matvec_1rt: up needs rows_per_task a multiple of 16, at most 64 (got {rows_per_task})')
         pad1 = (OWN_A16_1RT | (OWN_GROUPED if ids is not None else 0) | (OWN_X_PER_SLOT if x_per_slot else 0)
                 | (OWN_GU if up is not None else 0) | (OWN_X_PER_TOKEN if x_per_token else 0) | (OWN_UNION if union else 0)
                 | ((tokens << 8) if tokens > 1 else 0))
@@ -1050,12 +1060,20 @@ class Engine:
                              n if self.T > 1 else 0, 0))
         return len(self.segs) - 1
 
-    def gdn_conv(self, x, w, state, out, xprev, rows_per_task=256, dep=-1, team=-1):
-        """GDN short conv: out = silu(conv4([state, x])) per channel; state [C, 3] shifts in place; w [C, 4]"""
+    def gdn_conv(self, x, w, state, out, xprev, rows_per_task=256, dep=-1, team=-1, l2=None):
+        """GDN short conv: out = silu(conv4([state, x])) per channel; state [C, 3] shifts in place; w [C, 4].
+        l2 = (qk channels, head dim, eps) (the qwen35moe modules, T = 1): the first qk channels are also L2-normed per head
+        in place (gdn_l2's statements: out then holds q | k as gdn_l2 would write them), one segment instead of two"""
         C = x.numel() // self.T; assert xprev.numel() >= x.numel(); self.keep += [x, w, state, out, xprev]
+        qkc, hd, eps = l2 if l2 is not None else (0, 0, 0.0)
+        if l2 is not None and (self.module not in Q35MOE_MODULES or self.T != 1 or rows_per_task != 256 or hd != 128
+                               or qkc % 256 or not 0 < qkc <= C):
+            raise ValueError(f'gdn_conv: the fused L2 norm runs on {Q35MOE_MODULES} at T = 1, 256 channels per task, head dim 128, '
+                             f'qk channels a multiple of 256 (module {self.module}, T {self.T}, rpt {rows_per_task}, dim {hd}, qk {qkc} of {C})')
         self._guard_replay()   # the replay reads params[1] rows of the previous pass's inputs (bounded by the guard)
         sg = Seg(OP_GDN_CONV, (C + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(),
-                 state.data_ptr(), x.data_ptr(), self.params.data_ptr(), out.data_ptr(), 0.0, C, 0, 1, 0, team, 0, 0)
+                 state.data_ptr(), x.data_ptr(), self.params.data_ptr(), out.data_ptr(), eps / hd if hd else 0.0, C, hd, 1, 0,
+                 team, qkc, 0)
         sg.aux = xprev.data_ptr(); self.segs.append(sg)
         return len(self.segs) - 1
 

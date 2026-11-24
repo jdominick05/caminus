@@ -305,6 +305,38 @@ __device__ __forceinline__ void own_rows_q8_0_1rt(const uint8_t * __restrict__ W
     }
 }
 
+// ---- Q8_0, a wave per row (K a multiple of 1024; the qwen35moe decode module, K3_Q35_MV16_ROW): a pass reads 32
+// consecutive blocks of the row, 1,088 contiguous bytes (the 4-rows tile above walks 4 rows 272 bytes at a time, 8 or
+// 16 dependent passes per row: ~370 GB/s at qwen35moe's 2048 x 4096 ssm_out on an RX 7900 XT); lane l takes block l:
+// the 9 aligned dwords from (34 l) & ~3 (an even l's block starts on a dword, its quants 2 bytes past one: alignbit; an
+// odd l's d is the first dword's high half, its quants the next 8 dwords), and its 32 fp16 activations (64 contiguous
+// bytes). Per block t = its 8 groups' dot4s in order, acc = fma(d, t, acc) pass by pass, then the wave sum. All 32
+// lanes active (the shuffles). Returns the row's sum (every lane).
+__device__ __forceinline__ float own_row_q8_0_w(const uint8_t * __restrict__ Wrow, int nb, const void * __restrict__ x,
+                                                int lane) {
+    const bool ev = !(lane & 1);
+    float acc = 0.0f;
+    for (int c = 0; c < nb; c += 32) {
+        const int b = c + lane;
+        const uint32_t * p = (const uint32_t *)(Wrow + (((size_t)b * 34) & ~(size_t)3));
+        const uint4 * xa = (const uint4 *)((const uint16_t *)x + (size_t)b * 32);
+        uint32_t w[9];
+        uint4 a[4];
+#pragma unroll
+        for (int i = 0; i < 9; i++) w[i] = p[i];
+#pragma unroll
+        for (int i = 0; i < 4; i++) a[i] = xa[i];
+        float t = 0.0f;
+#pragma unroll
+        for (int k = 0; k < 8; k++) {
+            const Act16 g = (k & 1) ? Act16{a[k / 2].z, a[k / 2].w} : Act16{a[k / 2].x, a[k / 2].y};
+            t += dot4s(ev ? __builtin_amdgcn_alignbit(w[k + 1], w[k], 16) : w[k + 1], g);
+        }
+        acc = __builtin_fmaf(f16f((uint16_t)(ev ? w[0] & 0xffff : w[0] >> 16)), t, acc);
+    }
+    return wave_sum(acc);
+}
+
 // ---- Q4_K, one dependent round trip per pass (the decode-floor tile's structure, from its measured lesson: loads that
 // wait on each other in series cost ~0.5 us each). A lane unit is 16 bytes of one block's quants: unit u = lane + 32 i,
 // block u / 8, part p = u % 8 -> chunk j = p / 2, half h = p % 2, quant bytes 16 + 32 j + 16 h of the block; its 16 low
