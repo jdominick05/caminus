@@ -28,8 +28,10 @@ from benchmarks.gfx1151.attention.cases import SdpaCase, make_inputs, reference
 ap = argparse.ArgumentParser()
 ap.add_argument('--ctx', default='1024,4096,16384,32768,49152'); ap.add_argument('--p0', default='0,8192,30720')
 ap.add_argument('--graph-count', type=int, default=16); ap.add_argument('--repeats', type=int, default=5)
-ap.add_argument('--heads', type=int, default=24); ap.add_argument('--kv-heads', type=int, default=4)
+ap.add_argument('--heads', type=int, default=24, help='query heads (qwen35moe: 16, qwen3moe: 32)')
+ap.add_argument('--kv-heads', type=int, default=4, help='kv heads (qwen35moe: 2, qwen3moe: 4)')
 ap.add_argument('--hd', type=int, default=256); ap.add_argument('--n', type=int, default=2048)
+ap.add_argument('--t', default='1,4', help='decode query rows per case')
 ap.add_argument('--prefill-only', action='store_true')
 A = ap.parse_args()
 H, NKV, D, N = A.heads, A.kv_heads, A.hd, A.n
@@ -94,12 +96,12 @@ def room(case):
 
 rt = Runtime(); kernels = RockeKernels(rt, arch)
 try:
-    for T in (() if A.prefill_only else (1, 4)):
+    for T in (() if A.prefill_only else [int(v) for v in A.t.split(',') if v]):
         for P in [int(v) for v in A.ctx.split(',')]:
             c = SdpaCase(name=f'dec_T{T}_P{P}', group='caminus', dtype='fp16', batch=1, seqlen_q=T, seqlen_k=P, heads_q=H,
                          heads_kv=NKV, head_dim=D, mask='none' if T == 1 else 'causal_bottomright')
             show(f'decode T {T} ctx {P:6d}', run(c, True))
-    for P0 in [int(v) for v in A.p0.split(',')]:
+    for P0 in [int(v) for v in A.p0.split(',') if v]:
         c = SdpaCase(name=f'pre_P{P0}', group='caminus', dtype='fp16', batch=1, seqlen_q=N, seqlen_k=P0 + N, heads_q=H,
                      heads_kv=NKV, head_dim=D, mask='causal_bottomright')
         show(f'prefill chunk {N} at P0 {P0:6d}', run(c, P0 == 0), 4.0 * N * (P0 + N / 2) * H * D)

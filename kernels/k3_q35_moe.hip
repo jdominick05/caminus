@@ -29,10 +29,17 @@
 #define ATTN_VH 8
 #define ATTN_SS 128          // list positions per split: 32 -> 64 -> 128 measured at 49,901 depth, 9.252 -> 8.730 ->
                              // 8.362 ms (-10.6 %), and 5.644 -> 5.561 at short context; 128 is the split header's max
+#define ATTN_QL              // OP_ATTN_PART (kernels/k3_attn_split.h): the query heads in LDS, 4 V values per load round:
+#define ATTN_VU 4            // the same bits; per 128-cell task 86 -> 61 (VU) -> 50 us (QL) at 32K (XT, Q8); VU 8 spills
 #define OWN_ADD_MAX_S 9
+#define OWN_ADD_S 3           // the 9-slot add's slots per load round trip (kernels/k3_own_ops.h): 1 -> 3 measured (XT,
+                             // q35_gmodel --speed) 6.27 -> 6.20 ms per token, the same bits, +1 spilled SGPR; 5: 6.25, +6 VGPRs
 #define K3_Q35_MOE
 #define K3_Q35_YARN          // (OP_QK_NR's YaRN form: Seg.aux = the per-dim factor table, Seg.work = mscale's bits)
 #define K3_Q35_ATTN_SPLIT   // decode attention as the split pair (kernels/k3_attn_split.h), as the dense line's modules
+#define K3_Q35_CONV_L2       // (k3_q35_ops.h: the GDN conv with the q | k heads' L2 norm in one segment)
+#define K3_Q35_MV16_ROW     // OP_OWN_MV16's Q8_0 at K = 1024 n as a wave per row (kernels/own_quant.h own_row_q8_0_w)
+#define OWN_ROW_W_NT        // the Q8_0 row tile's weight loads nontemporal (own_quant.h): hit the prefetched lines, allocate none
 // The two pins the other modules found for this budget (measured on this object, compile only):
 //   K3_Q3M_ADD_RMS_PIN    OP_OWN_ADD_RMS16 derives its row length and slot count itself instead of leaving values made
 //                         from them live across the segment loop (k3_q3m_lean_kvq8: 54 -> 31 spilled scalars)
@@ -41,5 +48,12 @@
 // VGPR spills either way.
 #define K3_Q3M_ADD_RMS_PIN
 #define K3_Q35_GDN_LOCAL_BASE
+// The routed experts' tile (OP_OWN_MV, Q2_0) at 4 rows per wave: twice the bytes in flight per pass (the experts' down,
+// K 512, one pass per row: latency-bound at 2 rows); a row's sum does not depend on RW (the logits bitwise at 2 and 4).
+// XT: down 17.9 -> 12.3 us, gate | up 17.0 -> 13.8; 8 rows spill 55 VGPRs (8.0 ms per token). No Q4_K / Q6_K tiles:
+// the line's files hold none (k3.OWN_Q35MOE_1RT); without them k3_run 88 -> 78 VGPRs, 78 -> 66 spilled SGPRs.
+#define OWN_K3_RW 4
+#define OWN_K3_NO_Q4
+#define OWN_K3_NO_Q6
 #define K3_EXTRA_OPS_HEADER "k3_q35_ops.h"
 #include "k3.hip"

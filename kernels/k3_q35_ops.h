@@ -54,7 +54,8 @@ __device__ __forceinline__ float q35_silu(float x) { return x / (1.0f + expf(-x)
 // A row's sum does not depend on the grid or the task size. T = 1; the verify module (K3_Q3M_VER) also takes the T-token
 // form of OP_OWN_MV: Seg.pad1 bits 8 .. 11 = tokens NT, token tk reads x at Seg.a + tk * xs (fp16 values) and writes its
 // rows at Seg.y + tk * ys (xs / ys: the low / high half of Seg.gs); each token's rows are the one-token tile's statements
-// (the same bits), NT <= OWN_MT (host-checked).
+// (the same bits), NT <= OWN_MT (host-checked). K3_Q35_MV16_ROW (the qwen35moe module): Seg.pad1 bit 16 = Q8_0 at K = 1024 n
+// as own_row_q8_0_w, a wave per row (wave w: rows r0 + w, r0 + w + 8, ...; host-set: Engine.own_matvec16 row=True).
 __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
     const int wave = K3WAVE, lane = K3TID % 32;
     const int r0 = t * sg.rows_per_task, r1 = min(sg.N, r0 + sg.rows_per_task);
@@ -73,6 +74,16 @@ __device__ __forceinline__ void q35_op_mv16(const Seg & sg, int t) {
         else own_rows_q8_0_mt(W, row, r1, sg.K, (const _Float16 *)x, xs, NT, y, ys, lane);
     }
 #else
+#ifdef K3_Q35_MV16_ROW
+    if ((sg.pad1 >> 16) & 1) {   // (Seg.pad1 bit 16, host-set for Q8_0 at K = 1024 n: own_row_q8_0_w, a wave per row, wave w rows
+        const size_t rb = (size_t)(sg.K / 32) * 34;  //  r0 + w, r0 + w + 8, ...; the host sizes these tasks for it)
+        for (int row = r0 + wave; row < r1; row += 8) {
+            const float s = own_row_q8_0_w(W + (size_t)row * rb, sg.K / 32, x, lane);
+            if (lane == 0) y[row] = s;
+        }
+        return;
+    }
+#endif
     for (int row = r0 + wave * OWN_R; row < r1; row += 8 * OWN_R) {
         if (sg.work == OWN_Q5_K) own_rows_q5_k<Act16>(W, row, r1, sg.K, x, nullptr, nullptr, y, lane);
         else own_rows_q8_0_1rt<2>(W, row, r1, sg.K, x, y, lane);   // (own_rows_q8_0's bits, 2 block steps' loads per pass)
@@ -153,11 +164,47 @@ __device__ __forceinline__ void q35_op_add_rms16(const Seg & sg) {
 //   [in[1..3]]. Seg.a = x [C] (the qkv matvec's output), Seg.W = fp32 w [C, 4], Seg.gs = fp32 state [C, 3] (updated in
 //   place), Seg.aux = the previous pass's inputs [T, C], Seg.asum = int32 pass params ([1] = mprev: the previous pass's
 //   accepted tokens, committed first), Seg.y = out [C]; N = C; a task = rows_per_task channels.
+// K3_Q35_CONV_L2 (the qwen35moe module), Seg.K = the head dim (0: the plain op): the conv with OP_GDN_L2 fused for the
+//   q | k channels [0, Seg.pad1): each normed in place (out[c] = (scale x) / sqrt(K), the separate op's statements and
+//   sum order: a head's 128 channels are 4 waves of the task, its sum 0 + their 4 wave sums, then the op's zeros), the
+//   v channels as before. Host-checked: T = 1, 256 channels per task (one per thread), K 128, Seg.pad1 a multiple of 256,
+//   Seg.rs = eps / K. One segment and one hop less per Gated DeltaNet block.
 __device__ __forceinline__ void q35_op_gdn_conv(const Seg & sg, int t) {
     const int c0 = t * sg.rows_per_task, c1 = min(sg.N, c0 + sg.rows_per_task);
     const float * x = (const float *)sg.a, * w = (const float *)sg.W;
     float * st = (float *)sg.gs, * xp = (float *)sg.aux;
     const int C = sg.N, T = seg_T(sg), mprev = ((const int *)sg.asum)[1];
+#ifdef K3_Q35_CONV_L2
+    if (sg.K) {
+        __shared__ float part[8];
+        const int tid = K3TID, lane = tid % 32, wave = tid / 32, c = c0 + tid;
+        GF * stg = (GF *)st + (size_t)c * 3;
+        float s0 = stg[0], s1 = stg[1], s2 = stg[2];
+        const float4 w4 = *(const __attribute__((address_space(1))) float4 *)(w + (size_t)c * 4);
+        const float x0 = ((GF *)x)[c], xp0 = ((GF *)xp)[c];
+        __builtin_amdgcn_sched_barrier(0);
+        for (int j = 0; j < mprev; j++) { s0 = s1; s1 = s2; s2 = j == 0 ? xp0 : xp[(size_t)j * C + c]; }   // commit the accepted tokens
+        GW * stw = (GW *)st + (size_t)c * 3;
+        stw[0] = s0; stw[1] = s1; stw[2] = s2;
+        const float wv[4] = {w4.x, w4.y, w4.z, w4.w};
+        const float in[4] = {s0, s1, s2, x0};
+        float sumf = 0.0f;
+        for (int j = 0; j < 4; j++) sumf += in[j] * wv[j];
+        const float v = q35_silu(sumf);
+        ((GW *)xp)[c] = x0;                                          // this pass's input, for the next pass's commit
+        if (c0 < sg.pad1) {                                          // (workgroup-uniform: q | k heads)
+            float ss = v * v; asm volatile("" : "+v"(ss));   // (rounded, as the separate op's loop: not fused into the sum's fma)
+            ss = wave_sum(ss); if (lane == 0) part[wave] = ss; __syncthreads();
+            const int h0 = wave & ~3;
+            float tot = 0.0f; for (int q = 0; q < 4; q++) tot += part[h0 + q];
+            for (int q = 0; q < 4; q++) tot += 0.0f;                 // (the separate op's other four waves: zeros)
+            const float scale = rsqrtf(tot / sg.K + sg.rs), s2n = 1.0f / sqrtf((float)sg.K);
+            ((GW *)sg.y)[c] = (scale * v) * s2n;
+            __syncthreads();
+        } else ((GW *)sg.y)[c] = v;
+        return;
+    }
+#endif
     for (int c = c0 + (int)K3TID; c < c1; c += blockDim.x) {
         GF * stg = (GF *)st + (size_t)c * 3;
         float s0 = stg[0], s1 = stg[1], s2 = stg[2];
@@ -478,6 +525,34 @@ __device__ __forceinline__ void op_router_shexp(const Seg & sg, int tt) {
 }
 #endif
 
+#ifdef K3_Q35_MOE
+// OP_PREFETCH (57, the qwen35moe module): brings weight ranges into the Infinity Cache (the memory-side cache: 80 MB
+//   on the XT, 96 on the XTX) ahead of their matvecs, by plain loads of one dword per 128-byte line (a plain load allocates there; a nontemporal
+//   one, slc dlc, does not: measured, a 27 MB range read after a 4-workgroup plain touch at 1,283 GB/s against 579 cold).
+//   It writes nothing (the XOR of the loads goes to Seg.y only on an impossible value, which keeps the loads). Seg.W = K
+//   range records (int64 base address, int64 lines; bases 128-byte aligned), Seg.K = their count, Seg.N = the lines of
+//   all of them; task t = the lines [t L, (t + 1) L) of their concatenation, L = ceil(N / ntask); Seg.rows_per_task = the
+//   threads that load (0: all; fewer: fewer misses in flight). A few tasks on a whole layer's weights: that many
+//   workgroups stream them while the latency-bound ops run.
+enum { OP_PREFETCH = 57 };
+__device__ __forceinline__ void q35_op_prefetch(const Seg & sg, int t) {
+    const long long * rec = (const long long *)sg.W;
+    const int per = (sg.N + sg.ntask - 1) / sg.ntask, lo = t * per, hi = min(sg.N, lo + per);
+    uint32_t acc = 0;
+    int r0 = 0;
+    const int nth = sg.rows_per_task > 0 ? sg.rows_per_task : (int)blockDim.x;
+    if ((int)K3TID >= nth) return;
+    for (int r = 0; r < sg.K; r++) {
+        const int n = (int)rec[2 * r + 1], a = max(lo, r0), b = min(hi, r0 + n);
+        const uint32_t * p = (const uint32_t *)rec[2 * r] - (size_t)r0 * 32;
+#pragma unroll 8
+        for (int i = a + (int)K3TID; i < b; i += nth) acc ^= p[(size_t)i * 32];
+        r0 += n;
+    }
+    if (acc == 0x9e3779b9u) ((uint32_t *)sg.y)[0] = acc;
+}
+#endif
+
 #ifndef K3_Q35_NO_DISPATCH   // (kernels/k3_q35t_ops.h: these ops under its own dispatch)
 __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, Sync * sy, int limit_us, int seg,
                                             uint64_t * tr = nullptr) {
@@ -500,6 +575,7 @@ __device__ __forceinline__ bool k3_extra_op(const Seg & sg, int t, bool fresh, S
     // any-length form below has no slots or weights. OP_ROUTER is the 30B's softmax top-k, renormalised.)
     if (sg.op == OP_OWN_ADD_RMS16) { own_op_add_rms16(sg OWN_TK_ARG); return true; }
     if (sg.op == OP_ROUTER) { op_router_shexp(sg, t); return true; }
+    if (sg.op == OP_PREFETCH) { q35_op_prefetch(sg, t); return true; }
 #else
     if (sg.op == OP_OWN_ADD_RMS16) { q35_op_add_rms16(sg OWN_TK_ARG); return true; }
 #endif
