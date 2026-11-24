@@ -119,8 +119,9 @@ class Rec:
 
 class FakeOps(q3m_ops.Ops):
     """q3m_ops.Ops with its code objects recorders (its launch wrappers' host checks run)"""
-    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False):
+    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False, wide=None):
         self.dev, self.module, self.q8, self.yarn = torch.device(dev), module, bool(q8), bool(yarn)
+        self.wide = self.gu = bool(wide)   # (the two-card prefill passes False: the narrow tiles)
         card = int(str(dev).split(':')[1])
         self.mod = Rec(card, module); self.kvmod = Rec(card, q3m_ops.KVQ8_MODULE) if self.q8 else None
         self.ropemod = Rec(card, q3m_ops.YARN_MODULE[self.q8]) if self.yarn else (self.kvmod if self.q8 else self.mod)

@@ -165,7 +165,9 @@ class Q3MPrefillTP(PrefillDriver):
             dev = self.devs[c]
             f32, f16, i32 = layout_tp(self.sh[c], T)
             with torch.cuda.device(dev):
-                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8, yarn=self.yarn)); self.S.append(SlotSum(dev))
+                # (wide False: the narrow tiles; the wide ones and the fused gate | up keep each row's bits but have not run
+                # on two cards)
+                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8, yarn=self.yarn, wide=False)); self.S.append(SlotSum(dev))
                 b = {}
                 for n, k in f32.items(): b[n] = torch.zeros(k, dtype=torch.float32, device=dev)
                 for n, k in f16.items(): b[n] = torch.zeros(k, dtype=torch.float16, device=dev)
