@@ -1,6 +1,6 @@
 """The two-card exchange alone (the plan's first P6 gate): what OP_XCHG costs per token on this link before any model runs.
-A tape of N chained exchanges of an fp32 [D] partial on each card, on the dense qwen35 two-card module (k3_q35_swift_tp:
-the same OP_XCHG as every TP engine, kernels/k3_xchg.h), launched like a decode pass (a fresh epoch per pass); pass time
+A tape of N chained exchanges of an fp32 [D] partial on each card, on the dense qwen35 two-card module (dec_q35_swift_tp:
+the same OP_XCHG as every TP engine, kernels/ops_xchg.h), launched like a decode pass (a fresh epoch per pass); pass time
 per card from events, median over --passes after --warm. Also the same tape with local-only exchanges (no peer: the
 op's own copy cost and the tape walk) and an empty one-segment tape (launch + wait). Checks that every exchanged sum is
 card 0's partial plus card 1's, the same bits on both cards.
@@ -76,7 +76,7 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=128); ap.add_argument('--D', type=int, default=5120)
     ap.add_argument('--passes', type=int, default=200); ap.add_argument('--warm', type=int, default=20)
-    ap.add_argument('--module', default='k3_q35_swift_tp')
+    ap.add_argument('--module', default='dec_q35_swift_tp')
     A = ap.parse_args()
     assert torch.cuda.device_count() >= 2, 'two cards (HIP_VISIBLE_DEVICES=0,1)'
     devs = (0, 1)

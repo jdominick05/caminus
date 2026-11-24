@@ -1,13 +1,13 @@
-"""The split attention pair (OP_ATTN_PART + OP_ATTN_COMB, kernels/k3_attn_split.h) alone at a given context length: a tape
+"""The split attention pair (OP_ATTN_PART + OP_ATTN_COMB, kernels/ops_attn_split.h) alone at a given context length: a tape
 of just the pair on a zeroed q8_0 KV cache of P cells (the timing does not depend on the values), the shapes of the one-card
 Qwen3.6 engine (16 query heads over 2 kv heads, head dim 256) or --nkv 1 (Qwen3-Next's per-card share). Prints the median
 launch time over REPS runs (host events around E.run: one persistent launch, so it includes the launch) and, with the trace
-build (--trace: k3_gguf_q35h_trace), each segment's span (first claim to last publish, the 100 MHz steady counter) and
+build (--trace: dec_q35m_hh_trace), each segment's span (first claim to last publish, the 100 MHz steady counter) and
 its task count. Run it on the XT alone first when the kernel changed.
   tools/guard.sh LOG SECS python -I benchmarks/attn_bench.py [--ctx 2048,8192,32768] [--nkv 2] [--reps 50] [--trace] [--module M]
       [--ss 64|128: M is a scratch build with that ATTN_SS, registered for the run]
 --new: the qwen35moe decode attention kernel (kernels/dec_q35m_attn.hip, caminus.engine.dec_q35m_attn) against the pair on
-the qwen35moe module (default k3_q35_moe, or k3_q35_moe_kvq8 with --kv q8) at the engine's grid (k3.card_per_wgp), on
+the qwen35moe module (default dec_q35m, or dec_q35m_kvq8 with --kv q8) at the engine's grid (k3.card_per_wgp), on
 random cache rows (Q8: random codes, scale 0.01). Both arms timed the same way, interleaved per round: a queued batch
 (a filler matmul holds the stream while the host queues the start event, --batch launches back to back and the stop
 event), so a time is the GPU's per launch, launch gaps included and host overhead not; median over --reps rounds.
@@ -29,10 +29,10 @@ KV = opt('--kv', 'q8'); Q8 = KV == 'q8'
 CTX = [int(v) for v in opt('--ctx', '4096,32768,131072' if NEW else '2048,8192,32768').split(',')]; NKV = opt('--nkv', 2, int)
 REPS = opt('--reps', 15 if NEW else 50, int); BATCH = opt('--batch', 8, int); NS = opt('--ns', None, int)
 TRACE = '--trace' in a
-MOD = opt('--module', ('k3_q35_moe_kvq8' if Q8 else 'k3_q35_moe') if NEW else ('k3_gguf_q35h_trace' if TRACE else 'k3_gguf_q35h'))
+MOD = opt('--module', ('dec_q35m_kvq8' if Q8 else 'dec_q35m') if NEW else ('dec_q35m_hh_trace' if TRACE else 'dec_q35m_hh'))
 SS_SCRATCH = opt('--ss', None, int)
 if SS_SCRATCH is not None:   # a scratch build (build/<MOD>.hsaco compiled with -DATTN_SS=...): registered for this run only
-    k3.MODULE_CAPS[MOD] = k3.MODULE_CAPS['k3_gguf_q35h']; k3.ATTN_G_OF[MOD] = 8; k3.ATTN_SS_OF[MOD] = SS_SCRATCH
+    k3.MODULE_CAPS[MOD] = k3.MODULE_CAPS['dec_q35m_hh']; k3.ATTN_G_OF[MOD] = 8; k3.ATTN_SS_OF[MOD] = SS_SCRATCH
     k3.ATTN_SPLIT_MODULES = k3.ATTN_SPLIT_MODULES + (MOD,)
 D = 256; G = k3.ATTN_G_OF[MOD]; H = G * NKV
 torch.cuda.set_per_process_memory_fraction(0.9, 0)

@@ -2,7 +2,7 @@
 card on Caminus's own code from the GGUF file to the logits: our reader (caminus.ggufio), our matvec tiles on fp16
 activations (the grouped one-round-trip Q2_0 expert tile, the general rows tile for the trunk's Q8_0), the BF16 embedding
 table decoded on the device, and the K3 engine's own Gated DeltaNet and gated-attention ops built without llama.cpp's
-headers (kernels/k3_q35_ops.h; module k3_q35_moe). One token per pass (T = 1). The correctness baseline is the ggml
+headers (kernels/ops_q35.h; module dec_q35m). One token per pass (T = 1). The correctness baseline is the ggml
 engine (caminus.engine.qwen35_one) on the same file: one token's argmax and top-10 agree, twelve greedy tokens are
 identical.
 
@@ -44,11 +44,11 @@ from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1
 from .q3moe_one import card_per_wgp
 from .q35_dense import RECURRENT, Q35Host, _wsum, _wsum_np, block_kinds, trunk_blocks   # (the dense line's host pass lifecycle, weight checks and block layout)
 
-MODULE = 'k3_q35_moe'
+MODULE = 'dec_q35m'
 
 
 def module_of(F):
-    """the decode module a qwen35moe file needs: always k3_q35_moe (kernels/k3_q35_moe.hip). The GSQ file's routed
+    """the decode module a qwen35moe file needs: always dec_q35m (kernels/dec_q35m.hip). The GSQ file's routed
     experts are Q2_0, its trunk matrices Q8_0, its router F32 and its alpha / beta BF16: one module reads all of them,
     so there is nothing to pick between."""
     return MODULE
@@ -99,11 +99,11 @@ def _shapes(F):
                 d_conv=int(hp('ssm.conv_kernel')), d_inner=int(hp('ssm.inner_size')))
 
 
-def attn_part_elems(T, heads, cells, module='k3_q35_moe'):
-    """floats of the split attention pair's records (kernels/k3_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
+def attn_part_elems(T, heads, cells, module='dec_q35m'):
+    """floats of the split attention pair's records (kernels/ops_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
     for T pass rows of `heads` query heads over lists of up to `cells` cache rows: one record of k3.ATTN_RS floats per
     (row, head, ATTN_SS-cell split); one buffer shared by a tape's attention blocks (they run one after another)"""
-    SS = k3.ATTN_SS_OF.get(module, k3.ATTN_SS)   # (this line is 128: kernels/k3_q35_moe.hip sets ATTN_SS)
+    SS = k3.ATTN_SS_OF.get(module, k3.ATTN_SS)   # (this line is 128: kernels/dec_q35m.hip sets ATTN_SS)
     return int(T) * int(heads) * ((int(cells) + SS - 1) // SS) * k3.ATTN_RS
 
 
@@ -122,7 +122,7 @@ def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
     CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
     gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
     part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1,
-                               module=k3.Q35MOE_KV_Q8_OF['k3_q35_moe'] if q8 else 'k3_q35_moe')
+                               module=k3.Q35MOE_KV_Q8_OF['dec_q35m'] if q8 else 'dec_q35m')
     return (w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
             + sliced_bytes(n_attn))
 
@@ -436,7 +436,7 @@ class Moe35Own(Q35Host):
                 return named(E.own_matvec_1rt(W['w'], W['fmt'], W['rows'], W['K'], x16, out, rows_per_task=self.rpt, dep=dep, **kw),
                              W['name'])
             assert up is None
-            # Q8_0 at K = 1024 n: the module's wave-per-row tile (kernels/own_quant.h own_row_q8_0_w), its tasks sized to about
+            # Q8_0 at K = 1024 n: the module's wave-per-row tile (kernels/quant.h own_row_q8_0_w), its tasks sized to about
             # one per workgroup in rows of 8 (a wave per row); the 4-rows tile (rpt16) for the rest (the shared expert's down, K 512)
             rpt, row = self.rpt16, W['fmt'] == 'Q8_0' and W['K'] % 1024 == 0
             if row: rpt = -(-(-(-W['rows'] // E.grid)) // 8) * 8

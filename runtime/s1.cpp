@@ -6,7 +6,7 @@ static unsigned g256(int64_t n) { return (unsigned)((n + 255) / 256); }
 
 void S1Core::init(const TensorFile & weights, rocblas_handle b, hipStream_t st) {
     W = &weights; blas = b; s = st;
-    core.load("core"); actq.load("actq"); attn.load("attn");
+    core.load("train_core"); actq.load("train_actq"); attn.load("train_attn");
     tri.load(root_dir() + "/build/triton");
     if (tri.launches.size() != 10) { fprintf(stderr, "S1Core: expected 10 Triton launches, got %zu\n", tri.launches.size()); exit(1); }
 }

@@ -8,10 +8,10 @@ and HIP calls (every tensor in host memory; nothing is launched).
     the same value-head order
   - cut(): the raw bytes it keeps decode (caminus.own_dequant) to exactly the full matrix's rows / columns, for every format
     of both tiny models, and a cut inside a block is refused
-  - the tapes: the two-card module of the file's formats (k3_q35_swift_tp / k3_q35_tcap_tp), every op one that module
+  - the tapes: the two-card module of the file's formats (dec_q35_swift_tp / dec_q35_tcap_tp), every op one that module
     dispatches (k3.Q35S_OPS + OP_XCHG), 2 exchanges per block on each card with indices 0 .. 2 nl - 1 once each and the
     card's own number, every dependency pointing back; each card's matrices have its share's shapes
-  - the host op list against the device: kernels/k3_q35_ops.h and kernels/k3_q35t_ops.h dispatch OP_XCHG only under K3_TP;
+  - the host op list against the device: kernels/ops_q35.h and kernels/ops_q35_tcap.h dispatch OP_XCHG only under K3_TP;
     the one-card modules refuse OP_XCHG at build
   - projection: per card, the KV row is its kv heads' share; the two cards' weights add up to more than the file's (the
     replicated vectors and embedding) and less than twice it
@@ -131,7 +131,7 @@ except ValueError:
 check(refused, 'a column cut inside a block is refused')
 
 # ---- the two tapes ----------------------------------------------------------------------------------------------------
-for path, info, want_mod in ((P_S, iS, 'k3_q35_swift_tp'), (P_T, iT, 'k3_q35_tcap_tp')):
+for path, info, want_mod in ((P_S, iS, 'dec_q35_swift_tp'), (P_T, iT, 'dec_q35_tcap_tp')):
     m = Dense35TP(path, devices=(0, 1), max_ctx=64, vram_check=False, ffn_share=0.5)
     nl = info['blocks']
     check(m.module == want_mod, f'{os.path.basename(path)}: the two-card module of its formats ({m.module})')
@@ -171,14 +171,14 @@ for path, info, want_mod in ((P_S, iS, 'k3_q35_swift_tp'), (P_T, iT, 'k3_q35_tca
 
 # ---- the device's dispatch and the one-card modules ---------------------------------------------------------------------
 good = True
-for h in ('k3_q35_ops.h', 'k3_q35t_ops.h'):
+for h in ('ops_q35.h', 'ops_q35_tcap.h'):
     src = open(os.path.join(HERE, '..', '..', 'kernels', h)).read()
     disp = src[src.index('__device__ __forceinline__ bool k3_extra_op('):]
     disp = disp[:disp.index('\n}\n')]
     good &= bool(re.search(r'#ifdef K3_TP\s*(//[^\n]*)?\n\s*if \(sg\.op == OP_XCHG\)', disp)) and disp.count('OP_XCHG') == 1
-check(good, 'kernels/k3_q35_ops.h and k3_q35t_ops.h dispatch OP_XCHG only under K3_TP')
+check(good, 'kernels/ops_q35.h and ops_q35_tcap.h dispatch OP_XCHG only under K3_TP')
 B = lambda n: torch.zeros(n)
-e1 = k3.Engine(module='k3_q35_swift'); e1.xchg(B(256), B(256), 1 << 40, 2 << 40, torch.zeros(1, dtype=torch.int32), 0, 0)
+e1 = k3.Engine(module='dec_q35_swift'); e1.xchg(B(256), B(256), 1 << 40, 2 << 40, torch.zeros(1, dtype=torch.int32), 0, 0)
 try:
     e1.build(); refused = False
 except ValueError:

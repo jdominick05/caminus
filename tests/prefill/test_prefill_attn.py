@@ -1,5 +1,5 @@
 """Gates of the batched prefill's attention core (docs/specs/spec-prefill-cache.md M5 S6; caminus.prefill.attn,
-kernels/prefill_attn.hip).
+kernels/pf_gg_attn.hip).
 
   tools/guard.sh LOG 1800 python -I tests/prefill/test_prefill_attn.py CODER STAGE... [--kv q8|f16] [--small] [--json OUT]
 
@@ -14,7 +14,7 @@ Stages:
          256), the Coder's real q / k norm weights and RoPE parameters (layer 3), random q / gate / k / v rows: the chain
          k norm + RoPE -> Hadamard 256, v Hadamard 64, the q8_0 KV append, q norm + RoPE -> Hadamard 256, dense attention
          (the split pair), the output Hadamard 64 and the gate, against K3's own decode ops (caminus.engine.k3.Engine on the
-         Coder's trunk module k3_gguf_gsq, the same tape as FlashNextTP's attention layer, one token per pass, positions 0
+         Coder's trunk module dec_q4x_gsq, the same tape as FlashNextTP's attention layer, one token per pass, positions 0
          .. T - 1) bitwise: the rotated k / q rows, the KV cache bytes, the attention output, the gated output; OP_HC_AVG
          (the DFlash features) bitwise per token. T = 1 / 4 / 512 / 777 / 2048 (positions up to 2047; plus a chunk ending at
          2050, the last dense position). G2b: the same rows as chunks 1 + 4 + 507, 777 + 1271, 512 x 4, 1000 + 1048 and
@@ -158,7 +158,7 @@ def stage_cpu(coder):
 
 # ---- stage: g1 (one card) -------------------------------------------------------------------------------------------------
 class K3Chain:
-    """FlashNextTP's attention-layer core on one card's shapes as a K3 tape (module k3_gguf_gsq, T = 1), one token per pass"""
+    """FlashNextTP's attention-layer core on one card's shapes as a K3 tape (module dec_q4x_gsq, T = 1), one token per pass"""
     def __init__(self, torch, dev, P, rows, q8=True):
         from caminus.engine import k3
         self.torch, self.k3, self.P, self.q8 = torch, k3, P, q8
@@ -169,7 +169,7 @@ class K3Chain:
         self.cache_row_elems = 2 * (HD // 32) * 34 if q8 else 2 * HD
         self.cache = z(rows * self.cache_row_elems, dt=torch.uint8 if q8 else torch.float16)
         self.qn, self.kn = torch.tensor(P['qn'], device=dev), torch.tensor(P['kn'], device=dev)
-        e = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1)
+        e = k3.Engine(module='dec_q4x_gsq', grid=k3.resident_grid('dec_q4x_gsq'), T=1)
         kd = e.qk_nr(self.kr, HD, 1, HD, self.kn, self.pos, self.ko, P['nrot'], P['theta'], EPS)
         if q8:
             kd = e.hadamard(self.ko, HD, dep=kd); vd = e.hadamard(self.vr, 64)
@@ -183,7 +183,7 @@ class K3Chain:
         e.gate_mul(self.att, self.qf, 2 * HD, HD, self.gat, HD, dep=a_)
         self.e = e.build()
         self.hres, self.havg = z(4, 2560), z(2560)
-        h = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1); h.hc_avg(self.hres, self.havg); self.h = h.build()
+        h = k3.Engine(module='dec_q4x_gsq', grid=k3.resident_grid('dec_q4x_gsq'), T=1); h.hc_avg(self.hres, self.havg); self.h = h.build()
 
     def run(self, qf, k, v, p0=0):
         """positions p0 .. p0 + T - 1 (the cache's rows below p0 as they are); returns ko, qo, att, gat [T, ...] (device)"""

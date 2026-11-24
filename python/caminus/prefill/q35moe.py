@@ -1,8 +1,8 @@
 """The batched prefill of the qwen35moe line (Qwen3.6-35B-A3B; caminus.engine.q35_moe.Moe35Own) on Caminus's own code: the
 layer loop of a chunk over the decode engine's own weights and states (Moe35Own.L: references, nothing copied). One card,
 F16 KV, native rope; no ggml-cuda code. The trunk is the dense qwen35 line's own prefill (caminus.prefill.q35own: its WMMA
-GEMMs, GDN glue and WMMA attention tiles, kernels/q35_prefill.hip); the feed-forward is a mixture of experts
-(kernels/q35m_prefill.hip, which includes that object).
+GEMMs, GDN glue and WMMA attention tiles, kernels/pf_q35_swift.hip); the feed-forward is a mixture of experts
+(kernels/pf_q35m.hip, which includes that object).
 
 Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's ops in its order:
   h, h16 = add_rms16(x (+ the previous layer's 9 weighted slots), attn_norm)         q3p_add_rms16 (OP_OWN_ADD_RMS16)
@@ -17,7 +17,7 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
             gated shared weight as slot 8 (q35mp_router_sh: OP_ROUTER on the qwen35moe module); the shared expert (Q8_0
             gate / up GEMMs, fp16 swiglu, down GEMM into slot 8); the (token, slot) pairs grouped by expert (q3p_group with its y9 index),
             the routed experts' Q2_0 gate | up with the fp16 swiglu in one launch, then down into slots 0 .. 7 (the wide
-            tiles of kernels/q35m_prefill_mm.hip: q35mp_mm_q2_0_gu, q35mp_mm_q2_0_w; each row bitwise q35mp_mm_q2_0's
+            tiles of kernels/pf_q35m_mm.hip: q35mp_mm_q2_0_gu, q35mp_mm_q2_0_w; each row bitwise q35mp_mm_q2_0's
             gate, up and q3p_swiglu, the narrow arm Ops(wide=False) the benchmarks and the G1 test compare them with)
             -> the 9 slots are summed, weighted, at the next layer's norm
 The last layer stops after its cache rows: its output feeds only the prompt's logits, which a prefill never returns (the
@@ -42,9 +42,9 @@ from .glue import Glue
 
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
-MODULE = 'q35m_prefill'
-KVQ8_MODULE = 'q35m_prefill_kvq8'   # the Q8 KV cache's append and attention (kernels/q35m_prefill_kvq8.hip)
-WIDE_MODULE = 'q35m_prefill_mm'   # the routed experts' wide Q2_0 tiles and fused gate | up (kernels/q35m_prefill_mm.hip)
+MODULE = 'pf_q35m'
+KVQ8_MODULE = 'pf_q35m_kvq8'   # the Q8 KV cache's append and attention (kernels/objects.tsv pf_q35m_kvq8)
+WIDE_MODULE = 'pf_q35m_mm'   # the routed experts' wide Q2_0 tiles and fused gate | up (kernels/pf_q35m_mm.hip)
 ROUTER_FLOOR = 6.103515625e-5   # (the router's clamp on the top-k sum: Moe35Own's router_shexp default)
 # T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Unmeasured: q35own's value until a speed
 # test sets it
@@ -52,17 +52,17 @@ CROSSOVER = q35own.CROSSOVER
 
 
 class Ops(q35own.Ops):
-    """kernels/q35m_prefill.hip's launchers: q35_prefill's (included as they are) + the MoE line's own"""
+    """kernels/pf_q35m.hip's launchers: pf_q35_swift's (included as they are) + the MoE line's own"""
 
-    # the tiled attention: q35mp_attn (kernels/q35m_prefill.hip: rocKE's gfx11 pipeline on q35p_attn_wm's absolute-position
+    # the tiled attention: q35mp_attn (kernels/pf_q35m.hip: rocKE's gfx11 pipeline on q35p_attn_wm's absolute-position
     # tiles; attn_wm's contract), q35mp_attn_q8 from the Q8 object
     WM_KERNEL = ('q35mp_attn', 'q35mp_attn_q8')
 
     def __init__(self, dev, module=MODULE, q8=False, wide=None):
-        """q8: the KV cache is Q8_0 rows (kernels/own_kv_codec.h): kv_append_q8 and attn_wm's Q8 kernel run KVQ8_MODULE's
+        """q8: the KV cache is Q8_0 rows (kernels/kv_codec_ops.h): kv_append_q8 and attn_wm's Q8 kernel run KVQ8_MODULE's
         kernels, every other kernel stays on `module`. wide: the routed experts' Q2_0 GEMMs on WIDE_MODULE's wide tiles and
         their gate | up fused with the swiglu, and the dense Q8_0 GEMMs wide from q8_wide_min_wg (None: with module
-        q35m_prefill; False: q35mp_mm_q2_0, gate, up, swiglu apart and the dense line's rule, the narrow arm the G1 test and
+        pf_q35m; False: q35mp_mm_q2_0, gate, up, swiglu apart and the dense line's rule, the narrow arm the G1 test and
         the benchmarks compare bitwise). The attributes wide / gu switch them per
         launch once the object is loaded (q3m_ops.Ops's names: benchmarks/q35_prefill_gemm.py --set)"""
         super().__init__(dev, module)
@@ -102,7 +102,7 @@ class Ops(q35own.Ops):
         R, K = int(W['rows']), int(W['K'])
         if K % 256: raise ValueError(f'q35moe mm_q2_0: K {K} is not a multiple of 256')
         items, nitems, bound, xs, yd = work
-        if self.wide:   # (kernels/q35m_prefill_mm.hip q35mp_mm_q2_0_w: 256 rows a workgroup, each row bitwise q35mp_mm_q2_0's)
+        if self.wide:   # (kernels/pf_q35m_mm.hip q35mp_mm_q2_0_w: 256 rows a workgroup, each row bitwise q35mp_mm_q2_0's)
             self.wmod.q35mp_mm_q2_0_w((int(bound), -(-R // q3m_ops.MMW_N)), (256,), W['w'], I(R), I(K), x16, I(ldx), xs, y, I(ldy),
                                       yd, items, nitems, I(0))
             return
@@ -111,7 +111,7 @@ class Ops(q35own.Ops):
 
     def mm_gu(self, Wg, Wu, x16, ldx, y16, ldy, work):
         """y16[yd] = fp16(silu(Wg x16[xs]) (Wu x16[xs])) for the grouped pairs (work from group9()): the gate GEMM, the up GEMM
-        and q3p_swiglu in one launch (kernels/q35m_prefill_mm.hip q35mp_mm_q2_0_gu: the same bits). Wg, Wu: Moe35Own's Q2_0
+        and q3p_swiglu in one launch (kernels/pf_q35m_mm.hip q35mp_mm_q2_0_gu: the same bits). Wg, Wu: Moe35Own's Q2_0
         expert dicts of one shape"""
         if not self.gu: raise ValueError(f'q35moe mm_gu: not on {self.module} (gu off)')
         (fg, R, K), (fu, Ru, Ku) = ((W['fmt'], int(W['rows']), int(W['K'])) for W in (Wg, Wu))
@@ -204,9 +204,9 @@ class Q35MoEPrefill(PrefillDriver):
         f32, f16, i32 = layout(m, T)
         with torch.cuda.device(dev):
             self.O = Ops(dev, q8=self.q8)
-            self.Gl = Glue(dev, module='prefill_glue_q35')
-            self.Gd = Gdn(dev, module='prefill_gdn_q35')
-            self.A = Attn(dev, name='prefill_attn_q35_yarn' if self.yarn else 'prefill_attn_q35')
+            self.Gl = Glue(dev, module='pf_gg_glue_q35m')
+            self.Gd = Gdn(dev, module='pf_gg_gdn_q35')
+            self.A = Attn(dev, name='pf_gg_attn_q35m_yarn' if self.yarn else 'pf_gg_attn_q35m')
             # (the YaRN mode: the decode tape's table and magnitude scale, the same fp32 values: Moe35Own.yarn)
             self.ytab = None if not self.yarn else (torch.tensor(m.yarn[0], dtype=torch.float32, device=dev), float(m.yarn[1]))
             for n, c in f32.items(): setattr(self, n, torch.zeros(c, dtype=torch.float32, device=dev))

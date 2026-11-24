@@ -1,4 +1,4 @@
-"""Where a Flash-Next (REAP-308) token's time goes in the K3 engine: runs FlashNextK3 on build/k3_gguf_trace.hsaco (the
+"""Where a Flash-Next (REAP-308) token's time goes in the K3 engine: runs FlashNextK3 on build/dec_q4x_gg_trace.hsaco (the
 engine with K3_TRACE timestamps), warms the caches over the first positions of a gg_golden token file, then traces
 several steps. Per segment: its completion C[s] = the latest last-publish of any workgroup that ran one of its tasks.
 The critical path is walked back from the last segment through whichever dependency (dep / dep2) completed later; a
@@ -18,7 +18,7 @@ WARM = int(sys.argv[3]) if len(sys.argv) > 3 else 32
 RUNS = int(sys.argv[4]) if len(sys.argv) > 4 else 5
 tokens = [int(v) for v in open(f'{GD}/tokens.txt').read().split()]
 for d in (0, 1): torch.cuda.set_per_process_memory_fraction(0.92 if d == 1 else 0.90, d)
-m = FlashNextK3(PATH, module='k3_gguf_trace')
+m = FlashNextK3(PATH, module='dec_q4x_gg_trace')
 names = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_')}
 for i in range(WARM): m.step(tokens, i)
 per = [collections.defaultdict(list) for _ in m.engines]; tok = [[] for _ in m.engines]; seg_cost = [[] for _ in m.engines]; npath = [[] for _ in m.engines]

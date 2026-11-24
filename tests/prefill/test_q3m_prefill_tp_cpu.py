@@ -102,7 +102,7 @@ class Rec:
 
 
 class FakeOps(q3m_ops.Ops):
-    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False, wide=None):
+    def __init__(self, dev, module='pf_q3m', q8=False, yarn=False, wide=None):
         self.dev, self.module, self.q8, self.yarn = dev, module, bool(q8), bool(yarn)
         self.wide = self.gu = bool(wide)   # (the two-card prefill passes False: the narrow tiles, below)
         if EVENTS is not None and wide is not False: EVENTS.append(('wide', module))
@@ -174,7 +174,7 @@ check(ev[0] == ('check',) and [e for e in ev if e[0] == 'check'] == [('check',)]
       and all(abs(a - b) < 1e-9 for a, b in zip(calls['need'], nn)) and any(e[0] == 'alloc' for e in ev) and ev[-1][0] == 'exchange',
       'capacity.check runs once on both cards with need_tp_mib before the prefill\'s first allocation; the exchange is built last (check=False)')
 check(not any(e[0] == 'wide' for e in ev) and not any(O.wide or O.gu for O in pf.O),
-      'each card\'s Ops on the narrow tiles (wide=False: no q3m_prefill_mm, gate and up apart; the wide tiles have not run on two cards)')
+      'each card\'s Ops on the narrow tiles (wide=False: no pf_q3m_mm, gate and up apart; the wide tiles have not run on two cards)')
 
 # ---- one prefill: the launches ---------------------------------------------------------------------------------------------
 names = {}
@@ -324,9 +324,9 @@ check(type(bm) is Q3MoETP and type(bpf) is Q3MPrefillTP and bdf is None and bdr 
 del bm, bpf
 
 # ---- the kernel source ---------------------------------------------------------------------------------------------------------
-src = open(os.path.join(HERE, '..', '..', 'kernels', 'q3m_prefill_tp.hip')).read()
+src = open(os.path.join(HERE, '..', '..', 'kernels', 'pf_q3m_tp.hip')).read()
 check('__builtin_fmaf(wr[s], dr[(size_t)s * N + i], acc)' in src and 'float acc = 0.0f;' in src and '#include "' not in src,
-      'kernels/q3m_prefill_tp.hip: q3p_slot_sum is OP_OWN_SLOT_SUM\'s fma chain from 0 in slot order; no local includes')
+      'kernels/pf_q3m_tp.hip: q3p_slot_sum is OP_OWN_SLOT_SUM\'s fma chain from 0 in slot order; no local includes')
 
 # ---- the imports ---------------------------------------------------------------------------------------------------------------
 BLOCK = ("import sys\nclass B:\n    def find_spec(self, name, path=None, target=None):\n"

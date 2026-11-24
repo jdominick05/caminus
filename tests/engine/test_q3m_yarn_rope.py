@@ -1,6 +1,6 @@
 """The long-context mode's RoPE (YaRN x4, caminus.rope.yarn_table) in the kernels, alone, at Qwen3-30B-A3B's shapes (32 query /
-4 kv heads, head dim 128) on known inputs; no model file. The decode op (OP_OWN_ATTS on the YaRN build of k3_q3m_lean,
-kernels/k3_own_atts.h under K3_Q3M_YARN) and the prefill row kernel (q3p_qk_rope from q3m_prefill_yarn, Q3P_YARN) read the
+4 kv heads, head dim 128) on known inputs; no model file. The decode op (OP_OWN_ATTS on the YaRN build of dec_q3m,
+kernels/ops_own_atts.h under K3_Q3M_YARN) and the prefill row kernel (q3p_qk_rope from pf_q3m_yarn, Q3P_YARN) read the
 same par block (q_norm | k_norm | theta_scale, eps | freq [64] | mscale):
   table     the block's freq / mscale are caminus.rope.yarn_table (x4 from 32,768, base 1e6): correction dims [23, 40],
             pairs 0 .. 23 at their trained frequency, 40 .. 63 at a quarter, mscale fp32(1 + 0.1 ln 4) = 1.1386294
@@ -13,9 +13,9 @@ same par block (q_norm | k_norm | theta_scale, eps | freq [64] | mscale):
             known fp16 values, the own row the op's): <= 2 fp16 ulps + 1e-5 x max |V|, at 0, 1, 1,000 and 40,960
   native    the same inputs through the native module and q3p_qk_rope at position 1,000 give another row (the table is used)
   grids     the rows and outputs the same bits at 3 / 6 / 7 workgroups per WGP
---kv q8: the Q8_0 builds (k3_q3m_lean_kvq8_yarn, q3p_qk_rope_q8 from q3m_prefill_kvq8_yarn): the decode row and the prefill
+--kv q8: the Q8_0 builds (dec_q3m_kvq8_yarn, q3p_qk_rope_q8 from pf_q3m_kvq8_yarn): the decode row and the prefill
 row are both byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the F16 YaRN kernel's halves.
---tp: the two-card module's YaRN build (k3_q3m_lean_tp_yarn, or k3_q3m_lean_tp_kvq8_yarn with --kv q8) at one card's shapes of
+--tp: the two-card module's YaRN build (dec_q3m_tp_yarn, or dec_q3m_tp_kvq8_yarn with --kv q8) at one card's shapes of
 the two-card engine (16 query / 2 kv heads, up to 128 splits), on one card alone.
   tools/guard.sh LOG 600 python -I tests/engine/test_q3m_yarn_rope.py [--kv q8] [--tp]
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>). Prints PASS / FAIL and RESULT."""
@@ -41,7 +41,7 @@ def check(c, msg):
 Q8 = A.kv == 'q8'
 NH, NKV, HD = (16, 2, 128) if A.tp else (32, 4, 128)
 M = NKV * HD
-base = 'k3_q3m_lean_tp' if A.tp else 'k3_q3m_lean'
+base = 'dec_q3m_tp' if A.tp else 'dec_q3m'
 NATIVE = k3.Q3M_KV_Q8_OF[base] if Q8 else base
 MOD = k3.Q3M_YARN_OF[NATIVE]
 LAY = ref_kv.Q8KVLayout(NKV, HD)
@@ -85,8 +85,8 @@ q16 = torch.zeros(NH * HD, dtype=torch.float16, device=dev)
 kverr = torch.zeros(1, dtype=torch.int32, device=dev)
 S = q3moe_one.splits_for(NKV, k3.atts_max_splits(MOD))
 scratch = torch.zeros(k3.Engine.atts_scratch_floats(NKV, S), device=dev)
-ops_f16 = q3m_ops.Ops(dev, 'q3m_prefill', yarn=True)               # (the F16 YaRN row kernel)
-ops = q3m_ops.Ops(dev, 'q3m_prefill', q8=Q8, yarn=True)             # (the form under test)
+ops_f16 = q3m_ops.Ops(dev, 'pf_q3m', yarn=True)               # (the F16 YaRN row kernel)
+ops = q3m_ops.Ops(dev, 'pf_q3m', q8=Q8, yarn=True)             # (the form under test)
 scale = 1.0 / np.sqrt(HD)
 H128 = np.array([[1.0]])
 for _ in range(7): H128 = np.block([[H128, H128], [H128, -H128]])

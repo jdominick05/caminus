@@ -10,7 +10,7 @@ This module builds the same inputs for a whole chunk of prompt positions [p0, p1
   3. reads: the distinct rows read with O_DIRECT in one batched native-AIO gather (BatchRows: the iocbs are filled and the
      completion events reaped with numpy, `depth` reads in flight, no per-row Python), split over io_threads contexts, on a
      worker thread, so chunk k + 1's hash and reads run while the caller works on chunk k (PrefillFeed.chunks);
-  4. upload + dequantize: the raw IQ4_NL rows (90 B each) and the inverse index go to the card, and kernels/prefill_feed.hip
+  4. upload + dequantize: the raw IQ4_NL rows (90 B each) and the inverse index go to the card, and kernels/pf_feed.hip
      ple_rows_iq4nl dequantizes them there; the token embedding is gathered and dequantized on the card from the raw IQ4_XS
      token_embd table (embd_rows_iq4xs; 337.7 MB on the card, read once with O_DIRECT), so only the token ids are uploaded.
 Every output is bitwise the per-token path's: tests/prefill/test_prefill_feed.py (ids vs PLE.rows, PLE vectors vs PLE.start /
@@ -325,7 +325,7 @@ class PrefillFeed:
         self.torch = torch
         self.dev = torch.device(device)
         with torch.cuda.device(self.dev):
-            self.mod = Module('prefill_feed')
+            self.mod = Module('pf_feed')
             self.table = flashnext.DirectReader(self.path).read(self.te_offset, self.te_bytes, device=self.dev)   # raw IQ4_XS
             self.err = torch.zeros(1, dtype=torch.int32, device=self.dev)
 
@@ -349,7 +349,7 @@ class PrefillFeed:
             d = self.devs2[c]; L = self.lay2[c]
             capacity.check([d.index], [sum(L.values()) / capacity.MIB], f'PrefillFeed two-card buffers (chunk {n}, card {c})')
             with torch.cuda.device(d):
-                self.mod2.append(Module('prefill_feed'))
+                self.mod2.append(Module('pf_feed'))
                 blk = torch.empty(sum(L.values()), dtype=torch.uint8, device=d); off = 0; B = {}
                 for k, b in L.items():
                     v = blk[off:off + b]; off += b

@@ -1,4 +1,4 @@
-"""The own Q2_0 tile (kernels/own_quant_q2_0.h through kernels/own_mv_q2_0.hip) on real Q2_0 expert tensors, one card:
+"""The own Q2_0 tile (kernels/quant_q2_0.h through kernels/bench_own_mv_q2_0.hip) on real Q2_0 expert tensors, one card:
   exact    every row of each case's matrix through own_mv_q2_0_k3 on two fp16 activations (heavy-tailed, and smooth):
            rel = max |out - ref| / sum |w| |x| <= 1e-6 per case, ref the float64 dot of caminus.own_dequant's rows (bitwise
            gguf-py's) with the fp16 values the tile reads: the strict exact-dot check (tests/engine/test_k3_gguf_gsq.py
@@ -13,7 +13,7 @@
            bit for bit the full launch's, the rows past them still NaN
 Cases: per Q2_0 expert role of the file its first and last layer at full K (Qwen3.6: gate / up K 2048, down K 512) and
 the down's block-column cuts (K 512: 256 | 256, 384 | 128, the two-card forms); with --coder GGUF also the Coder's Q2_0
-down (K 640) and its two-card cut 384 | 256. Every K takes the tile's lane form for it (own_quant_q2_0.h: half-wave rows
+down (K 640) and its two-card cut 384 | 256. Every K takes the tile's lane form for it (quant_q2_0.h: half-wave rows
 at K <= 512).
   HIP_VISIBLE_DEVICES=<one card> tools/guard.sh LOG 600 python -I tests/engine/test_own_q2_0.py GGUF [--coder CODER] --save OUT.pt
   python -I tests/engine/test_own_q2_0.py --check OUT.pt        (CPU: the exact check on the saved outputs; reads the GGUFs)
@@ -117,7 +117,7 @@ import torch
 from caminus.device import capacity
 from caminus.device.hip import Module
 dev = torch.device('cuda:0')
-OWN = Module('own_mv_q2_0')
+OWN = Module('bench_own_mv_q2_0')
 C = []
 for path in [A.gguf] + ([A.coder] if A.coder else []):
     F, cs = cases(path, path == A.coder)

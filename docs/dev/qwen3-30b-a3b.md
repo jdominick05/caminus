@@ -154,14 +154,14 @@ Through the server at the full 40,960-token context, a passphrase placed at 37 %
 |---|---|
 | Reading the GGUF file | `python/caminus/ggufio.py` |
 | Tokenizer (byte-level BPE from the file's metadata) | `python/caminus/bpe.py`; equal to the Hugging Face `tokenizers` library on 3.9M tokens of test text |
-| Weight decoding, Q4_K and Q6_K | `kernels/own_quant.h`, written from the block layouts; host copy `python/caminus/own_dequant.py` |
-| Decode: one GPU launch per token | `kernels/k3_q3m_lean.hip` (the persistent kernel `kernels/k3.hip` with 7 ops: `k3_own_ops.h`, `k3_own_atts.h`, `k3_q3m_ops.h`), driven by `python/caminus/engine/q3moe_one.py` |
-| Prompt reading | `kernels/q3m_prefill.hip` (quantized matrix products on RDNA3's WMMA instructions), driven by `python/caminus/prefill/q3m.py` |
+| Weight decoding, Q4_K and Q6_K | `kernels/quant.h`, written from the block layouts; host copy `python/caminus/own_dequant.py` |
+| Decode: one GPU launch per token | `kernels/dec_q3m.hip` (the persistent kernel `kernels/dec_core.hip` with 7 ops: `ops_own.h`, `ops_own_atts.h`, `ops_q3m.h`), driven by `python/caminus/engine/q3moe_one.py` |
+| Prompt reading | `kernels/pf_q3m.hip` (quantized matrix products on RDNA3's WMMA instructions), driven by `python/caminus/prefill/q3m.py` |
 | Prompt cache, sampler, chat template, tool-call parser, HTTP and SSE | `python/caminus/cache/`, `python/caminus/serve/` |
 
 The platform underneath is the compiler (LLVM in ROCm), the HIP runtime, and PyTorch, which Caminus uses to allocate
 device memory and launch its kernels; the sampler's candidates (the largest logits of each row) come from Caminus's own
-kernel (`kernels/own_topk.hip`, `python/caminus/device/topk.py`). `tools/gates/launch_trace.py` lists every kernel
+kernel (`kernels/samp_topk.hip`, `python/caminus/device/topk.py`). `tools/gates/launch_trace.py` lists every kernel
 served requests launch (from the HIP runtime's own dispatch log). Across a new prompt's prefill, greedy decode and
 sampled decode with penalties, one PyTorch kernel is left besides Caminus's kernels and the runtime's copy and fill
 kernels: the greedy path's argmax (`torch.max` over the logits, one per token). Loading the model also runs PyTorch's
@@ -177,7 +177,7 @@ Two checks hold this, and both run without trusting a list written by hand:
 - `tools/serve_smoke1.py --block-imports gguf,tokenizers` (GPU): the real server runs under an import hook that refuses
   both packages, answers chat, tool-call, Anthropic, long-prompt and needle requests, and reports the GPU code
   objects it loaded (`/props`, `caminus.code_objects`). The smoke then audits the include closure of each one. The
-  run on 2026-11-10 loaded `q3m_prefill` and `k3_q3m_lean`, and the hook refused nothing.
+  run on 2026-11-10 loaded `pf_q3m` and `dec_q3m`, and the hook refused nothing.
 
 ## How it works, briefly
 
@@ -300,7 +300,7 @@ a pass over T tokens costs much less than T decode steps. For this model on this
 not use it. The measurement stays here because the reasons say where the compute and the bandwidth go.
 
 `python/caminus/engine/q3moe_verify.py` runs T tokens (up to 4) in one launch on a verify module,
-`kernels/k3_q3m_ver.hip`: the decode module's ops in T-token forms. Its logits and cache rows are bit for bit those of
+`kernels/dec_q3m_ver.hip`: the decode module's ops in T-token forms. Its logits and cache rows are bit for bit those of
 T decode steps (`tests/engine/test_q3moe_verify.py`). RX 7900 XTX, real consecutive tokens (this repository's docs)
 over a prefilled context, `benchmarks/q3moe_verify.py --depths 512,4096,16384,40900 --trace 4 --accept 0.693,0.457,0.253`:
 
@@ -409,8 +409,8 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
   (q_norm | k_norm | theta_scale, eps | freq [64] | mscale). OP_OWN_ATTS under `K3_Q3M_YARN` and `q3p_qk_rope` under
   `Q3P_YARN` compute theta = fp32(pos) x freq and cos(theta) x mscale, sin(theta) x mscale with the same statements, so
   decode and prefill write the same rows. The defaults' code is unchanged: the YaRN statements sit behind defines that
-  only new objects set (`k3_q3m_lean_yarn`, `k3_q3m_lean_kvq8_yarn`, `k3_q3m_lean_tp_yarn`, `k3_q3m_lean_tp_kvq8_yarn`,
-  `q3m_prefill_yarn`, `q3m_prefill_kvq8_yarn`). A runtime table pointer in the shared op would have changed the default
+  only new objects set (`dec_q3m_yarn`, `dec_q3m_kvq8_yarn`, `dec_q3m_tp_yarn`, `dec_q3m_tp_kvq8_yarn`,
+  `pf_q3m_yarn`, `pf_q3m_kvq8_yarn`). A runtime table pointer in the shared op would have changed the default
   module's machine code, and no value of the old block turns theta_scale^j into YaRN's per-pair blend. The YaRN builds
   read no `powf`; their `k3_run` registers equal their native peers' (96 VGPRs, 0 spilled; spilled scalars 53 / 19 /
   66 / 33 for one card F16 / Q8 and two cards F16 / Q8).

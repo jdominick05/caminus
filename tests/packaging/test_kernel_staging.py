@@ -47,7 +47,7 @@ class Staging(unittest.TestCase):
                          source_dirty='0', kernel_tree_sha256=stager.kernel_tree_sha256(str(ROOT)),
                          ggml_commit='0' * 40, ggml_dirty='0')
         self.commands = {}
-        for name in K.RUNTIME_SET + ('k3_q3m_lean_trace', 'q35_prefill_abl1'):
+        for name in K.RUNTIME_SET + ('dec_q3m_trace', 'dec_q35_swift_trace'):
             file = name + '.hsaco'
             (self.build / file).write_bytes(b'NOT EXECUTABLE: synthetic CPU packaging fixture ' + name.encode())
             self.commands[file] = f'<ROCM_PATH>/bin/amdclang++ SYNTHETIC {name}'
@@ -83,28 +83,28 @@ class Staging(unittest.TestCase):
             self.assertEqual((self.out / file).read_bytes(), (self.build / file).read_bytes())
             self.assertEqual(record['command'], self.commands[file])
             self.assertEqual(record['bytes'], (self.out / file).stat().st_size)
-        self.assertEqual(set(prov['not_shipped']), {'k3_q3m_lean_trace.hsaco', 'q35_prefill_abl1.hsaco'})
+        self.assertEqual(set(prov['not_shipped']), {'dec_q3m_trace.hsaco', 'dec_q35_swift_trace.hsaco'})
         _, checks = K.verify(str(self.out))
         self.assertTrue(checks and all(ok for _, ok, _ in checks))
         setup_guard(self.out)
 
     def test_old_runtime_only_build_is_refused_before_staging(self):
-        legacy = set(K.K3 + K.PREFILL + ('own_topk', 'smoke'))
+        legacy = set(K.K3 + K.PREFILL + ('samp_topk', 'smoke'))
         for name in set(K.RUNTIME_SET) - legacy:
             (self.build / (name + '.hsaco')).unlink()
         self.refused_before_output('missing objects or commands')
 
     def test_missing_new_decode_object_is_refused_before_staging(self):
-        (self.build / 'k3_q3m_lean.hsaco').unlink()
-        self.refused_before_output('k3_q3m_lean.hsaco')
+        (self.build / 'dec_q3m.hsaco').unlink()
+        self.refused_before_output('dec_q3m.hsaco')
 
     def test_missing_drafter_compile_command_is_refused_before_staging(self):
-        del self.commands['k3_q35_tcap_mtp.hsaco']
+        del self.commands['dec_q35_tcap_mtp.hsaco']
         self.write_metadata()
-        self.refused_before_output('k3_q35_tcap_mtp.hsaco')
+        self.refused_before_output('dec_q35_tcap_mtp.hsaco')
 
     def test_each_missing_gsq_draft_object_is_refused_before_staging(self):
-        for name in ('k3_q35_gsq_ver', 'k3_q35_gsq_ver_m', 'k3_q35_gsq_mtp', 'k3_q35_gsq_dflash'):
+        for name in ('dec_q35_gsq_ver', 'dec_q35_gsq_ver_m', 'dec_q35_gsq_mtp', 'dec_q35_gsq_dflash'):
             with self.subTest(module=name):
                 path = self.build / (name + '.hsaco')
                 saved = path.read_bytes()
@@ -116,8 +116,8 @@ class Staging(unittest.TestCase):
 
     def test_otherwise_complete_pre_gsq_manifest_is_refused(self):
         prov = self.staged()
-        missing = {'k3_q35_gsq_ver.hsaco', 'k3_q35_gsq_ver_m.hsaco',
-                   'k3_q35_gsq_mtp.hsaco', 'k3_q35_gsq_dflash.hsaco'}
+        missing = {'dec_q35_gsq_ver.hsaco', 'dec_q35_gsq_ver_m.hsaco',
+                   'dec_q35_gsq_mtp.hsaco', 'dec_q35_gsq_dflash.hsaco'}
         for file in missing:
             (self.out / file).unlink()
             del prov['objects'][file]
@@ -142,16 +142,16 @@ class Staging(unittest.TestCase):
 
     def test_provenance_and_setup_find_corrupt_or_missing_own_objects(self):
         self.staged()
-        (self.out / 'k3_q35_swift.hsaco').write_bytes(b'corrupt')
-        (self.out / 'q3m_prefill.hsaco').unlink()
+        (self.out / 'dec_q35_swift.hsaco').write_bytes(b'corrupt')
+        (self.out / 'pf_q3m.hsaco').unlink()
         _, checks = K.verify(str(self.out))
-        self.assertEqual({file for file, ok, _ in checks if not ok}, {'k3_q35_swift.hsaco', 'q3m_prefill.hsaco'})
+        self.assertEqual({file for file, ok, _ in checks if not ok}, {'dec_q35_swift.hsaco', 'pf_q3m.hsaco'})
         with self.assertRaisesRegex(SystemExit, 'does not match|missing'):
             setup_guard(self.out)
 
     def test_setup_refuses_old_runtime_manifest_with_otherwise_matching_files(self):
         prov = self.staged()
-        for name in set(K.RUNTIME_SET) - set(K.K3 + K.PREFILL + ('own_topk', 'smoke')):
+        for name in set(K.RUNTIME_SET) - set(K.K3 + K.PREFILL + ('samp_topk', 'smoke')):
             file = name + '.hsaco'
             (self.out / file).unlink()
             del prov['objects'][file]
@@ -162,7 +162,7 @@ class Staging(unittest.TestCase):
     def test_extra_staged_object_refused_and_existing_provenance_not_replaced(self):
         self.staged()
         old = (self.out / K.PROVENANCE).read_bytes()
-        (self.out / 'q35_prefill_abl1.hsaco').write_bytes(b'extra')
+        (self.out / 'dec_q35_swift_trace.hsaco').write_bytes(b'extra')
         result = self.stage()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn('outside the runtime set', result.stderr)

@@ -1,4 +1,4 @@
-"""Fused glue for the S1 block (kernels/fuse.hip)."""
+"""Fused glue for the S1 block (kernels/train_fuse.hip)."""
 import ctypes
 import torch
 from ..device.hip import Module
@@ -8,7 +8,7 @@ _mod = {}
 
 def _m():
     dev = torch.cuda.current_device()
-    if dev not in _mod: _mod[dev] = Module('fuse')
+    if dev not in _mod: _mod[dev] = Module('train_fuse')
     return _mod[dev]
 
 

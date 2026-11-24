@@ -1,6 +1,6 @@
 """The batched prefill's BF16 GEMMs and glue (docs/specs/spec-prefill-cache.md M5 S3): the per-token K3 decode ops of a
-layer, run over a whole chunk of T tokens with ordinary launches. Device code: kernels/prefill_glue.hip
-(build/prefill_glue.hsaco) and kernels/gemm.hip's bf16 WMMA (build/gemm.hsaco, caminus.device.gemm.gemm_tn).
+layer, run over a whole chunk of T tokens with ordinary launches. Device code: kernels/pf_gg_glue.hip
+(build/pf_gg_glue.hsaco) and kernels/pf_gemm.hip's bf16 WMMA (build/pf_gemm.hsaco, caminus.device.gemm.gemm_tn).
 
 Which reference each op equals (gate G1, tests/prefill/test_prefill_glue.py):
 - BITWISE K3's decode op on the same inputs (its expressions in its order, so a prefilled token's op output is the decode
@@ -13,7 +13,7 @@ Which reference each op equals (gate G1, tests/prefill/test_prefill_glue.py):
   they write the row scale (and the bf16 copy a WMMA reads), and hc_mean / bf16_mv / ple_gate / ple_conv given (scale, w)
   recompute xn = (x * scale) * w, the norm's own expression on the same stored bits: still bitwise the decode op chain.
 - MEASURED TOLERANCE: bf16_gemm, the wide BF16 matrices (hc down / up, output_hc down / up, ple key / value, the indexer
-  projections) on gemm.hip's WMMA: the activation rounded to bf16 (round to nearest even), the bf16 weights exact, fp32
+  projections) on pf_gemm.hip's WMMA: the activation rounded to bf16 (round to nearest even), the bf16 weights exact, fp32
   accumulation in a fixed K order (32-wide K stages in order, two 16-deep WMMAs each), fp32 output. The decode's
   OP_BF16_MV keeps the activation in fp32 (llama.cpp's mul_mat_vec_f), so the order cannot match; llama.cpp's own batched op
   for these (ggml_cuda_mul_mat_cublas, hipBLAS with BF16 compute on RDNA3 above 8 columns) rounds the activation AND the
@@ -94,12 +94,12 @@ def clear_routing(*errs):
     for e in _route_words(errs): e.zero_()
 
 D_GLUE = 2560          # the glue kernels' row width (GLUE_NI x 256: n_embd)
-TPAD = 128             # the WMMA GEMMs' token padding (gemm.hip's BM = 128 tiles)
+TPAD = 128             # the WMMA GEMMs' token padding (pf_gemm.hip's BM = 128 tiles)
 NI_OF_K = {2560: 5, 10240: 20}
 # the glue code objects: module -> (its rows' width GLUE_NI x 256, the pf_bf16_mv_n* split-K shapes it has: K -> NI)
-GLUE_MODULES = {'prefill_glue': (D_GLUE, NI_OF_K), 'prefill_glue_q35': (2048, {2048: 4}), 'prefill_glue_q35d': (5120, {})}
-BF16_TT = {5: 8, 20: 2, 4: 8}   # tokens per workgroup of each pf_bf16_mv_n<NI> (kernels/prefill_glue.hip)
-# the WMMA tile per (N, K) (measured on the XT, tests/prefill/test_prefill_glue.py speed; gemm.hip's three instances), and the
+GLUE_MODULES = {'pf_gg_glue': (D_GLUE, NI_OF_K), 'pf_gg_glue_q35m': (2048, {2048: 4}), 'pf_gg_glue_q35': (5120, {})}
+BF16_TT = {5: 8, 20: 2, 4: 8}   # tokens per workgroup of each pf_bf16_mv_n<NI> (kernels/pf_gg_glue.hip)
+# the WMMA tile per (N, K) (measured on the XT, tests/prefill/test_prefill_glue.py speed; pf_gemm.hip's three instances), and the
 # fallback rule: the largest of 128 x 128 / 64 x 128 / 128 x 64 that tiles N
 WMMA_TILE = {(320, 10240): (128, 64), (10240, 320): (64, 128), (10240, 2560): (128, 128), (2560, 2560): (128, 128),
              (512, 2560): (64, 128), (128, 2560): (64, 128), (256, 2560): (64, 128)}
@@ -118,12 +118,12 @@ class Glue:
     router_logits: the default mode of router_logits() ('wmma' / 'exact'; None = ROUTER_LOGITS)
     wmma_out: the default output of bf16_gemm ('fp32' / 'bf16'; None = WMMA_OUT), so also of the 'wmma' router logits"""
 
-    module, D, ni_of_k = 'prefill_glue', D_GLUE, NI_OF_K   # (class defaults: the Coder's object; tests build stand-ins with __new__)
+    module, D, ni_of_k = 'pf_gg_glue', D_GLUE, NI_OF_K   # (class defaults: the Coder's object; tests build stand-ins with __new__)
 
-    def __init__(self, device, router_logits=None, wmma_out=None, module='prefill_glue'):
+    def __init__(self, device, router_logits=None, wmma_out=None, module='pf_gg_glue'):
         self.dev = torch.device(device)
         if module not in GLUE_MODULES: raise ValueError(f'Glue: module {module!r} ({sorted(GLUE_MODULES)})')
-        self.module = module; self.D, self.ni_of_k = GLUE_MODULES[module]   # (prefill_glue_q35: qwen35moe's n_embd 2048, caminus.prefill.q35)
+        self.module = module; self.D, self.ni_of_k = GLUE_MODULES[module]   # (pf_gg_glue_q35m: qwen35moe's n_embd 2048, caminus.prefill.q35)
         self.router_mode = ROUTER_LOGITS if router_logits is None else router_logits
         if self.router_mode not in ('wmma', 'exact'): raise ValueError(f'Glue: router_logits {router_logits!r} (wmma or exact)')
         self.wmma_out = WMMA_OUT if wmma_out is None else wmma_out
@@ -289,11 +289,11 @@ class Glue:
 
     def f32_mv(self, w, N, K, x, out, T, ldo=None):
         """out[t, r] = W[r] . x[t] in OP_F32_MV's order (bitwise the decode op per token: qwen35moe's F32 router logits and
-        shared-expert gate; AREX-2's ssm alpha / beta): W fp32 [N, K], x fp32 [T, K], out [T, N] (row stride ldo). prefill_glue_q35
-        (K 2048) and prefill_glue_q35d (K 5120)"""
+        shared-expert gate; AREX-2's ssm alpha / beta): W fp32 [N, K], x fp32 [T, K], out [T, N] (row stride ldo). pf_gg_glue_q35m
+        (K 2048) and pf_gg_glue_q35 (K 5120)"""
         N, K, T = int(N), int(K), int(T); ldo = N if ldo is None else int(ldo)
         fn = f'pf_f32_mv_k{K}'
-        if not hasattr(self.m, fn): raise ValueError(f'f32_mv: K {K} on {self.module} (prefill_glue_q35: K 2048, prefill_glue_q35d: K 5120)')
+        if not hasattr(self.m, fn): raise ValueError(f'f32_mv: K {K} on {self.module} (pf_gg_glue_q35m: K 2048, pf_gg_glue_q35: K 5120)')
         if T < 1 or N < 1 or ldo < N: raise ValueError(f'f32_mv: N {N}, T {T}, ldo {ldo}')
         _check(self.dev, 'f32_mv', dict(w=(w, F32, N * K), x=(x, F32, T * K), out=(out, F32, (T - 1) * ldo + N)), ('out',))
         if w.data_ptr() % 16 or x.data_ptr() % 16: raise ValueError('f32_mv: w and x 16-byte aligned (float4 loads)')
@@ -313,9 +313,9 @@ class Glue:
         self._go('pf_to_bf16', Tp * K, x, ctypes.c_int(ldx), y, ctypes.c_int(T), ctypes.c_int(Tp), ctypes.c_int(K))
 
     def bf16_gemm(self, w, N, K, xbf, out, T, tile=None, wmma_out=None):
-        """out [tpad(T), N] fp32 = xbf [tpad(T), K] (bf16) . W[N, K]^T on gemm.hip's WMMA (fixed K order, fp32 out); the
+        """out [tpad(T), N] fp32 = xbf [tpad(T), K] (bf16) . W[N, K]^T on pf_gemm.hip's WMMA (fixed K order, fp32 out); the
         rows past T are the zero padding's (discarded). W: raw bytes or bfloat16. wmma_out (default: this Glue's): 'fp32'
-        the accumulation as is, 'bf16' each result rounded to bf16 (RNE) and stored as fp32 (gemm.hip's *_rbf kernels)"""
+        the accumulation as is, 'bf16' each result rounded to bf16 (RNE) and stored as fp32 (pf_gemm.hip's *_rbf kernels)"""
         wmma_out = self.wmma_out if wmma_out is None else wmma_out
         if wmma_out not in ('fp32', 'bf16'): raise ValueError(f'bf16_gemm: wmma_out {wmma_out!r} (fp32 or bf16)')
         N, K, T = int(N), int(K), int(T); Tp = tpad(T)

@@ -4,8 +4,8 @@ greedy continuation) through both; per position top-1 agreement, KLD(ref || gpu)
 engine's own greedy text and its decode speed; the standalone step's host refusals. Prints PASS / FAIL lines and RESULT PASS | FAIL.
 Gate (spec-own-quant.md, first form): top-1 equal at every position, mean KLD < 1e-3.
   tools/guard.sh LOG 1800 python -I tests/engine/test_q3moe_one.py GGUF --ref-cache FILE.npz [--prompt TEXT] [--new 3]
-      [--module k3_q3m_iq] [--same-as k3_q3m_iq] [--kv q8]
---kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True), k3_q3m_lean_kvq8), the same checks, the top-1 gate
+      [--module dec_q3m_iq] [--same-as dec_q3m_iq] [--kv q8]
+--kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True), dec_q3m_kvq8), the same checks, the top-1 gate
 (the mean KLD gated below 2.08e-3, the unrotated draft's Q8 rows here, not the F16 cache's 1e-3: the rotation must not be
 worse than no rotation; the Q8 cache's accuracy bar is the G-model gates' --against, tools/gates/kv_against.py), plus at every reference position the last layer's new row byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the
 halves the F16 row kernel (the prefill's q3p_qk_rope: OP_OWN_ATTS's norm + RoPE statements) stores for that layer's q | k | v.
@@ -66,7 +66,7 @@ klds, top_ok = [], True
 if eng.q8:   # the row oracle: the F16 row kernel on the last layer's q | k | v, its halves encoded by caminus.ref_kv
     from caminus import ref_kv
     from caminus.prefill import q3m_ops
-    oops = q3m_ops.Ops(torch.device(f'cuda:{eng.dev}'), 'q3m_prefill'); lay = ref_kv.Q8KVLayout(eng.nkv, eng.hd)
+    oops = q3m_ops.Ops(torch.device(f'cuda:{eng.dev}'), 'pf_q3m'); lay = ref_kv.Q8KVLayout(eng.nkv, eng.hd)
     Mk = eng.nkv * eng.hd; rb = lay.row_bytes
     oc = torch.zeros((len(ref) + 1) * 2 * Mk, dtype=torch.float16, device='cuda'); oq = torch.zeros(eng.nh * eng.hd, dtype=torch.float16, device='cuda')
     rows_bad = []

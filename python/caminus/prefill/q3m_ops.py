@@ -1,14 +1,14 @@
-"""Launch wrappers of kernels/q3m_prefill.hip: the batched prefill's own kernels for qwen3moe (Qwen3-30B-A3B), no ggml-cuda
+"""Launch wrappers of kernels/pf_q3m.hip: the batched prefill's own kernels for qwen3moe (Qwen3-30B-A3B), no ggml-cuda
 code. A matrix is the decode engine's tuple (caminus.engine.q3moe_one.Q3MoEOne._w): (format, rows per matrix, K, device
 bytes in the decode's layout: Q4_K raw blocks, Q6_K planes); an expert tensor is all its experts' rows in one buffer.
 
   Ops(dev).mm(W, x16, ldx, y, ldy, n=...)                  dense: y[t] = W x16[t] for t < n (fp32 out, row stride ldy)
   Ops(dev).mm(W, x16, ldx, y, ldy, work=(items, nitems, bound, xs, yd))   experts: the grouped pairs (group())
   Ops(dev).mm_gu(Wg, Wu, x16, ldx, y16, ldy, work)          experts: fp16 silu(gate) up in one launch
-  (on q3m_prefill both run kernels/q3m_prefill_mm.hip's wide tiles, each row bitwise the narrow tiles': wide = False
+  (on pf_q3m both run kernels/pf_q3m_mm.hip's wide tiles, each row bitwise the narrow tiles': wide = False
   runs q3p_mm_q4k / q3p_mm_q6k and gate, up, swiglu)
-  emb / add_rms16 / router / topk / group / swiglu / qk_rope / attn: one kernel each (kernels/q3m_prefill.hip)
-The study object q3m_prefill_iq (kernels/q3m_prefill_iq.hip, docs/dev/iq-quant-study.md) adds mm for the codebook formats
+  emb / add_rms16 / router / topk / group / swiglu / qk_rope / attn: one kernel each (kernels/pf_q3m.hip)
+The study object pf_q3m_iq (kernels/pf_q3m_iq.hip, docs/dev/iq-quant-study.md) adds mm for the codebook formats
 (IQ4_XS raw blocks; IQ3_XXS / IQ3_S / IQ2_XXS in engine.own_layout.iq_records' layout); on the shipped object the host
 refuses them."""
 import ctypes
@@ -22,16 +22,16 @@ from ..engine.own_layout import IQ_REC, IQ_PAD
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MM_M, MM_N = 64, 128        # a GEMM workgroup: tokens x rows
-MMW_N = 256                 # (rows per workgroup of the wide tiles, kernels/q3m_prefill_mm.hip MMW_N)
-WIDE_MODULE = 'q3m_prefill_mm'   # the 30B's wide kernels (q3p_mm_q4k_w / q3p_mm_q4k_gu / q3p_mm_q6k_w; kernels/q3m_prefill_mm.hip)
+MMW_N = 256                 # (rows per workgroup of the wide tiles, kernels/pf_q3m_mm.hip MMW_N)
+WIDE_MODULE = 'pf_q3m_mm'   # the 30B's wide kernels (q3p_mm_q4k_w / q3p_mm_q4k_gu / q3p_mm_q6k_w; kernels/pf_q3m_mm.hip)
 AT_T = 16                   # q3mp_attn: tokens per workgroup
 BLOCK_BYTES = {'Q4_K': 144, 'Q6_K': 210}
-KVQ8_MODULE = 'q3m_prefill_kvq8'                                  # the Q8 KV cache's qk_rope / attn (kernels/q3m_prefill_kvq8.hip)
+KVQ8_MODULE = 'pf_q3m_kvq8'                                  # the Q8 KV cache's qk_rope / attn (kernels/objects.tsv pf_q3m_kvq8)
 # the long-context mode's qk_rope (YaRN: Q3P_YARN, the frequency table and attention factor after eps in par): F16 and Q8
 # cache; every other kernel, the Q8 attention included, stays on its own object
-YARN_MODULE = {False: 'q3m_prefill_yarn', True: 'q3m_prefill_kvq8_yarn'}
+YARN_MODULE = {False: 'pf_q3m_yarn', True: 'pf_q3m_kvq8_yarn'}
 YARN_PAR = 2 * 128 + 2 + k3.YARN_TABLE_FLOATS                       # floats of a YaRN par block (q_norm | k_norm | theta_scale, eps | table)
-IQ_MODULE = 'q3m_prefill_iq'                                      # the study object: the shipped kernels + the four below
+IQ_MODULE = 'pf_q3m_iq'                                      # the study object: the shipped kernels + the four below
 IQ_KERNEL = {'IQ4_XS': 'q3p_mm_iq4xs', 'IQ3_XXS': 'q3p_mm_iq3xxs', 'IQ3_S': 'q3p_mm_iq3s', 'IQ2_XXS': 'q3p_mm_iq2xxs'}
 
 
@@ -46,21 +46,21 @@ def items_bound(npairs, n_exp):
 
 
 class Ops:
-    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False, wide=None):
-        """q8: the KV cache is Q8_0 rows (uint8, kernels/own_kv_codec.h's format): qk_rope / attn run q3m_prefill_kvq8's
+    def __init__(self, dev, module='pf_q3m', q8=False, yarn=False, wide=None):
+        """q8: the KV cache is Q8_0 rows (uint8, kernels/kv_codec_ops.h's format): qk_rope / attn run pf_q3m_kvq8's
         Q8 kernels (every other kernel stays on `module`). yarn: the long-context mode: qk_rope runs YARN_MODULE's build
         (the YaRN table in par: YARN_PAR floats), every other kernel as without it. wide: the Q4_K / Q6_K GEMMs on
-        WIDE_MODULE's wide tiles and the experts' gate | up fused (None: with module q3m_prefill; False: the narrow tiles
+        WIDE_MODULE's wide tiles and the experts' gate | up fused (None: with module pf_q3m; False: the narrow tiles
         and gate, up, swiglu, as the two-card prefill runs)"""
         self.dev = torch.device(dev) if not isinstance(dev, torch.device) else dev
         self.module, self.q8, self.yarn = module, bool(q8), bool(yarn)
-        if self.yarn and module != 'q3m_prefill': raise ValueError(f'q3m Ops: the long-context mode runs with q3m_prefill only (not {module})')
+        if self.yarn and module != 'pf_q3m': raise ValueError(f'q3m Ops: the long-context mode runs with pf_q3m only (not {module})')
         # the wide tiles (two row tiles per wave, bitwise the narrow tiles' rows) and the fused gate | up (+ swiglu); the
         # attributes switch them per launch (benchmarks' A / B) once the object is loaded. A dense GEMM goes wide from
         # wide_min_wg workgroups (half the card's compute units): on the XT the grouped experts and every dense 30B shape
         # are faster wide at 64+ workgroups (a 2048-token chunk; attn_output at 512 tokens, 64), the k / v projections at
         # 512 tokens (16 workgroups) 1.6-1.8x slower (docs/dev/yardsticks.md)
-        self.wide = self.gu = (module == 'q3m_prefill') if wide is None else bool(wide)
+        self.wide = self.gu = (module == 'pf_q3m') if wide is None else bool(wide)
         self.wide_min_wg = torch.cuda.get_device_properties(self.dev).multi_processor_count // 2
         with torch.cuda.device(self.dev):
             self.mod = hip.Module(module)
@@ -107,7 +107,7 @@ class Ops:
 
     def mm_gu(self, Wg, Wu, x16, ldx, y16, ldy, work):
         """y16[dst] = fp16(silu(Wg x16[src]) (Wu x16[src])) for the grouped pairs (work from group()): the gate GEMM, the up
-        GEMM and swiglu in one launch (kernels/q3m_prefill_mm.hip q3p_mm_q4k_gu: the same bits). Wg, Wu: Q4_K expert tensors of
+        GEMM and swiglu in one launch (kernels/pf_q3m_mm.hip q3p_mm_q4k_gu: the same bits). Wg, Wu: Q4_K expert tensors of
         the same shape"""
         if not self.gu: raise ValueError(f'q3m mm_gu: not on {self.module} (gu off)')
         (fg, R, K, wg), (fu, Ru, Ku, wu) = Wg[:4], Wu[:4]

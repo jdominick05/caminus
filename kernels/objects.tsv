@@ -1,0 +1,347 @@
+# The code objects built from another kernels/ source with defines: build.sh reads this table after it builds every
+# kernels/*.hip as build/<name>.hsaco. One row per object, tab-separated:
+#
+#   OBJECT  SOURCE  DEFINES
+#
+# OBJECT: build/OBJECT.hsaco (no kernels/OBJECT.hip may exist). SOURCE: a kernels/SOURCE.hip file, or another row's
+# OBJECT (that row's defines follow this row's, and its SOURCE is compiled). DEFINES: ';'-separated, NAME for an empty
+# define (#define NAME: -DNAME=) or NAME=VALUE. The flags (scheduler, ggml headers, the _w4 twin) follow OBJECT's name
+# as for a file (build.sh build_one). tools/own_closure.py reads the same table. The lines starting with # above a row
+# say why the object exists.
+
+# the K3 engine with timestamps (see K3_TRACE in dec_core.hip): build/dec_core_trace.hsaco, used by tools/k3_trace.py
+dec_core_trace	dec_core	K3_TRACE
+
+# the K3 engine with 16 rows per wave in flight (bigger tasks for team schedules): build/dec_core_u16.hsaco
+dec_core_u16	dec_core	MV_U=16
+
+# The dense qwen35 module (kernels/dec_q35_arex.hip, AREX-2) with Caminus's own matvec op OP_OWN_MV (kernels/ops_own.h)
+# compiled in: the in-module A/B of docs/specs/spec-own-quant.md (G-speed). dec_q35_arex itself is unchanged.
+dec_q35_arex_own	dec_q35_arex	K3_OWN
+
+# The Qwen3.5 dense line (AREX-2 Q4_K_M) multi-token GGUF engine (T > 1: verify passes for a drafter; see kernels/dec_q4x_gg_ver.hip
+# and kernels/dec_q35_arex.hip)
+dec_q35_arex_ver	dec_q35_arex	K3_MT
+
+# The DFlash 2 drafter of the dense qwen35 line on the plain Qwen3.8-27B GSQ-RCO files' module (engine/q35_dflash.py):
+# kernels/dec_q35_tcap_dflash.hip's tapes with the target's IQ2_S embedding and its Q4_K head (Swift's T-token form; OP_OWN_MV
+# with that format's loop alone, no grid staged), plus kernels/ops_q35_dflash.h (K3_Q35_DF). The GSQ decode module's .text is
+# unchanged: everything here sits under K3_Q35_DF / K3_Q3M_VER.
+dec_q35_gsq_dflash	dec_q35_gsq	K3_Q35_DF;K3_Q3M_VER;K3_Q35_VER
+
+# Staged Q8 plain GSQ one-card decode. GSQ verify/TP need their own engine work.
+dec_q35_gsq_kvq8	dec_q35_gsq	K3_Q35_KV_Q8
+
+# The plain Qwen3.8-27B GSQ-RCO files' multi-token-prediction drafter (engine/q35_mtp.py): their prediction block (all
+# Q6_K: the planes' T-token tiles, as ThinkingCap's), the Q4_K head (Swift's T-token form, one row), the IQ2_S embedding
+# reading OP_OWN_ARGMAX's key on a chained step, on the GSQ module (kernels/ops_q35_tcap.h under K3_Q35_MTP + K3_Q35_GSQ);
+# the decode and verify modules' .text unchanged.
+dec_q35_gsq_mtp	dec_q35_gsq	K3_Q35_MTP;K3_Q3M_VER;K3_Q35_VER
+
+# The plain Qwen3.8-27B GSQ-RCO files' verify module: kernels/dec_q35_gsq.hip with K3_Q3M_VER (its formats' T-token tiles:
+# kernels/quant_tcap_ver.h and kernels/quant_gsq_ver.h, through kernels/ops_q35_tcap.h; the verify passes of
+# engine/q35_dense_verify.py on the GSQ engine's weights and states). The decode module's .text is unchanged: every
+# T-token statement sits under K3_Q3M_VER.
+# (K3_Q35_ATTN_PACK: (the split pair's PART takes every pass row of a split in one task: kernels/ops_attn_split.h))
+dec_q35_gsq_ver	dec_q35_gsq	K3_Q3M_VER;K3_Q35_VER;K3_Q35_ATTN_PACK
+
+# The plain Qwen3.8-27B GSQ-RCO files' IQ1_M verify module: kernels/dec_q35_gsq_ver.hip's build with K3_Q35_GSQ_M, whose
+# T-token matvec (kernels/ops_q35_tcap.h q35t_op_mv) is the IQ1_M loop alone (kernels/quant_gsq_ver.h). The files hold one
+# IQ1_M matrix; engine/q35_dense_verify.py runs it in its own launch between the verify tape's two halves, because with
+# it in dec_q35_gsq_ver's dispatch k3_run took 97 to 102 VGPRs (budget 96). The host's caps give this module that format only.
+dec_q35_gsq_ver_m	dec_q35_gsq_ver	K3_Q35_GSQ_M
+
+# The dense qwen35 line's DFlash 2 drafter module (incoai's Qwen3.8-27B-DFlash2 on Swift 1.5: engine/q35_dflash.py). The
+# Swift module's T-token ops (K3_Q3M_VER / K3_Q35_VER: the Q8_0 and Q6_K matvecs over the draft block's rows, add + norm,
+# the q / k norm with RoPE, SwiGLU, the Q4_K embedding) and the drafter's own fp32 ops (kernels/ops_q35_dflash.h: the
+# dynamic short conv, top-k, the selector walk, the non-causal windowed attention over its f16 ring). Decode attention as
+# OP_ATTN_DEC (the split pair is the trunk's). A module of its own: every other code object is unchanged.
+dec_q35_swift_dflash	dec_q35_swift	K3_Q35_DF;K3_Q3M_VER;K3_Q35_VER
+
+# Staged own Q8 KV dense Swift decode; separate object preserves F16 arithmetic.
+dec_q35_swift_kvq8	dec_q35_swift	K3_Q35_KV_Q8
+
+# The dense qwen35 line's drafter module (Swift 1.5's multi-token-prediction block: engine/q35_mtp.py). The Swift
+# module's attention, feed-forward, embedding and add + norm ops in their T-token forms (K3_Q3M_VER / K3_Q35_VER: the
+# catch-up passes run 1 .. 4 rows of the block), the Q4_0 one-round-trip tile (kernels/quant_q4_0.h) and the Q6_K
+# head, and OP_OWN_ARGMAX, whose key the next draft step's embedding reads on the device. No Gated DeltaNet op and no
+# rows tile in its register allocation (K3_Q35_MTP). A module of its own: every other code object is unchanged.
+dec_q35_swift_mtp	dec_q35_swift	K3_Q35_MTP;K3_Q3M_VER;K3_Q35_VER
+
+# kernels/dec_q35_swift.hip on two cards (tensor parallelism: engine/q35_dense_tp.py): the same ops plus OP_XCHG
+# (kernels/ops_xchg.h), its warm word and claim-time store. The one-card module dec_q35_swift is built without K3_TP: its
+# code object is unchanged.
+dec_q35_swift_tp	dec_q35_swift	K3_TP
+
+# kernels/dec_q35_swift_tp.hip with K3_TRACE (per-segment timestamps, the exchange's push / flag times; measurement only)
+dec_q35_swift_tp_trace	dec_q35_swift_tp	K3_TRACE
+
+# kernels/dec_q35_swift_tp.hip as the two-card verify module (two-card speculative decoding: engine/q35_dense_verify_tp.py):
+# K3_TP's OP_XCHG (kernels/ops_xchg.h: its Seg.N is the payload's floats, so a T-token partial of T * D exchanges as-is)
+# with the verify T-token forms (K3_Q3M_VER: kernels/quant_ver.h, K3_Q35_VER's tiles, K3_Q35_ATTN_PACK). The one-card
+# verify module dec_q35_swift_ver and the two-card decode module dec_q35_swift_tp are unchanged: their code objects are
+# built without the other's defines.
+dec_q35_swift_tp_ver	dec_q35_swift	K3_TP;K3_Q3M_VER;K3_Q35_VER;K3_Q35_ATTN_PACK
+
+# kernels/dec_q35_swift.hip with K3_TRACE (per-segment timestamps; measurement only)
+dec_q35_swift_trace	dec_q35_swift	K3_TRACE
+
+# kernels/dec_q35_swift.hip as the verify module (speculative decoding: engine/q35_dense_verify.py): the same ops with their
+# T-token forms (K3_Q3M_VER: kernels/quant_ver.h for the one-round-trip matvecs, the rows tile per token in
+# OP_OWN_MV16, one task per token in the embedding and the add + norm; the Gated DeltaNet, RoPE, KV and attention ops read
+# the pass's tokens already). A module of its own: dec_q35_swift's code object is unchanged. Each token's sums are the
+# decode's statements, so a pass of T tokens gives T decode steps' bits.
+# (K3_Q35_VER: (its own T-token tiles: kernels/quant_ver.h's mt2 forms and the rows tiles' T forms))
+# (K3_Q35_ATTN_PACK: (the split pair's PART takes every pass row of a split in one task: kernels/ops_attn_split.h))
+dec_q35_swift_ver	dec_q35_swift	K3_Q3M_VER;K3_Q35_VER;K3_Q35_ATTN_PACK
+
+# Staged Q8 Swift verify. Unpacked PART: packed verify loads remain F16-only.
+dec_q35_swift_ver_kvq8	dec_q35_swift	K3_Q35_KV_Q8;K3_Q3M_VER;K3_Q35_VER
+
+# kernels/dec_q35_swift_ver.hip with K3_TRACE (per-segment timestamps; measurement only)
+dec_q35_swift_ver_trace	dec_q35_swift_ver	K3_TRACE
+
+# The DFlash 2 drafter of the dense qwen35 line on ThinkingCap's module (engine/q35_dflash.py): kernels/dec_q35_swift_dflash.hip's
+# tapes with ThinkingCap's IQ2_S embedding (kernels/ops_q35_tcap.h q35t_op_emb, its T-token form) and Q8_0 head (the rows
+# tiles' T-token form, OP_OWN_MV16), plus kernels/ops_q35_dflash.h (K3_Q35_DF). ThinkingCap's decode module's .text is
+# unchanged: everything here sits under K3_Q35_DF / K3_Q3M_VER.
+dec_q35_tcap_dflash	dec_q35_tcap	K3_Q35_DF;K3_Q3M_VER;K3_Q35_VER
+
+# Staged own Q8 KV ThinkingCap decode; the F16 object stays separate.
+dec_q35_tcap_kvq8	dec_q35_tcap	K3_Q35_KV_Q8
+
+# ThinkingCap's multi-token-prediction drafter (engine/q35_mtp.py): its prediction block (all Q6_K: the planes' T-token
+# tiles), the Q8_0 head as a rows tile, the IQ2_S embedding (a chained step reads OP_OWN_ARGMAX's key on the device) on
+# ThinkingCap's module (kernels/ops_q35_tcap.h); the decode and verify modules' .text unchanged: all under K3_Q35_MTP.
+dec_q35_tcap_mtp	dec_q35_tcap	K3_Q35_MTP;K3_Q3M_VER;K3_Q35_VER
+
+# kernels/dec_q35_tcap.hip on two cards (tensor parallelism: engine/q35_dense_tp.py): the same ops plus OP_XCHG
+# (kernels/ops_xchg.h), its warm word and claim-time store. The one-card module dec_q35_tcap is built without K3_TP: its
+# code object is unchanged.
+dec_q35_tcap_tp	dec_q35_tcap	K3_TP
+
+# kernels/dec_q35_tcap_tp.hip with K3_TRACE (per-segment timestamps, the exchange's push / flag times; measurement only)
+dec_q35_tcap_tp_trace	dec_q35_tcap_tp	K3_TRACE
+
+# kernels/dec_q35_tcap_tp.hip as the two-card verify module (ThinkingCap's line; engine/q35_dense_verify_tp.py): K3_TP's
+# OP_XCHG (kernels/ops_xchg.h: Seg.N is the payload's floats, so T * D exchanges as-is) with K3_Q3M_VER's T-token tiles
+# (kernels/quant_tcap_ver.h, kernels/ops_q35_tcap.h, K3_Q35_VER) and K3_Q35_ATTN_PACK. The one-card verify module
+# dec_q35_tcap_ver and the two-card decode module dec_q35_tcap_tp are unchanged.
+# (K3_Q35_GDN_LOCAL_BASE: keep the replay-state base local to GDN instead of live through the dispatch)
+dec_q35_tcap_tp_ver	dec_q35_tcap	K3_TP;K3_Q3M_VER;K3_Q35_VER;K3_Q35_ATTN_PACK;K3_Q35_GDN_LOCAL_BASE
+
+# kernels/dec_q35_tcap.hip with K3_TRACE (per-segment timestamps; measurement only)
+dec_q35_tcap_trace	dec_q35_tcap	K3_TRACE
+
+# ThinkingCap's verify module: kernels/dec_q35_tcap.hip with K3_Q3M_VER (its T-token tiles: kernels/quant_tcap_ver.h,
+# kernels/ops_q35_tcap.h; the verify passes of engine/q35_dense_verify.py on ThinkingCap's weights and states). The decode
+# module's .text is unchanged: every T-token statement sits under K3_Q3M_VER.
+# (K3_Q35_ATTN_PACK: (the split pair's PART takes every pass row of a split in one task: kernels/ops_attn_split.h))
+dec_q35_tcap_ver	dec_q35_tcap	K3_Q3M_VER;K3_Q35_VER;K3_Q35_ATTN_PACK
+
+# Staged Q8 ThinkingCap verify, unpacked attention with the same row arithmetic.
+dec_q35_tcap_ver_kvq8	dec_q35_tcap	K3_Q35_KV_Q8;K3_Q3M_VER;K3_Q35_VER
+
+# ThinkingCap's verify module with K3_TRACE timestamps (measurement only): kernels/dec_q35_tcap_ver.hip.
+dec_q35_tcap_ver_trace	dec_q35_tcap_ver	K3_TRACE
+
+# Qwen3.6-35B-A3B 2-bit GSQ multi-token GGUF engine (T > 1; see kernels/dec_q4x_gg_ver.hip and kernels/dec_q35m_gg.hip)
+dec_q35m_gg_ver	dec_q35m_gg	K3_MT
+
+# the Qwen3.6 one-card (HauhauCS formats) engine with K3_TRACE timestamps (measurement build; see kernels/dec_core.hip)
+dec_q35m_hh_trace	dec_q35m_hh	K3_TRACE
+
+# Qwen3.6-35B-A3B (HauhauCS Q3_K_P) multi-token GGUF engine (T > 1; see kernels/dec_q4x_gg_ver.hip and kernels/dec_q35m_hh.hip)
+dec_q35m_hh_ver	dec_q35m_hh	K3_MT
+
+# Staged Q8 KV one-card decode for qwen35moe (Qwen3.6-35B-A3B): the same tape and ops as kernels/dec_q35m.hip with
+# the Q8 target cache instead of F16. K3_Q35_KV_Q8 swaps OP_KV_APPEND for q35_op_kv_append_q8 and adds OP_HADAMARD
+# (kernels/ops_q35_kvq8.h); the split decode attention reads the wire format through ATTN_KV_TYPE.
+#
+# Compile only for now: this object exists to answer the register question before the engine is written, as
+# dec_q35m.hip did. The MoE tape is the trunk's ~18 ops plus OP_ROUTER and the 9-slot add, and the dense line's Q8
+# objects already sit above their F16 ones (dec_q35_gsq_kvq8 vs dec_q35_gsq: SGPR spills 71 vs 65). Budget: 96 VGPRs,
+# 0 spills (tools/gates/objcheck.py).
+# (ATTN_COMB_U: (kernels/dec_q35m.hip): Q8 128K 10.96 -> 10.86 ms on the XT, its spilled SGPRs unchanged)
+dec_q35m_kvq8	dec_q35m	K3_Q35_KV_Q8;ATTN_COMB_U=16
+
+# kernels/dec_q35m_kvq8.hip with K3_TRACE (per-segment timestamps; measurement only, not in the runtime set:
+# benchmarks/q3moe_trace.py --engine q35moe)
+dec_q35m_kvq8_trace	dec_q35m_kvq8	K3_TRACE
+
+# K3 module for qwen3moe (Qwen3-30B-A3B) on Caminus's own math (docs/specs/spec-own-quant.md): OP_OWN_MV's one-round-trip
+# tiles (Q4_K, Q6_K planes; the 8 experts of a layer grouped by device ids), OP_OWN_F16 / SWIGLU16 / MOE_SUM, and the
+# engine's own rms / q-k norm + RoPE / KV append / decode attention (OP_ATTN_DEC, not the split pair: head dim 128,
+# 8 query heads per kv head) / F32 router matvec / router. No llama.cpp op runs in this model's tape; the GG matvec
+# formats below stay compiled only as the yardstick arm of the benchmarks (until the module drops the ggml headers).
+dec_q3m_gg	dec_q4x_gg	K3_OWN;K3_OWN_Q3M;K3_FMTS_MV=GG_Q4_K,GG_Q6_K;K3_FMTS_MOE_GU;K3_FMTS_MOE_DOWN;K3_FMTS_GU_DENSE;K3_MOE_N=0;K3_MOE_P=0
+
+# K3_TRACE timestamps (benchmarks/q3moe_trace.py; measurement only)
+dec_q3m_gg_trace	dec_q3m_gg	K3_TRACE
+
+# kernels/dec_q3m_iq.hip with K3_TRACE timestamps (measurement only)
+dec_q3m_iq_trace	dec_q3m_iq	K3_TRACE
+
+# The qwen3moe decode module (kernels/dec_q3m.hip) with its KV cache in Q8_0 rows (kernels/kv_codec_ops.h: the F16
+# object's rows encoded, K after the head's Walsh-Hadamard transform, kernels/kv_rot128.h, and q rotated the same way).
+# Only OP_OWN_ATTS changes (kernels/ops_own_atts.h under K3_Q3M_KV_Q8: the rotations, the row encode, the Q8 K / V reads,
+# the sticky error word after Sync, its counts pinned as scalars); a separate object, so dec_q3m keeps its code. One
+# card, decode only. K3_Q3M_ADD_RMS_PIN (kernels/ops_own.h: OP_OWN_ADD_RMS16's row length and slot count pinned as
+# scalars, no arithmetic changed): without it k3_run spilled 54 scalars against dec_q3m's 53; with it 31 (before the
+# rotation and the attention's pin; 19 with both).
+dec_q3m_kvq8	dec_q3m	K3_Q3M_KV_Q8;K3_Q3M_ADD_RMS_PIN
+
+# The qwen3moe Q8_0 KV decode module (kernels/dec_q3m_kvq8.hip) for the long-context mode: OP_OWN_ATTS's RoPE from the
+# host's YaRN table (kernels/ops_own_atts.h under K3_Q3M_YARN, as kernels/dec_q3m_yarn.hip). A separate object, so
+# dec_q3m_kvq8 keeps its code.
+dec_q3m_kvq8_yarn	dec_q3m_kvq8	K3_Q3M_YARN
+
+# kernels/dec_q3m.hip on two cards (tensor parallelism, issue #86): the same ops plus OP_XCHG (kernels/ops_xchg.h,
+# its warm word and claim-time store) and OP_OWN_SLOT_SUM (the FFN partial weighted over its slots on the card, before
+# the exchange). K3_Q3M_TP selects them in kernels/ops_q3m.h; K3_TP is the shared exchange's own switch. The
+# one-card module dec_q3m is built without either: its code object is unchanged.
+# push-only exchange (no pull selects; the host refuses pull_mode on these modules): with the pull, k3_run took 96 VGPRs
+# and spilled 1 (63 spilled SGPRs); push-only, 96 VGPRs, 0 spilled, 66 spilled SGPRs (dec_q3m: 53). XCHG_R 2
+# instead of 3 left the 66 unchanged
+dec_q3m_tp	dec_q3m	K3_TP;K3_Q3M_TP;K3_XCHG_PUSH_ONLY
+
+# The qwen3moe two-card decode module (kernels/dec_q3m_tp.hip: OP_XCHG push-only, OP_OWN_SLOT_SUM) with its KV cache
+# in Q8_0 rows: the one-card Q8 module's format and statements (kernels/dec_q3m_kvq8.hip; kernels/ops_own_atts.h under
+# K3_Q3M_KV_Q8: K and q through the head's Walsh-Hadamard transform, kernels/kv_rot128.h, the row encode, the Q8 K / V
+# reads, the sticky error word after Sync) at the two-card shapes (each card its 2 of the 4 kv heads, up to 128 attention
+# splits per kv head: ATS_MAXS 128 under K3_Q3M_TP). A separate object, so dec_q3m_tp and dec_q3m_kvq8 keep their
+# code. K3_Q3M_ADD_RMS_PIN as in the one-card Q8 module (OP_OWN_ADD_RMS16's row length and slot count pinned as scalars,
+# no arithmetic changed).
+dec_q3m_tp_kvq8	dec_q3m_tp	K3_Q3M_KV_Q8;K3_Q3M_ADD_RMS_PIN
+
+# The qwen3moe two-card Q8_0 KV decode module (kernels/dec_q3m_tp_kvq8.hip) for the long-context mode: OP_OWN_ATTS's
+# RoPE from the host's YaRN table (kernels/ops_own_atts.h under K3_Q3M_YARN). A separate object, so dec_q3m_tp_kvq8
+# keeps its code.
+dec_q3m_tp_kvq8_yarn	dec_q3m_tp_kvq8	K3_Q3M_YARN
+
+# kernels/dec_q3m_tp.hip with K3_TRACE (per-segment timestamps, the exchange's push / flag times; measurement only)
+dec_q3m_tp_trace	dec_q3m_tp	K3_TRACE
+
+# The qwen3moe two-card decode module (kernels/dec_q3m_tp.hip) for the long-context mode: OP_OWN_ATTS's RoPE from the
+# host's YaRN table (kernels/ops_own_atts.h under K3_Q3M_YARN, as kernels/dec_q3m_yarn.hip). A separate object, so
+# dec_q3m_tp keeps its code.
+dec_q3m_tp_yarn	dec_q3m_tp	K3_Q3M_YARN
+
+# kernels/dec_q3m.hip with K3_TRACE (per-segment timestamps: benchmarks/q3moe_trace.py; measurement only)
+dec_q3m_trace	dec_q3m	K3_TRACE
+
+# kernels/dec_q3m_ver.hip with K3_TRACE (per-segment timestamps; measurement only)
+dec_q3m_ver_trace	dec_q3m_ver	K3_TRACE
+
+# The qwen3moe decode module (kernels/dec_q3m.hip) for the long-context mode (YaRN x4, caminus serve --long-context):
+# OP_OWN_ATTS's RoPE takes each pair's frequency and the attention factor from the host's table at the end of its par block
+# (kernels/ops_own_atts.h under K3_Q3M_YARN; caminus.rope.yarn_table) instead of theta_scale^j. A separate object, so
+# dec_q3m keeps its code: a runtime switch in the shared op would change the default module's machine code, and no
+# value of the existing par block turns pos * theta_scale^j into YaRN's per-pair blend.
+dec_q3m_yarn	dec_q3m	K3_Q3M_YARN
+
+# Qwen3-Coder-Next's multi-token GGUF engine (T > 1; see kernels/dec_q4x_gg_ver.hip and kernels/dec_q3n.hip)
+dec_q3n_ver	dec_q3n	K3_MT
+
+# the DFlash 2 drafter's engine (python/caminus/dflash_k3.py; docs/specs/spec-drafters.md 1): the GSQ-RCO Coder's
+# multi-token module with only the formats the drafter's tapes use (its Q8_0 layers / selector, the target's Q6_K head
+# shards, the Q8_0 gate/up pair as OP_GG_GU_DENSE) and the drafter ops (kernels/ops_q4x_dflash.h: conv, top-k, selector walk,
+# embed, the ring KV append, windowed / non-causal OP_ATTN_DEC, the permuted q8_1 of the inject's features). A separate code
+# object: the trunk's GGUF modules stay byte for byte the same
+dec_q4x_dflash	dec_q4x_gsq_ver	K3_DRAFT;K3_FMTS_MV=GG_Q6_K,GG_Q8_0;K3_FMTS_MOE_GU;K3_FMTS_MOE_DOWN;K3_FMTS_GU_DENSE=GG_Q8_0;K3_MOE_N=0;K3_MOE_P=0
+
+# the DFlash drafter's engine with K3_TRACE timestamps (measurement build; see kernels/dec_core.hip)
+dec_q4x_dflash_trace	dec_q4x_dflash	K3_TRACE
+
+# the GGUF engine with K3_TRACE timestamps (measurement build; see kernels/dec_core.hip)
+dec_q4x_gg_trace	dec_q4x_gg	K3_TRACE
+
+# the GGUF engine for multi-token passes (speculative verify, T > 1): the same k3_run with the T > 1 fast paths compiled
+# in (K3_MT: kernels/ops_gg.h). A separate module, so the one-token k3_run keeps its code (adding them there cost
+# the one-token pass 0.16 ms through layout / scheduling alone); k3.Engine picks it for T > 1 (k3.module_for)
+dec_q4x_gg_ver	dec_q4x_gg	K3_MT
+
+# the multi-token GGUF engine with K3_TRACE timestamps (measurement build; see kernels/dec_core.hip)
+dec_q4x_gg_ver_trace	dec_q4x_gg_ver	K3_TRACE
+
+# the MTP block's engine (python/caminus/mtp.py): the GSQ-RCO Coder's one-token module plus the fp32 swiglu stage of
+# OP_BF16_MV (Seg.work = 2, kernels/ops_gg.h bx_fill_swiglu) for the sidecar's BF16 shared expert. A separate code
+# object so the trunk's dec_q4x_gsq* stay byte for byte the same
+dec_q4x_gsq_mtp	dec_q4x_gsq	K3_MTP_SWIGLU
+
+# the MTP block's multi-token engine (T > 1: the catch-up over the verified rows); see kernels/dec_q4x_gsq_mtp.hip
+dec_q4x_gsq_mtp_ver	dec_q4x_gsq_ver	K3_MTP_SWIGLU
+
+# the GSQ-RCO Coder's one-token engine with the QSA indexer ops (kernels/ops_qsa.h: OP_IDX_APPEND, OP_QSA_SCORE,
+# OP_QSA_SELECT; docs/specs/spec-qsa.md). A separate code object, like the drafter's and the MTP block's: inlined into the
+# trunk's own dec_q4x_gsq they cost its tapes ~0.7 ms per token at T = 1 / 0.3 ms per T = 4 pass (k3_run's register
+# allocation moved; as a call inside the segment loop its SGPR spills went to scratch memory: 18 ms per token), so the
+# trunk modules stay byte for byte the same and caminus.k3.Engine runs tapes with QSA ops on this one (module_for / build)
+dec_q4x_gsq_qsa	dec_q4x_gsq	K3_QSA
+
+# the GSQ-RCO Coder's multi-token engine (T > 1) with the QSA indexer ops (see kernels/dec_q4x_gsq_qsa.hip)
+dec_q4x_gsq_qsa_ver	dec_q4x_gsq_ver	K3_QSA
+
+# the GSQ-RCO Coder's GGUF engine with K3_TRACE timestamps (measurement build; see kernels/dec_core.hip)
+dec_q4x_gsq_trace	dec_q4x_gsq	K3_TRACE
+
+# the GSQ-RCO Coder's multi-token GGUF engine (T > 1; see kernels/dec_q4x_gg_ver.hip and kernels/dec_q4x_gsq.hip)
+dec_q4x_gsq_ver	dec_q4x_gsq	K3_MT
+
+# the GSQ-RCO Coder's multi-token GGUF engine with K3_TRACE timestamps (measurement build; see kernels/dec_core.hip)
+dec_q4x_gsq_ver_trace	dec_q4x_gsq_ver	K3_TRACE
+
+# F16 target KV specialization of the Coder prefill attention core. The host
+# selects only append and the identity/SEL attention pairs from this object;
+# the QSA indexer's raw key append, pooling and scoring keep the Q8 object.
+# No transform is implicit: Q/K/V and output rotations are the host's choice.
+pf_gg_attn_f16	pf_gg_attn	PREFILL_KV_F16=1
+
+# The batched prefill's attention core for qwen35 dense (AREX-2: 24 q / 4 kv heads, head dim 256; python/caminus/prefill35.py):
+# pf_gg_attn.hip with 6 query heads per kv head, ATTN_VH 6: the split pair of dec_q35_arex (ATTN_G 6, ATTN_VH 6, 32-cell splits)
+pf_gg_attn_q35	pf_gg_attn	ATTN_G=6;ATTN_VH=6
+
+# The batched prefill's attention core for qwen35moe (python/caminus/prefill35.py): pf_gg_attn.hip with 8 query heads per
+# kv head (16 q / 2 kv heads, head dim 256), ATTN_VH 8: the split pair of dec_q35m_hh / q35g (ATTN_G 8, ATTN_VH 8, 32-cell
+# splits). Their merge (K3_ATTN_COMB_FAST) is bitwise the serial walk this file's pf_attn_comb runs.
+pf_gg_attn_q35m	pf_gg_attn	ATTN_G=8;ATTN_VH=8
+
+# pf_gg_attn_q35m.hip in the long-context mode (YaRN): pf_qk_nr takes the decode op's YaRN table and magnitude scale
+# (PF_QK_YARN: ops_q35.h's K3_Q35_YARN lines); every other kernel as pf_gg_attn_q35m. Loaded by caminus.prefill.q35moe
+# only when the engine runs YaRN, so the native-rope objects keep their code.
+pf_gg_attn_q35m_yarn	pf_gg_attn	ATTN_G=8;ATTN_VH=8;PF_QK_YARN
+
+# The batched prefill's GDN half for qwen35moe (python/caminus/prefill35.py): pf_gg_gdn.hip with the SiLU output gate
+# (pf_gdn_norm: nrm * silu(z), OP_GDN_NORM under K3_GDN_SILU). Value head h reads key head h % nk (tiled) in both.
+pf_gg_gdn_q35	pf_gg_gdn	PF_GDN_SILU
+
+# The batched prefill's glue for qwen35 dense (the Qwen3.5 dense line: AREX-2, n_embd 5120; python/caminus/prefill35.py):
+# pf_gg_glue.hip with rows of 5120 (GLUE_NI 20: pf_rms_mul is OP_RMS_MUL's general loop at K 5120) and pf_f32_mv_k5120 (its
+# F32 ssm alpha / beta, OP_F32_MV's order). The Coder's pf_gg_glue.hsaco and pf_gg_glue_q35m.hsaco are unchanged.
+pf_gg_glue_q35	pf_gg_glue	GLUE_NI=20;PF_Q35D
+
+# The batched prefill's glue for qwen35moe (Qwen3.6-35B-A3B, one card; python/caminus/prefill35.py): pf_gg_glue.hip with
+# rows of n_embd 2048 (GLUE_NI 8: pf_rms_mul is OP_RMS_MUL's general loop at K = 2048, the same fma chain and sums),
+# pf_bf16_mv_n4 (K 2048: the GSQ checkpoint's BF16 ssm alpha / beta) and pf_f32_mv_k2048 (the F32 router logits and
+# shared-expert gate, OP_F32_MV's order). The Coder's pf_gg_glue.hsaco is unchanged (these defines only).
+pf_gg_glue_q35m	pf_gg_glue	GLUE_NI=8;PF_Q35
+
+# The qwen35moe batched prefill's Q8 KV kernels (kernels/pf_q35_swift.hip under Q35P_KV_Q8: q35p_kv_append_q8;
+# kernels/pf_q35m.hip under it: q35mp_attn_q8; Q3P_KV_Q8 includes kernels/kv_codec_ops.h, and pf_q3m.hip's own
+# Q8 forms come along unused), a separate object so pf_q35m keeps its code; caminus.prefill.q35moe runs every other
+# kernel from pf_q35m.
+pf_q35m_kvq8	pf_q35m	Q35P_KV_Q8;Q3P_KV_Q8
+
+# The qwen3moe batched prefill's Q8 KV kernels (kernels/pf_q3m.hip under Q3P_KV_Q8: q3p_qk_rope_q8, q3p_attn_q8), a
+# separate object so pf_q3m keeps its code; caminus.prefill.q3m runs every other kernel from pf_q3m.
+pf_q3m_kvq8	pf_q3m	Q3P_KV_Q8
+
+# The qwen3moe batched prefill's Q8 KV kernels (kernels/pf_q3m_kvq8.hip) for the long-context mode: q3p_qk_rope_q8 from
+# the YaRN table (Q3P_YARN, as kernels/pf_q3m_yarn.hip). A separate object, so pf_q3m_kvq8 keeps its code;
+# caminus.prefill.q3m runs q3p_qk_rope_q8 and q3p_attn_q8 from it (the attention's code is pf_q3m_kvq8's).
+pf_q3m_kvq8_yarn	pf_q3m_kvq8	Q3P_YARN
+
+# The qwen3moe batched prefill (kernels/pf_q3m.hip) for the long-context mode: q3p_qk_rope takes each pair's frequency
+# and the attention factor from the YaRN table in its par block (Q3P_YARN; the decode modules' K3_Q3M_YARN statements on the
+# same block). A separate object, so pf_q3m keeps its code; caminus.prefill.q3m runs only q3p_qk_rope from it.
+pf_q3m_yarn	pf_q3m	Q3P_YARN

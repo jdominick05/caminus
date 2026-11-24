@@ -85,7 +85,7 @@ def main():
     scratch = Path(a.scratch).resolve()
     scratch.mkdir(parents=True, exist_ok=True)
     src, lib = scratch / 'codec.cpp', scratch / 'codec.so'
-    src.write_text('''#include "own_kv_codec.h"
+    src.write_text('''#include "kv_codec_ops.h"
 extern "C" void encode(const float *x, unsigned char *y, unsigned char *ok, int n) {
     for (int i = 0; i < n; i++)
         ok[i] = own_kv_q8_encode(x + (size_t)i * 32, (OwnKvQ8Block *)(y + (size_t)i * 34));

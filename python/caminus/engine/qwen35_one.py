@@ -12,7 +12,7 @@ The tape is Qwen3NextTP's op sequence with qwen35moe's choices (tests/engine/tes
 llama.cpp's intermediates): GDN value head h reads key head h % 16 (tiled: the module's default mapping), ssm_alpha and
 ssm_beta are separate matrices (GG formats, or F32 through OP_F32_MV), the gated RMSNorm's gate is SiLU (K3_GDN_SILU),
 attention q rows are [q | gate] per head, IMRoPE with equal text positions is NEOX on the first 64 dims, softmax top-8
-renormalized, the shared expert gated by sigmoid of an F32 row. Module: k3_gguf_q35h (HauhauCS Q3_K_P's formats);
+renormalized, the shared expert gated by sigmoid of an F32 row. Module: dec_q35m_hh (HauhauCS Q3_K_P's formats);
 another model's formats need their own module (k3.MODULE_CAPS refuses the tape otherwise)."""
 import ctypes
 import os
@@ -25,8 +25,8 @@ from .flashnext import EPS, DirectReader
 from .flashnext_tp import GACC_SITE_HOOKS, GACC_SITES
 from gguf import quants                                # (gguf-py on the path through caminus.engine.flashnext)
 
-MODULE = 'k3_gguf_q35h'
-DENSE_MODULE = 'k3_gguf_q35d'   # the dense line (llama.cpp arch qwen35: AREX-2, a Qwen3.8-27B finetune)
+MODULE = 'dec_q35m_hh'
+DENSE_MODULE = 'dec_q35_arex'   # the dense line (llama.cpp arch qwen35: AREX-2, a Qwen3.8-27B finetune)
 
 
 class Qwen35One:
@@ -34,7 +34,7 @@ class Qwen35One:
                  tape_only=False, debug_layers=None, vram_check=True, vram_extra_mib=0.0, shape_only=False):
         """path: a qwen35moe GGUF. device: the torch / HIP device index (with HIP_VISIBLE_DEVICES=1 the XT is device 0).
         max_ctx: KV cache positions (no measured capacity entry yet: callers keep it small until one exists). ntok: tokens
-        per pass (T > 1 runs module_for's _mt module). tape_only: build even if the module lacks an (op, format) pair
+        per pass (T > 1 runs module_for's _ver module). tape_only: build even if the module lacks an (op, format) pair
         (k3.Engine.build(strict=False); runs refuse). debug_layers: TEST-ONLY, build only the first n layers, then the output
         norm and head; after a pass res[0] is llama.cpp's l_out of layer n - 1 (tests/engine/test_q3n_e2e.py layers)."""
         from gguf import GGUFReader
@@ -132,12 +132,12 @@ class Qwen35One:
 
     def pick_module(self):
         """the code object for this checkpoint's formats, from its routed experts' format: Q2_0 (the 2-bit GSQ checkpoint)
-        -> k3_gguf_q35g, Q3_K / Q5_K (HauhauCS Q3_K_P) -> k3_gguf_q35h; anything else: refused (no module lists it)"""
+        -> dec_q35m_gg, Q3_K / Q5_K (HauhauCS Q3_K_P) -> dec_q35m_hh; anything else: refused (no module lists it)"""
         if self.dense: return DENSE_MODULE
         f = {self.T[f'blk.{i}.ffn_gate_exps.weight'].tensor_type.name for i in range(self.nl)}
-        if f == {'Q2_0'}: return 'k3_gguf_q35g'
+        if f == {'Q2_0'}: return 'dec_q35m_gg'
         if f <= {'Q3_K', 'Q5_K'}: return MODULE
-        raise ValueError(f'Qwen35One: no module for routed-expert formats {sorted(f)} (k3_gguf_q35h: Q3_K / Q5_K, k3_gguf_q35g: Q2_0)')
+        raise ValueError(f'Qwen35One: no module for routed-expert formats {sorted(f)} (dec_q35m_hh: Q3_K / Q5_K, dec_q35m_gg: Q2_0)')
 
     # -- weights, read straight onto the card --------------------------------------------------------------------------
     def _devs(self):

@@ -1,4 +1,4 @@
-"""The batched prefill's attention core (docs/specs/spec-prefill-cache.md M5 S6, milestone A; kernels/prefill_attn.hip):
+"""The batched prefill's attention core (docs/specs/spec-prefill-cache.md M5 S6, milestone A; kernels/pf_gg_attn.hip):
 q / k norm + RoPE (OP_QK_NR), the Hadamard rotations (OP_HADAMARD), the q8_0 KV rows (OP_KV_APPEND), dense attention over
 every earlier position as the Coder's split pair (OP_ATTN_PART / OP_ATTN_COMB over the identity list), the output gate
 (OP_GATE_MUL), and the DFlash features (OP_HC_AVG): each kernel is its K3 decode op's expressions in its order over many
@@ -9,8 +9,8 @@ dense launchers refuse a position at or past QSA_EXACT and every position outsid
 refuses a row past the cache's rows (the error word, bit 0 KV append / bit 1 attention / bit 2 a pool; check() raises),
 never writes or reads past them.
 
-The QSA prompt path (M5 S7, rows at positions >= QSA_EXACT; the decode's QSA tape ops in kernels/k3_qsa_ops.h and
-k3_attn_split.h, each kernel its op's expressions in its order, so BITWISE the op on the same inputs: tests/prefill/test_prefill_qsa.py
+The QSA prompt path (M5 S7, rows at positions >= QSA_EXACT; the decode's QSA tape ops in kernels/ops_qsa.h and
+ops_attn_split.h, each kernel its op's expressions in its order, so BITWISE the op on the same inputs: tests/prefill/test_prefill_qsa.py
 g1 against K3's QSA module one token per pass):
   idx_pool    OP_IDX_APPEND's pooled keys, IDXPOOL[j] from the IDXRAW rows 4j .. 4j + 3 (which the prefill writes through
               kv_append(M = 64), the dense tape's bytes); pools from token 0, so the QSA tape never backfills after a prefill
@@ -35,14 +35,14 @@ from ..device.hip import Module
 from ..device.bufcheck import ALIGN, LaunchCheck, aligned, view_bytes   # noqa: F401  (ALIGN: attn.ALIGN, the layout's block)
 
 F32, F16, I32, U8 = torch.float32, torch.float16, torch.int32, torch.uint8
-_check = LaunchCheck('prefill_attn', align=4)   # every launch: each buffer stated once (fp32 / int32 pointers 4-byte aligned by default)
-ATTN_SS, ATTN_G, ATTN_D, ATTN_RS = 32, 12, 256, 260        # = kernels/prefill_attn.hip / k3_attn_split.h
-ATTN_G_OF = {'prefill_attn': 12, 'prefill_attn_q35': 8, 'prefill_attn_q35d': 6,     # query heads per kv head of each code object (prefill_attn_q35.hip)
-             'prefill_attn_q35_yarn': 8}                                         # (prefill_attn_q35 with pf_qk_nr's YaRN form)
-YARN_ATTN = ('prefill_attn_q35_yarn',)   # the objects whose pf_qk_nr takes the YaRN table (PF_QK_YARN): qk_nr(yarn=...) only there
+_check = LaunchCheck('pf_gg_attn', align=4)   # every launch: each buffer stated once (fp32 / int32 pointers 4-byte aligned by default)
+ATTN_SS, ATTN_G, ATTN_D, ATTN_RS = 32, 12, 256, 260        # = kernels/pf_gg_attn.hip / ops_attn_split.h
+ATTN_G_OF = {'pf_gg_attn': 12, 'pf_gg_attn_q35m': 8, 'pf_gg_attn_q35': 6,     # query heads per kv head of each code object (pf_gg_attn_q35m)
+             'pf_gg_attn_q35m_yarn': 8}                                         # (pf_gg_attn_q35m with pf_qk_nr's YaRN form)
+YARN_ATTN = ('pf_gg_attn_q35m_yarn',)   # the objects whose pf_qk_nr takes the YaRN table (PF_QK_YARN): qk_nr(yarn=...) only there
 ROWS_PER_BLOCK = 64                                        # attention rows per record block (52 MiB of records at 65 splits)
 ERR_KV, ERR_ATTN, ERR_POOL = 1, 2, 4
-QSA_ROWB, QSA_TOPK, QSA_SELW, QSA_D, QSA_H = 136, 512, 516, 128, 4   # = kernels/k3_qsa_ops.h / caminus.engine.k3
+QSA_ROWB, QSA_TOPK, QSA_SELW, QSA_D, QSA_H = 136, 512, 516, 128, 4   # = kernels/ops_qsa.h / caminus.engine.k3
 SCORE_MIB = 64          # the score scratch's cap per card: query sub-blocks of score_rows(T, pool rows) rows (64 at least)
 SCORE_RPG = 64          # rows per pf_qsa_score block (its 4 pools per wave loaded once for these rows)
 # the score kernels (the same bits: tests/prefill/test_prefill_qsa.py): 'rs' the reduce-scatter (default), 'v0' op_qsa_score's butterflies
@@ -128,10 +128,10 @@ class AttnWorkspace:
 
 
 class Attn:
-    """the prefill_attn kernels on one device (every launch with that device current, on its current stream)"""
-    def __init__(self, device, module=None, name='prefill_attn', module16=None):
-        """module: an already loaded prefill_attn Module (the Coder's callers), else the code object `name`: prefill_attn
-        (12 query heads per kv head, the Coder) or prefill_attn_q35 (8: qwen35moe, caminus.prefill.q35; attend_full only)"""
+    """the pf_gg_attn kernels on one device (every launch with that device current, on its current stream)"""
+    def __init__(self, device, module=None, name='pf_gg_attn', module16=None):
+        """module: an already loaded pf_gg_attn Module (the Coder's callers), else the code object `name`: pf_gg_attn
+        (12 query heads per kv head, the Coder) or pf_gg_attn_q35m (8: qwen35moe, caminus.prefill.q35; attend_full only)"""
         if name not in ATTN_G_OF: raise ValueError(f'Attn: name {name!r} ({sorted(ATTN_G_OF)})')
         self.dev = torch.device(device); self.name, self.G = name, ATTN_G_OF[name]
         self.m16 = module16   # loaded only for an F16 target cache; the QSA indexer keeps the original Q8 module
@@ -153,7 +153,7 @@ class Attn:
         """Load the target-cache variant before graph capture; keep QSA indexer kernels on self.m."""
         if self.G != ATTN_G: raise ValueError('F16 prefill split attention requires the Coder GQA geometry')
         if self.m16 is None:
-            with torch.cuda.device(self.dev): self.m16 = Module('prefill_attn_f16')
+            with torch.cuda.device(self.dev): self.m16 = Module('pf_gg_attn_f16')
         return self.m16
 
     def _go(self, fn, grid, *args, cache_f16=False):
@@ -248,7 +248,7 @@ class Attn:
     def attend_full(self, q, cache, pos0, T, nkv, scale, out, rec, err, max_rows=ROWS_PER_BLOCK):
         """out [T, nkv * G, 256] = dense attention of rows pos0 .. pos0 + T - 1 over the cells 0 .. pos of the q8_0 cache, at
         ANY position inside it (a model whose attention is dense at every depth: qwen35moe; attend() keeps the Coder's QSA
-        limit). The split pair over the identity list as attend(), bitwise its decode op (k3_gguf_q35*: 32-cell splits, G 8),
+        limit). The split pair over the identity list as attend(), bitwise its decode op (dec_q35m_gg / dec_q35m_hh: 32-cell splits, G 8),
         in blocks of rows sized so each block's records fit rec: block rows = min(max_rows, rec floats // (heads x the
         block's splits x 260)) (a row's splits depend only on its own position, so the blocking changes no bit: G2b)"""
         T, nkv, G = int(T), int(nkv), self.G
@@ -284,7 +284,7 @@ class Attn:
     @staticmethod
     def _rows136(t, what):
         if not isinstance(t, torch.Tensor) or t.dtype != torch.uint8 or not t.is_contiguous() or view_bytes(t) % QSA_ROWB or not view_bytes(t):
-            raise ValueError(f'prefill_attn: {what} must be contiguous uint8 rows of {QSA_ROWB} B')
+            raise ValueError(f'pf_gg_attn: {what} must be contiguous uint8 rows of {QSA_ROWB} B')
         return view_bytes(t) // QSA_ROWB
 
     def idx_pool(self, raw, pool, j0, j1, kn, theta_scale, eps, err, n_rot=64):

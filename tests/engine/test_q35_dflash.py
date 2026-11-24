@@ -1,4 +1,4 @@
-"""The own DFlash 2 drafter module (engine/q35_dflash.py on kernels/k3_q35_dflash.hip) against the float64 reference
+"""The own DFlash 2 drafter module (engine/q35_dflash.py on kernels/objects.tsv dec_q35_swift_dflash) against the float64 reference
 (caminus.ref_dflash.RefDFlash, anchored on llama.cpp's own drafter: tools/reference/dflash35_anchor.py), on the same inputs:
   inject: synthetic target features [5, n, D] (the drafter's ops do not care where they come from) -> each drafter layer's
           ring rows K / V vs the reference's cache rows (worst relative error);
@@ -97,7 +97,7 @@ if A.long:   # the batched prefill inject: the prefill's launchers (a 64-chunk p
     #  what lets the module's first run fit the non-display card)
     dv = torch.device('cuda', eng.dev)
     pf = types.SimpleNamespace(O=q35own.Ops(dv, module=q35own.MODULE_TCAP if eng.tcap else q35own.MODULE),
-                               A=Attn(dv, name={6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}[eng.nh // eng.nkv]),
+                               A=Attn(dv, name={6: 'pf_gg_attn_q35', 8: 'pf_gg_attn_q35m'}[eng.nh // eng.nkv]),
                                err=torch.zeros(1, dtype=torch.int32, device='cuda'))
     db = Dflash35(A.drafter, eng, chunk=A.long)
     for d in db.L: d['ring'].zero_()

@@ -39,7 +39,7 @@ K3 port to the GSQ-RCO Coder (IQ1_M pack). I read the real shard headers and onl
 **3. What llama.cpp (ignite 842653396 (published as e4e3f8eda; identical ggml/, common/, src/), HIP, gfx1100) runs**
 - **Quantized dense weights:** MMVQ for ne11 ≤ 5 on RDNA3 (mmvq.cu:59-61), so MMVQ at both batch 1 and batch 4.
   - All new formats have vec_dots: vecdotq.cuh Q2_0 :754, Q4_K :973, Q5_K :1023, IQ2_S :1187, IQ3_S :1274, IQ4_XS :1420.
-  - Every vec_dot reads only `__low2float(ds)` (Q4_K and Q5_K get the q sum from dp4a, vecdotq.cuh:509-525). So aq_fill's reordered ds.y (k3_gguf_ops.h:35-38) stays bitwise for every format.
+  - Every vec_dot reads only `__low2float(ds)` (Q4_K and Q5_K get the q sum from dp4a, vecdotq.cuh:509-525). So aq_fill's reordered ds.y (ops_gg.h:35-38) stays bitwise for every format.
 - **Warps per row:** RDNA3 uses 1 warp per row at ncols=1 for Q4_K, Q5_K, IQ4_XS, IQ2_S, IQ3_S and Q2_0 (mmvq-impl.cuh:368-385). So K3's one-wave `gg_row` should be bitwise to llama.cpp for these (INFERRED, gate G3). Q6_K (2 warps), IQ4_NL and Q8_0 (8) stay tolerance-only, as today.
 - **MoE (mul_mat_id) max batch for MMVQ** (mmvq-impl.cuh:245-261): IQ2_S and IQ3_S 4, IQ4_XS 6, IQ3_XXS and IQ4_NL 8, Q2_0 8. So T ≤ 4 is MMVQ for every expert format; at T ≥ 5 llama.cpp moves the IQ2_S / IQ3_S layers to MMQ.
 - **Fusions that do not apply:** the paired MMVQ (hc down+inject, qkv+z, alpha+beta) needs quantized weights of the same type (ggml-cuda.cu:4395-4422). So BF16 hc does not pair, and qkv+z pairs only where the types match. Shared gate+up fusion needs the same type (ggml-cuda.cu:1829), so most layers run the shared expert as separate MMVQs plus swiglu.
@@ -56,33 +56,33 @@ K3 port to the GSQ-RCO Coder (IQ1_M pack). I read the real shard headers and onl
   - bf16 → f32 conversion is exact.
 
 **4. K3 design**
-- **(a) Formats** (k3_gguf_ops.h:8 enum, k3.py:49 GG_FMT).
+- **(a) Formats** (ops_gg.h:8 enum, k3.py:49 GG_FMT).
   - Add Q4_K=4, Q5_K=5, IQ4_XS=6, IQ2_S=7, IQ3_S=8, Q2_0=9. BF16 gets its own op, not a GG format.
-  - Replace the four if-chains in gg_row / gg_row_tg / gg_row_n (k3_gguf_ops.h:160-176, 180-209, 418-434) with one `gg_vdot<TYPE>` constexpr switch.
+  - Replace the four if-chains in gg_row / gg_row_tg / gg_row_n (ops_gg.h:160-176, 180-209, 418-434) with one `gg_vdot<TYPE>` constexpr switch.
 - **(b) Code size:** stop instantiating every format in every op.
-  - GG_DISPATCH (k3_gguf_ops.h:1356-1362) currently puts all 4 formats into each of MV, MOE_GU, MOE_DOWN and GU_DENSE.
+  - GG_DISPATCH (ops_gg.h:1356-1362) currently puts all 4 formats into each of MV, MOE_GU, MOE_DOWN and GU_DENSE.
   - Use per-op whitelists set by -D from a tape inventory script (header → (op, fmt) set):
     - MV: Q4_K, Q5_K, Q6_K, IQ4_XS, IQ4_NL, Q8_0.
     - MOE_GU: IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS.
     - MOE_DOWN: IQ4_NL, Q2_0.
-  - That is 12 instantiations against 16 today. Build a per-model module (k3_gguf_gsq / k3_gguf_gsq_mt) beside the REAP one.
+  - That is 12 instantiations against 16 today. Build a per-model module (dec_q4x_gsq / dec_q4x_gsq_ver) beside the REAP one.
   - Bar: k3_run ≤ about 130 KB, ≤ 96 VGPRs, 0 scratch. IQ2_S and IQ3_S bring grid tables (iq2s_grid 8 KB, iq3s_grid 2 KB) and more VGPRs; one heavy instance sets occupancy for the whole kernel.
-- **(c) New OP_BF16_MV.** W bf16 [N, K] row-major, x f32 [T, K], y f32 [T, N]. It replaces OP_F32_MV for the router and the shared gate; do not retype op_f32_mv, whose expression tree (k3_gguf_ops.h:579-600) differs from MMVF.
+- **(c) New OP_BF16_MV.** W bf16 [N, K] row-major, x f32 [T, K], y f32 [T, N]. It replaces OP_F32_MV for the router and the shared gate; do not retype op_f32_mv, whose expression tree (ops_gg.h:579-600) differs from MMVF.
   - **One wave per row emulates MMVF:** W = bs/32 virtual warps (8 for K = 2560 / 10240, 5 for K = 320), so each lane keeps W accumulators.
   - Per pair: explicit `__builtin_fmaf(x0,y0,acc)` then `__builtin_fmaf(x1,y1,acc)`, starting from acc0(). Then W wsum butterflies, then `wsum(lane < W ? p[lane] : 0.f)`. That is the bitwise MMVF tree.
   - Float add is commutative, so only the tree shape has to match. The load layout is free: 128-bit loads, with the xor 1/2 levels done in registers.
   - **K = 320 (hc up):** stage silu(lo · 1/HC) in LDS as f32, once per workgroup (≤ T × 1.25 KB). That is ggml_scale then ggml_silu with separate roundings, as today's GG_ACT_F32_SILU does. Eight rows per workgroup.
   - **T > 1:** each token uses the same per-row order as T = 1, which keeps the internal T=4-vs-one-token gate. If VGPRs run short (8 × 4 accumulators), process the virtual warps in passes. Do not follow llama.cpp's MMF / bf16 batch path.
-  - Loads-first from the start, and k3_extra_prefetch extended to the new op (k3_gguf_ops.h:1474).
+  - Loads-first from the start, and k3_extra_prefetch extended to the new op (ops_gg.h:1474).
 - **(d) Producers that change** (flashnext_tp.py):
   - rms_mul / hc_post_rms stop emitting `q8=s['xq']` (lines 232-233): BF16 down/inject read xn as f32, which saves glue work.
   - The T>1 `gg_q8_1(lo)` (line 241) and `gg_q8_1(px)` for PLE (line 259) are dropped.
   - alpha/beta, router and shared gate read f32 `mixed`. hc_mean keeps both mixed and mq; mq still feeds the quantized projections and the MoE.
   - gdn_norm and gate_mul keep their q8 emission.
-- **(e) Shared expert:** `gg_gu_dense(..., sgu[c]['fmt'], ...)` (flashnext_tp.py:348, op k3_gguf_ops.h:557) would silently decode up with gate's format. Run two OP_GG_MV segments (gate, up; independent) and a new glue mode of OP_GG_Q8_1 that computes silu(g)·u → q8_1. That matches llama.cpp's unfused path. It costs one extra hand-off, off the critical path.
+- **(e) Shared expert:** `gg_gu_dense(..., sgu[c]['fmt'], ...)` (flashnext_tp.py:348, op ops_gg.h:557) would silently decode up with gate's format. Run two OP_GG_MV segments (gate, up; independent) and a new glue mode of OP_GG_Q8_1 that computes silu(g)·u → q8_1. That matches llama.cpp's unfused path. It costs one extra hand-off, off the critical path.
 - **(f) MoE:**
   - Relax the block-32 assert (flashnext_tp.py:332). `_exp_cols` converts the 32-unit ranges to type blocks (b·32/qk); require moe_blocks to be even (the default 12 gives 6/4 Q2_0 blocks).
-  - Add unrolled instances: `gg_moe_down_n<Q2_0, NB 6/4>` and `gg_moe_gu_n<IQ2_S, 10>` (k3_gguf_ops.h:1404-1424). OP_ROUTER is unchanged for E = 256.
+  - Add unrolled instances: `gg_moe_down_n<Q2_0, NB 6/4>` and `gg_moe_gu_n<IQ2_S, 10>` (ops_gg.h:1404-1424). OP_ROUTER is unchanged for E = 256.
   - Expected: 20 / 17 / 10 / 1 layers of the four gate/up types; T = 4 unions are about 32 of 40 experts, as on REAP.
 - **(g) Host:**
   - `_rep_f32` / `_f32` assert on F32 for gate_inp and gate_inp_shexp; add `_rep_bf16`. BF16 row slicing via `_rows` works unchanged (gguf-py gives uint8 rows).
@@ -97,7 +97,7 @@ K3 port to the GSQ-RCO Coder (IQ1_M pack). I read the real shard headers and onl
 **5. Steps, gates, effort**
 - **S0 (0.5 d).** Tape inventory script; GG_FMT and enum; split-GGUF PLE; BF16 loaders; Q2_0 split; shared-expert format fix (asserts first).
   - Gate: GSQ loads with `local_only`; every (op, fmt) in the tape is on the whitelist.
-- **S1 (1 d).** Six new vec_dot instantiations; standalone GG_MV kernels (k3_gguf.hip:55-58 macro) on real GSQ tensors.
+- **S1 (1 d).** Six new vec_dot instantiations; standalone GG_MV kernels (dec_q4x_gg.hip:55-58 macro) on real GSQ tensors.
   - G1: engine op bitwise equal to the standalone kernel at 3, 5, 6, 7 and 8 workgroups per WGP; T=4 row bitwise equal to T=1; within 1e-6 of gguf-py float64; ≤ 96 VGPRs, 0 scratch.
 - **S2 (1.5 d).** OP_BF16_MV. Compile ignite's own `mul_mat_vec_f<nv_bfloat16>` as a standalone reference (MIT, included like vecdotq.cuh).
   - G2: disassemble ignite's libggml-hip for v_fma / v_fmac, read-only.
@@ -115,7 +115,7 @@ K3 port to the GSQ-RCO Coder (IQ1_M pack). I read the real shard headers and onl
   - G3: bitwise where expected (BF16 MMVF ops; the one-warp formats) and within 1e-6 otherwise; same 10 experts; inp_embd from IQ4_XS bitwise.
 - **S5 (1 d).** Re-measure llama.cpp's own batched-vs-one-token KLD on GSQ (the D-281 floor). Then K3 TP on 768 positions over 3 texts.
   - G4 (D-281): mean KLD ≤ that floor, top-1 within 1 point. Identical greedy tokens; 3000-token soak with every bail recovered.
-- **S6 (1-2 d).** Speed: RPT and split sweep, unrolled MoE instances, loads-first BF16, the k3_gguf_gsq_mt module (T=4), I-cache check.
+- **S6 (1-2 d).** Speed: RPT and split sweep, unrolled MoE instances, loads-first BF16, the dec_q4x_gsq_ver module (T=4), I-cache check.
   - Gate: every step bitwise against the previous one. Targets ≤ 11 ms plain and ≤ 17.5 ms for T=4 (INFERRED, from REAP's 10.45 / 16.5 plus the extra replicated bytes).
 - **S7 (0.5 d).** DFlash on GSQ (token_embd now IQ4_XS); re-measure acceptance on code, shell and prose.
 

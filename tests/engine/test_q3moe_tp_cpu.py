@@ -7,7 +7,7 @@ calls (every tensor in host memory; nothing is launched).
     a card is refused
   - the cut bytes: every split tensor of the tiny file (attention, every expert of gate / up / down in Q4_K and Q6_K, the
     head) as each card holds it (Q6_K: its planes) decodes (caminus.own_dequant) to exactly the full matrix's part
-  - the tapes: k3_q3m_lean_tp on both cards, every op in k3.Q3M_TP_OPS, 1 + 15 per layer + 2 segments, 2 exchanges per
+  - the tapes: dec_q3m_tp on both cards, every op in k3.Q3M_TP_OPS, 1 + 15 per layer + 2 segments, 2 exchanges per
     layer with indices 0 .. 2 nl - 1 once each and the card's own number, the FFN exchange after an OP_OWN_SLOT_SUM over the
     top-k slots, every residual add after an exchange one row (slots 1, no weights), every dependency pointing back; each
     card's matrices have its share's shapes; the attention's splits follow the card; the tapes build again (a grid test's
@@ -168,7 +168,7 @@ nl = info['layers']
 good, xi, why = True, [], []
 for c in (0, 1):
     E_ = m.E[c]; ops = [sg.op for sg in E_.segs]
-    good &= E_.module == 'k3_q3m_lean_tp' and all(o in k3.Q3M_TP_OPS for o in ops) and not E_.unsupported() and E_.refuse is None
+    good &= E_.module == 'dec_q3m_tp' and all(o in k3.Q3M_TP_OPS for o in ops) and not E_.unsupported() and E_.refuse is None
     good &= all(sg.dep < i and sg.dep2p1 - 1 < i for i, sg in enumerate(E_.segs))
     good &= len(E_.segs) == 1 + 15 * nl + 2
     xs = [(i, sg) for i, sg in enumerate(E_.segs) if sg.op == k3.OP_XCHG]
@@ -184,7 +184,7 @@ for c in (0, 1):
     good &= ops.count(k3.OP_OWN_ATTS) == nl and ops.count(k3.OP_ROUTER) == nl and ops.count(k3.OP_OWN_SLOT_SUM) == nl
     if not good: why.append(c)
 check(good and xi[0] == xi[1] == list(range(2 * nl)),
-      f'both tapes on k3_q3m_lean_tp run only Q3M_TP_OPS, {1 + 15 * nl + 2} segments (15 per layer), every dependency points back, '
+      f'both tapes on dec_q3m_tp run only Q3M_TP_OPS, {1 + 15 * nl + 2} segments (15 per layer), every dependency points back, '
       f'2 exchanges of D floats per layer (indices 0 .. {2 * nl - 1} once, the card\'s own number, push-only), the FFN one after '
       f'OP_OWN_SLOT_SUM over the top-{info["KU"]} slots, each residual add after an exchange one row' + (f' (cards {why})' if why else ''))
 sh = True
@@ -202,7 +202,7 @@ check(sh, f'each card\'s matrices have its share\'s shapes (expert rows {m.exp_r
       f'its KV cache holds its kv heads at max_ctx + {k3.Engine.ATS_PAD} rows; the attention takes splits_for(its kv heads) = {m.splits}')
 grids = []
 n_slots = FakeSlots.n_made; slots0 = [s.base for s in m.slots]
-for pw in (3, 4, 5):   # (grids an XT-cap object holds: kernels/k3.hip K3_PER_WGP 5)
+for pw in (3, 4, 5):   # (grids an XT-cap object holds: kernels/dec_core.hip K3_PER_WGP 5)
     m.per_wgp = pw; m._build_tapes()
     grids.append(([e.grid for e in m.E], m.splits[:], [[(sg.op, sg.ntask, sg.dep, sg.K, sg.N) for sg in e.segs] for e in m.E]))
 m.per_wgp = 'card'; m._build_tapes()
@@ -224,7 +224,7 @@ refused = []
 for cap in (0, 129):
     try: Q3MoETP(P_T, devices=(0, 1), max_ctx=64, vram_check=False, splits_cap=cap); refused.append(False)
     except ValueError: refused.append(True)
-check(all(refused) and k3.atts_max_splits('k3_q3m_lean_tp') == 128, 'Q3MoETP refuses splits_cap 0 and 129 (1 .. 128 on k3_q3m_lean_tp)')
+check(all(refused) and k3.atts_max_splits('dec_q3m_tp') == 128, 'Q3MoETP refuses splits_cap 0 and 129 (1 .. 128 on dec_q3m_tp)')
 m.reset()
 check((m.seq, m.fresh, m.pos_host) == (1, True, 0) and {k[0] for k in m.state} == {0, 1} and {k[2] for k in m.state} == {'kv'}
       and m.tp_key == dict(exp_rows=512, kv_heads=2, vocab_rows=m.vh) and m.commit_max() == 1 and m.shard_devs == [0, 1],
@@ -357,7 +357,7 @@ check(L.devs == [0, 1] and L.T == 1 and L.kv_rows == 64 and L.pb == row and all(
       f'state; a checkpoint slot ({L.nbytes} B) within the registry\'s slot projection ({[round(v, 3) for v in slot_mib]} MiB); '
       f'park / restore rows per card (rows_bytes)')
 key = _prompt.engine_key(m3, _NS(numerics=lambda: dict(q='x'), crossover=8), build='fixture')
-check(key['module'] == 'k3_q3m_lean_tp' and key['tp']['devices'] == [0, 1] and key['tp']['exp_rows'] == m3.exp_rows0 == 512
+check(key['module'] == 'dec_q3m_tp' and key['tp']['devices'] == [0, 1] and key['tp']['exp_rows'] == m3.exp_rows0 == 512
       and key['tp']['kv_heads'] == 2 and key['tp']['vocab_rows'] == m3.vh and key['tp']['ntok'] == 1
       and key['module'] != q3moe_one.MODULE_LEAN,
       'cache key: the two-card module, both devices and the split (exp_rows, kv_heads, vocab rows): a one-card park on the '

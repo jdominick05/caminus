@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import torch
 from caminus.device.hip import Module
 
-m = Module('sync_bench')
+m = Module('bench_sync')
 wgps = torch.cuda.get_device_properties(0).multi_processor_count
 sy = torch.zeros((4 * (512 * 2 + 4)) // 4, dtype=torch.int32, device='cuda'); out = torch.zeros(1, dtype=torch.int32, device='cuda')
 STAGES, SPIN = 240, 4_000_000

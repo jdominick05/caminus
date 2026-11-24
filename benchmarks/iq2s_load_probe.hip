@@ -1,6 +1,6 @@
 // IQ2_S load-shape probe (gfx1100): what the decode tile's weight loads cost by shape, at ThinkingCap's IQ2_S ffn size
 // (17408 x 5120: 2,785,280 units of 32 weights, 10 bytes each = 26.6 MiB, plus 2 bytes of d per 8 units).
-// The own tile (kernels/own_quant_iq2s.h) reads a unit's 10-byte record with ONE 16-byte load at a 10-byte stride:
+// The own tile (kernels/quant_iq2s.h) reads a unit's 10-byte record with ONE 16-byte load at a 10-byte stride:
 // 2-byte aligned, 6 of its 16 bytes another unit's. The arms read the same bytes with the tile's lane / unit mapping
 // (lane = unit within a row, 32 lanes a wave, 8 waves a workgroup, a row per wave pass) and keep every loaded word live:
 //   rec16   one 16-byte load at a 10-byte stride (today's layout)

@@ -1,14 +1,14 @@
 """Gate G1 of the GSQ port (docs/specs/spec-gsq-port.md S1): the GSQ-RCO Coder's (op, format) instances in the K3 engine
-(build/k3_gguf_gsq{,_mt}{,_trace}.hsaco, kernels/k3_gguf_gsq.hip), on real Coder tensors read with O_DIRECT (shard 1 only):
+(build/dec_q4x_gsq{,_ver}{,_trace}.hsaco, kernels/dec_q4x_gsq.hip), on real Coder tensors read with O_DIRECT (shard 1 only):
   MV       Q4_K Q5_K Q6_K IQ4_XS IQ4_NL Q8_0 (full matrices and the TP column splits), q8_1 and fp32 (AQ) activations
   MOE_GU   IQ2_S IQ3_XXS IQ3_S IQ4_XS (640 rows per expert and the TP row splits 384 / 256), h fp32 and h q8_1
   MOE_DOWN IQ4_NL Q2_0 (K 640 and the TP column splits 384 / 256)
 checks
   (a) the engine op is bitwise the standalone kernels (gg_mv_*; MoE: per-expert gg_mv_* composed with the engine's own
       silu (gg_silu_mul) or summed in llama.cpp's mul-then-add order) at 3 / 5 / 6 / 7 / 8 workgroups per WGP, every card;
-      Every case also checks build/gg_mv_ref.hsaco (llama.cpp's matvec as a test object: the G-acc yardstick, which stays
+      Every case also checks build/ref_gg_mv.hsaco (llama.cpp's matvec as a test object: the G-acc yardstick, which stays
       when the engine modules stop including the ggml headers) bitwise the module's standalone gg_mv_* and quantizer.
-  (b) T = 2 / 3 / 4 (the _mt module, named explicitly: k3.module_for sends k3_gguf_gsq at T > 1 to k3_gguf_gsq_qsa_mt; T = 2
+  (b) T = 2 / 3 / 4 (the _ver module, named explicitly: k3.module_for sends dec_q4x_gsq at T > 1 to dec_q4x_gsq_qsa_ver; T = 2
       and 3 leave partial token groups) rows are bitwise the T = 1 rows (different
       expert ids per token, some repeated);
   (c) float64 (gguf-py's dequantizer, the same q8_1 activations), over EVERY row of the MV matrices and EVERY expert of the
@@ -29,7 +29,7 @@ checks
       recorded at that op site: the bar each pair's own kernel must meet when it moves (--gacc-out writes it as JSON).
       The recording (record(); --record FILE) runs FlashNextTP on both cards under K3_TEST_HOOKS=gacc-sites.
   tools/guard.sh LOG 900 python -I tests/engine/test_k3_gguf_gsq.py [CODER-00001-of-00002.gguf] [--cards 0,1] [--wgp 3,5,6,7,8]
-      [--module k3_gguf_gsq | k3_gguf_gsq_trace] [--ops MV,MOE_GU,MOE_DOWN,REFUSE] [--c-cards 0,1]
+      [--module dec_q4x_gsq | dec_q4x_gsq_trace] [--ops MV,MOE_GU,MOE_DOWN,REFUSE] [--c-cards 0,1]
   K3_TEST_HOOKS=gacc-sites tools/guard.sh LOG 900 python -I tests/engine/test_k3_gguf_gsq.py --record ACTS.pt [--positions 24]
       [--tokens FILE,FILE,...]   (both cards; refuses an ACTS.pt that exists)
   HIP_VISIBLE_DEVICES=<one card> tools/guard.sh LOG 900 python -I tests/engine/test_k3_gguf_gsq.py --ops GACC --acts ACTS.pt
@@ -54,8 +54,8 @@ C_CARDS = [int(v) for v in opt('--c-cards', ','.join(map(str, CARDS))).split(','
 WGP = [int(v) for v in opt('--wgp', '3,5,6,7,8').split(',')]
 ONLY = opt('--only', None)   # debugging: only cases whose label contains this
 OPS = opt('--ops', 'MV,MOE_GU,MOE_DOWN,REFUSE').split(',')
-M1 = opt('--module', 'k3_gguf_gsq'); assert M1 in ('k3_gguf_gsq', 'k3_gguf_gsq_trace'), M1
-MT = M1.replace('k3_gguf_gsq', 'k3_gguf_gsq_mt')
+M1 = opt('--module', 'dec_q4x_gsq'); assert M1 in ('dec_q4x_gsq', 'dec_q4x_gsq_trace'), M1
+MT = M1.replace('dec_q4x_gsq', 'dec_q4x_gsq_ver')
 RECORD = opt('--record', None)        # (e)'s recording: write the recorded activations here (both cards), then exit
 ACTS = opt('--acts', None)            # (e): the recording to read
 POSITIONS = int(opt('--positions', '24'))   # teacher-forced positions per text (3 texts: 72 vectors per site)
@@ -172,15 +172,15 @@ def np_(t):
 
 
 def ref_q8(x):
-    """x fp32 [n] (cuda) -> q8_1 blocks with build/gg_mv_ref.hsaco's quantizer (tools/gates/gacc.py)"""
-    return gacc.ref_q8_1(G._m('gg_mv_ref'), x)
+    """x fp32 [n] (cuda) -> q8_1 blocks with build/ref_gg_mv.hsaco's quantizer (tools/gates/gacc.py)"""
+    return gacc.ref_q8_1(G._m('ref_gg_mv'), x)
 
 
 def ref_mv(w, qt, n, K, yq):
-    """llama.cpp's matvec from build/gg_mv_ref.hsaco (the yardstick that stays when the engine modules drop their gg_mv_*):
+    """llama.cpp's matvec from build/ref_gg_mv.hsaco (the yardstick that stays when the engine modules drop their gg_mv_*):
     w raw blocks of n contiguous rows (uint8, cuda), yq q8_1 -> fp32 [n]"""
     out = torch.empty(n, dtype=torch.float32, device=w.device)
-    getattr(G._m('gg_mv_ref'), 'gg_ref_mv_' + qt.name.lower())(((n + 3) // 4,), (32, 4), w, yq, out, ctypes.c_int(n), ctypes.c_int(K))
+    getattr(G._m('ref_gg_mv'), 'gg_ref_mv_' + qt.name.lower())(((n + 3) // 4,), (32, 4), w, yq, out, ctypes.c_int(n), ctypes.c_int(K))
     return out
 
 
@@ -213,7 +213,7 @@ def run_mv(card):
         xq = [G.quantize_q8_1(X[t]) for t in range(4)]
         ref = [G.matvec(w, qt, N, K, xq[t]) for t in range(4)]
         n_all += 1; n_ok += check(torch.equal(ref_q8(X[0]), xq[0]) and torch.equal(ref_mv(w, qt, N, K, xq[0]), ref[0]),
-                                  f'card {card} MV {fmt} {label}: gg_mv_ref != the module\'s standalone gg_mv / quantizer')
+                                  f'card {card} MV {fmt} {label}: ref_gg_mv != the module\'s standalone gg_mv / quantizer')
         rel = None
         if card in C_CARDS:   # (c) standalone vs float64, every row, tokens 0 and 3
             raw = np_(w)
@@ -265,7 +265,7 @@ def run_moe_gu(card):
             href = [G.silu_mul(torch.cat(gs[t]), torch.cat(us[t])) for t in range(4)]
             e0 = IDS[0][0]
             n_all += 1; n_ok += check(torch.equal(ref_mv(g[e0].reshape(-1), qt, F, D, xq[0]), gs[0][0]),
-                                      f'card {card} MOE_GU {fmt} rows {r0}:{r1}: gg_mv_ref != the module\'s standalone gg_mv')
+                                      f'card {card} MOE_GU {fmt} rows {r0}:{r1}: ref_gg_mv != the module\'s standalone gg_mv')
             if (r0, r1) == (0, 640) and card in C_CARDS:   # (c) every expert of gate and up, every row, against float64
                 x0 = np_(xq[0])
                 for kind, st in (('gate', g), ('up', u)):
@@ -316,7 +316,7 @@ def run_moe_down(card):
                 ref.append(torch.from_numpy(acc).to(dev))
             e0 = IDS[0][0]
             n_all += 1; n_ok += check(torch.equal(ref_mv(dw[e0].reshape(-1), qt, R, K, hq[0][:kb]), standalone_slab(dw, e0, R, qt, hq[0][:kb], K)),
-                                      f'card {card} MOE_DOWN {fmt} K {K}: gg_mv_ref != the module\'s standalone gg_mv')
+                                      f'card {card} MOE_DOWN {fmt} K {K}: ref_gg_mv != the module\'s standalone gg_mv')
             if card in C_CARDS:   # (c) every expert, every row (expert e against slot e % 10's activations)
                 for ex in range(E):
                     xs = hq[0][(ex % K_USED) * kb:(ex % K_USED + 1) * kb]
@@ -494,10 +494,10 @@ def gacc_cases(nl):
 def run_gacc(card):
     """(e) docs/specs/spec-own-quant.md's G-acc on the recorded activations (--acts): per tensor of gacc_cases, on sampled
     real rows (GACC_ROWS of each matrix; GACC_EXP_ROWS of each routed expert, with the vectors that routed to it), the
-    error |y - y_ref| / rms(y_ref) of llama.cpp's matvec (build/gg_mv_ref.hsaco on q8_1 of the recorded fp32 row), y_ref
+    error |y - y_ref| / rms(y_ref) of llama.cpp's matvec (build/ref_gg_mv.hsaco on q8_1 of the recorded fp32 row), y_ref
     the float64 dot of gguf-py's dequantized rows with that fp32 row; mean and p99 per tensor and pooled per (op, format):
     the bar a moved pair's own kernel must meet. Checks: >= 64 vectors and >= 256 distinct real rows per tensor, finite
-    errors, and gg_mv_ref bitwise the module's standalone gg_mv_* (and quantizer) on the first vector of every row set"""
+    errors, and ref_gg_mv bitwise the module's standalone gg_mv_* (and quantizer) on the first vector of every row set"""
     if ACTS is None: sys.exit('--ops GACC: name the recording with --acts FILE (written by --record)')
     dev = f'cuda:{card}'; n_ok = n_all = 0
     R = torch.load(ACTS); meta, shards, sites = R['meta'], R['shards'], R['sites']
@@ -537,7 +537,7 @@ def run_gacc(card):
         n_all += 1; n_ok += check(n_vec_site >= 64 and len(seen) >= min(GACC_ROWS, data.shape[0] * (data.shape[1] if data.ndim == 3 else 1)),
                                   f'card {card} G-acc {op} {fmt} {name}: {n_vec_site} vectors, {len(seen)} distinct rows (need 64, 256)')
         n_all += 1; n_ok += check(bool(np.isfinite(err).all()) and nd == 0, f'card {card} G-acc {op} {fmt} {name}: non-finite errors or {nd} zero references')
-        n_all += 1; n_ok += check(xbad == 0, f'card {card} G-acc {op} {fmt} {name}: gg_mv_ref != the module\'s gg_mv / quantizer in {xbad} row sets')
+        n_all += 1; n_ok += check(xbad == 0, f'card {card} G-acc {op} {fmt} {name}: ref_gg_mv != the module\'s gg_mv / quantizer in {xbad} row sets')
         pooled.setdefault((op, fmt), []).append(err)
         tensors.append(dict(tensor=name, op=op, fmt=fmt, split=split, rows=len(seen), vectors=n_vec_site, dots=int(err.size), mean=mean, p99=p99))
         print(f'  card {card} G-acc {op:8s} {fmt:7s} {name:30s} {split:8s} {len(seen):6d} rows, {n_vec_site} vectors, {err.size:7d} dots: '
@@ -550,7 +550,7 @@ def run_gacc(card):
         if os.path.exists(GACC_OUT): sys.exit(f'--gacc-out: {GACC_OUT} exists: refusing to overwrite (a stored baseline)')
         with open(GACC_OUT, 'w') as f:
             json.dump(dict(acts=os.path.basename(ACTS), acts_meta=meta, layers=GACC_LAYERS, rows=GACC_ROWS, exp_rows=GACC_EXP_ROWS,
-                           arm='llama.cpp (build/gg_mv_ref.hsaco)', pairs=pairs, tensors=tensors), f, indent=1)
+                           arm='llama.cpp (build/ref_gg_mv.hsaco)', pairs=pairs, tensors=tensors), f, indent=1)
         print(f' wrote {GACC_OUT}', flush=True)
     return n_ok, n_all
 

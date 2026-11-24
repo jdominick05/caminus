@@ -1,4 +1,4 @@
-"""Expert-indexed MoE ops in the K3 engine (OP_GG_MOE_GU / OP_GG_MOE_DOWN, build/k3_gguf.hsaco) on the real REAP-308-UI
+"""Expert-indexed MoE ops in the K3 engine (OP_GG_MOE_GU / OP_GG_MOE_DOWN, build/dec_q4x_gg.hsaco) on the real REAP-308-UI
 layer-0 expert stacks (IQ3_XXS gate / up, IQ4_NL down, 308 experts, top-10, ffn 640, d 2560), with the expert ids and
 router weights on the device:
   gate/up: h = silu(gate . x) * (up . x) equals a host-side composition of the standalone matvecs (g and u bitwise, h
@@ -31,7 +31,7 @@ wts = torch.softmax(torch.randn(K, device='cuda'), 0).contiguous()
 x = torch.randn(D, device='cuda') * 0.5
 xq = torch.empty(D // 32 * 36, dtype=torch.uint8, device='cuda'); h = torch.empty(K * FFN, device='cuda')
 hq = torch.empty(K * FFN // 32 * 36, dtype=torch.uint8, device='cuda'); out = torch.empty(D, device='cuda')
-e = k3.Engine(module='k3_gguf')
+e = k3.Engine(module='dec_q4x_gg')
 a = e.gg_q8_1(x, xq); b = e.gg_moe_gu(gate, up, gfmt, gslab, FFN, D, ids, xq, h, dep=a)
 c = e.gg_q8_1(h, hq, dep=b); e.gg_moe_down(down, dfmt, dslab, FFN, D, ids, wts, hq, out, dep=c)
 e.build().run()
@@ -57,7 +57,7 @@ print(f'down: out vs standalone matvecs summed in order: {"bitwise" if dok else 
 
 # speed
 for rgu, rdn in ((16, 8), (8, 8)):
-    L = 30; e = k3.Engine(module='k3_gguf'); prev = -1; byts = 0
+    L = 30; e = k3.Engine(module='dec_q4x_gg'); prev = -1; byts = 0
     for l in range(L):
         il = torch.tensor([(l * 10 + j) % 308 for j in range(K)], dtype=torch.int32, device='cuda')
         q1 = e.gg_q8_1(x, torch.empty_like(xq), dep=prev)

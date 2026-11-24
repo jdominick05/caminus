@@ -21,12 +21,12 @@ from caminus.prefill.q3m import Q3MPrefill
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf'); ap.add_argument('--lengths', default='512,4096'); ap.add_argument('--chunk', type=int, default=1024)
 ap.add_argument('--max-ctx', type=int, default=None); ap.add_argument('--rounds', type=int, default=3); ap.add_argument('--ops', action='store_true')
-ap.add_argument('--prefill-module', default=None, help='the prefill code object (default: by the file\'s formats; q3m_prefill_iq times a Q4_K_M file on the IQ study\'s object)')
+ap.add_argument('--prefill-module', default=None, help='the prefill code object (default: by the file\'s formats; pf_q3m_iq times a Q4_K_M file on the IQ study\'s object)')
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--modes', default='overlap')
 ap.add_argument('--micro', type=int, default=None); ap.add_argument('--min-piece', type=int, default=None)
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 ap.add_argument('--ab', action='store_true', help='one card: each round also on the narrow tiles (Ops.wide / gu False: the '
-                'q3m_prefill_mm wide tiles and fused gate | up off), interleaved; the last layer\'s KV rows of both arms bitwise')
+                'pf_q3m_mm wide tiles and fused gate | up off), interleaved; the last layer\'s KV rows of both arms bitwise')
 A = ap.parse_args()
 Ls = [int(x) for x in A.lengths.split(',')]
 if A.cards == 2:

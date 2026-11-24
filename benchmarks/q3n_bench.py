@@ -4,7 +4,7 @@ measures Flash-Next: greedy generation, each token from the previous pass (step_
 text (llama.cpp's own token ids from tools/reference/q3n_refs.sh), teacher-forced one token per pass; then N greedy tokens,
 timed per token, REPS times from the same prompt state (reset + refill), median over the tokens after the first 8.
 At --depth D the prompt is followed by D - len(prompt) more teacher-forced positions (the code text repeated) before
-generating (one-token passes: M1 has no batched prefill). --t4 also times the T = 4 verify pass (k3_gguf_q3n_mt).
+generating (one-token passes: M1 has no batched prefill). --t4 also times the T = 4 verify pass (dec_q3n_ver).
 usage: tools/guard.sh LOG SECS python -I benchmarks/q3n_bench.py REFS [--n 128] [--reps 3] [--depth D] [--t4] [--model GGUF]
 Compare: llama-bench tg128 on the same two cards ($ARTIFACTS/q3n/BASELINE.md): 81.8 tok/s at depth 0, 72.6 at 32K."""
 import os

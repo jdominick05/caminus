@@ -1,10 +1,10 @@
 """Gates of the batched prefill on both TP cards (docs/specs/spec-prefill-cache.md M5 S5; caminus.prefill.tp,
-kernels/prefill_tp.hip): the exchange with micro-chunk overlap, measured inside a whole 48-layer chunk.
+kernels/pf_tp.hip): the exchange with micro-chunk overlap, measured inside a whole 48-layer chunk.
 
   python -I tests/prefill/test_prefill_tp.py CODER STAGE... [--small] [--chunk 2048] [--reps 4] [--ms 1,2,3,4] [--moe own|mmq] [--no-moe-ab] [--json OUT]
 
 Stages:
-  cpu      CPU only, nothing launched (launch recorders stand in for the kernels): every refusal of the prefill_tp
+  cpu      CPU only, nothing launched (launch recorders stand in for the kernels): every refusal of the pf_tp
            launchers (short views, misaligned float4 buffers, overlapping written buffers) next to the positive controls
            (the in-place forms: the exchange sum over either partial, the combine over the shared expert's rows);
            micro_bounds (covers the chunk, every piece but the last on the 128-row grid, none empty); the exchange's
@@ -202,7 +202,7 @@ def stage_kernels(torch, dev, small):
         shx = acts(rng, T * D, 0.5); gshx = put(shx)
         P.moe_combine(gdn, gw, gshx, gsg, yc, T, k, D)
         ip = gshx.clone(); P.moe_combine(gdn, gw, ip, gsg, ip, T, k, D)
-        e = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1)
+        e = k3.Engine(module='dec_q4x_gsq', grid=k3.resident_grid('dec_q4x_gsq'), T=1)
         mb, sb, gb1, ob = (torch.zeros(D, device=dev) for _ in range(4))
         gb1 = torch.zeros(1, device=dev); e.shexp_add(mb, sb, gb1, ob); e.build()
         nt = min(T, 512); refk = torch.zeros(nt, D, device=dev); gacc = put(acc.reshape(T, D))
@@ -214,7 +214,7 @@ def stage_kernels(torch, dev, small):
         v = acts(rng, T * hd, 0.5); qf = acts(rng, T * nh * 2 * hd, 2.0)
         gv, gq = put(v), put(qf); ya = torch.zeros(T * nh * hd, device=dev)
         P.attn_standin(gv, gq, ya, T, nh, hd)
-        e2 = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=1)
+        e2 = k3.Engine(module='dec_q4x_gsq', grid=k3.resident_grid('dec_q4x_gsq'), T=1)
         ab, qb, gob = torch.zeros(nh * hd, device=dev), torch.zeros(nh * 2 * hd, device=dev), torch.zeros(nh * hd, device=dev)
         e2.gate_mul(ab, qb, 2 * hd, hd, gob, hd); e2.build()
         refa = torch.zeros(nt, nh * hd, device=dev)

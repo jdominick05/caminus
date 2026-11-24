@@ -1,4 +1,4 @@
-"""kernels/q3m_prefill.hip (the qwen3moe batched prefill's own kernels) against float64 on the model's real rows and random
+"""kernels/pf_q3m.hip (the qwen3moe batched prefill's own kernels) against float64 on the model's real rows and random
 activations; needs the Qwen3-30B-A3B Q4_K_M GGUF and one card (under 1 GB: projected from the file's header and checked
 against the card's guard line before the first transfer).
 
@@ -6,7 +6,7 @@ against the card's guard line before the first transfer).
             Q6_K experts (blk.0 down) through q3p_group's work items, token counts that leave partial tiles: max and
             mean |y - ref| / rms(ref) within fp32-accumulation bounds (the weights are exact in the B operand); Q4_K with
             tokens whose sub-block sums pass fp16's range (the min term's fallback): finite, the same bound, and every
-            other token bitwise its rows without them. Each GEMM runs on the wide tiles (kernels/q3m_prefill_mm.hip, what
+            other token bitwise its rows without them. Each GEMM runs on the wide tiles (kernels/pf_q3m_mm.hip, what
             the one-card prefill launches) and again on the narrow ones (Ops.wide False): every output bitwise; the
             fused gate | up (q3p_mm_q4k_gu) bitwise the narrow gate and up GEMMs and q3p_swiglu
   glue      q3p_emb bitwise caminus.own_dequant's rows; add_rms16, router, swiglu vs float64; topk's ids equal numpy's

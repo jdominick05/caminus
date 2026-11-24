@@ -1,4 +1,4 @@
-"""K3 M1 step 1: the decode matvec (kernels/k3_mv.hip) is bit-identical to the training GEMM gemm_tn_iu4g for the row
+"""K3 M1 step 1: the decode matvec (kernels/dec_core_mv.hip) is bit-identical to the training GEMM gemm_tn_iu4g for the row
 it shares, on every S1 linear shape: random int4 codes and g128 scales, the token as row r of an M = 64 batch (the
 other rows random), bf16 and fp32 outputs. Includes extreme codes (-8 x -8, 7 x -8) and real activation codes from
 actq on a real-scale row.

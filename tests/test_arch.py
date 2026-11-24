@@ -411,7 +411,7 @@ def main():
               f'{need_o(4096)[0]:.1f} (the adapter ring {ring:.4f} MiB included), no header-key error')
         # the default drafter (no --draft): the table's kind when the file has the MTP block, plain without it, on one card
         # and two (the table here: off on two cards); the Coder keeps DFlash
-        # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's k3_q35_gsq)
+        # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's dec_q35_gsq)
         from caminus import ggufio as _gio
         from caminus.engine import q35_dense as _qd
         _F = _gio.GGUFFile(q35); mod = _qd.module_of(_F); _F.close()
@@ -423,12 +423,12 @@ def main():
                        [('token_embd.weight', 64, 997), ('output.weight', 64, 997)])
             got = (own.default_draft(dict(model=q35)), own.default_draft(dict(model=q35n)),
                    own.variant(2).default_draft(dict(model=q35)), arch.ARCHS['qwen4exp'].default_draft({}))
-            _qd.module_of = lambda F: 'k3_q35_gsq'      # (a file the GSQ module decodes: not in the table)
+            _qd.module_of = lambda F: 'dec_q35_gsq'      # (a file the GSQ module decodes: not in the table)
             got_gsq = own.default_draft(dict(model=q35))
         finally:
             arch.Dense35.DRAFT_DEFAULT, _qd.module_of = keep_d, keep_mo
         check(got == ('mtp', 'off', 'off', 'dflash') and got_gsq == 'off',
-              f'default_draft: mtp file / no block / two cards / the Coder: {got}; a k3_q35_gsq file (no drafter yet): {got_gsq}')
+              f'default_draft: mtp file / no block / two cards / the Coder: {got}; a dec_q35_gsq file (no drafter yet): {got_gsq}')
         # the default drafter's file is optional: a default --draft dflash without it serves plain; an explicit one refuses
         from caminus.serve import cli as _cli
         keep_d, keep_of = arch.Dense35.DRAFT_DEFAULT, _cli._arch.of
@@ -472,9 +472,9 @@ def main():
         dd = arch.Dense35.DRAFT_DEFAULT
         from caminus.engine import k3 as _k3
         tpv = {one for one, tpm in _k3.Q35_TP_OF.items() if tpm in _k3.Q35_TPV_OF}
-        check(all(dd[(m, 1)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap', 'k3_q35_gsq'))
-              and all(dd[(m, 2)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap'))
-              and {m for (m, c) in dd if c == 2} == tpv == {'k3_q35_swift', 'k3_q35_tcap'} and ('k3_q35_gsq', 2) not in dd,
+        check(all(dd[(m, 1)] == 'dflash' for m in ('dec_q35_swift', 'dec_q35_tcap', 'dec_q35_gsq'))
+              and all(dd[(m, 2)] == 'dflash' for m in ('dec_q35_swift', 'dec_q35_tcap'))
+              and {m for (m, c) in dd if c == 2} == tpv == {'dec_q35_swift', 'dec_q35_tcap'} and ('dec_q35_gsq', 2) not in dd,
               f'default_draft: DFlash2 for the three dense 27B files on one card and for the two with a two-card verify '
               f'object on two cards ({dd}; two-card verify for {sorted(tpv)})')
         tpa = arch.ARCHS['qwen35-own-tp']

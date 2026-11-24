@@ -1,4 +1,4 @@
-"""Q3MoEVerify (qwen3moe, T-token verify passes on kernels/k3_q3m_ver.hip) against Q3MoEOne's decode steps on the same
+"""Q3MoEVerify (qwen3moe, T-token verify passes on kernels/dec_q3m_ver.hip) against Q3MoEOne's decode steps on the same
 tokens and positions: the logits and the next decode step bit for bit, for T = 1 .. 4, on real consecutive tokens (this
 repository's docs as text) over a prefilled context, and on one token repeated from an empty context (the tokens of a
 pass then route alike: an expert has up to 4 member slots). Before each T's passes the cache rows of the checked span are
@@ -133,9 +133,9 @@ def raises(fn, exc):
     try: fn()
     except exc: return True
     return False
-check(raises(lambda: Q3MoEVerify(eng, MAX_T + 1), ValueError) and raises(lambda: Q3MoEVerify(eng, 2, module='k3_q3m_lean'), ValueError),
+check(raises(lambda: Q3MoEVerify(eng, MAX_T + 1), ValueError) and raises(lambda: Q3MoEVerify(eng, 2, module='dec_q3m'), ValueError),
       f'T {MAX_T + 1} and a decode module are refused at construction')
-e2 = k3.Engine(module='k3_q3m_lean'); h = torch.zeros(eng.D, dtype=torch.float16, device='cuda'); o = torch.zeros(2 * eng.D, device='cuda')
+e2 = k3.Engine(module='dec_q3m'); h = torch.zeros(eng.D, dtype=torch.float16, device='cuda'); o = torch.zeros(2 * eng.D, device='cuda')
 w = eng.L[0]['attn_output']
 check(raises(lambda: e2.own_matvec_1rt(w[3], w[0], w[1], w[2], torch.zeros(2 * eng.nh * eng.hd, dtype=torch.float16, device='cuda'), o, tokens=2,
                                        x_stride=eng.nh * eng.hd, out_stride=eng.D), ValueError),

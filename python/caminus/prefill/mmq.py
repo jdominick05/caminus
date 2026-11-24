@@ -26,8 +26,8 @@
 # SOFTWARE.
 
 """Quantized GEMMs for the batched prefill (docs/specs/spec-prefill-cache.md S2): llama.cpp's ggml-cuda MMQ, vendored in
-kernels/ggml_mmq (MIT; tools/release/vendor_mmq.py) and built by build.sh into build/prefill_mmq_<format>.hsaco (one per format)
-and build/prefill_mmq_glue.hsaco (the activation quantizer, mul_mat_id's grouping). This module is ggml's host launch
+kernels/ggml_mmq (MIT; tools/release/vendor_mmq.py) and built by build.sh into build/pf_gg_mmq_<format>.hsaco (one per format)
+and build/pf_gg_mmq_glue.hsaco (the activation quantizer, mul_mat_id's grouping). This module is ggml's host launch
 code for them (ggml-cuda/mmq.cu ggml_cuda_mul_mat_q, mmq.cuh launch_mul_mat_q), in Python, on the K3 TP shards:
 
   mm(fmt, w, rows, K, y, ncols, dst)            dst[c, r] = sum_k W[r, k] * x[c, k]   (y: x quantized by quantize())
@@ -70,7 +70,7 @@ from ..device.hip import BUILD, Kernel, Module, check, hip
 from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType as _Q
 
 FORMATS = ('IQ2_S', 'IQ3_S', 'IQ3_XXS', 'IQ4_NL', 'IQ4_XS', 'Q2_0', 'Q4_K', 'Q5_K', 'Q6_K', 'Q8_0')   # MMQ()'s default (the Coder's)
-FORMATS_ALL = FORMATS + ('Q3_K',)                                # every prefill_mmq_<format> object (Q3_K: qwen35moe HauhauCS)
+FORMATS_ALL = FORMATS + ('Q3_K',)                                # every pf_gg_mmq_<format> object (Q3_K: qwen35moe HauhauCS)
 TYPE_ID = {f: int(_Q[f]) for f in FORMATS_ALL}                  # ggml_type
 BLOCK = {f: GGML_QUANT_SIZES[_Q[f]] for f in FORMATS_ALL}       # (values, bytes) per block
 MATRIX_ROW_PADDING = 512                                        # ggml-cuda common.cuh
@@ -184,8 +184,8 @@ class MMQ:
     _RE_Q = re.compile(r'^_ZL17quantize_mmq_q8_1IL18mmq_q8_1_ds_layout(\d)ELb([01])EE')
     _RE_IDS = re.compile(r'^_ZL13mm_ids_helperILi(\d+)EE')
 
-    def __init__(self, device, formats=FORMATS, glue='prefill_mmq_glue'):
-        """glue: the quantizer + grouping object (prefill_mmq_glue: mm_ids_helper<10>, the Coder; prefill_mmq_glue8: <8>, qwen35moe)"""
+    def __init__(self, device, formats=FORMATS, glue='pf_gg_mmq_glue'):
+        """glue: the quantizer + grouping object (pf_gg_mmq_glue: mm_ids_helper<10>, the Coder; pf_gg_mmq_glue8: <8>, qwen35moe)"""
         self.dev = torch.device(device)
         assert self.dev.type == 'cuda', device
         self.cfg, self.kmm, self.mods = {}, {}, {}
@@ -202,7 +202,7 @@ class MMQ:
             for f in formats: self._load(f)
 
     def _load(self, fmt):
-        name = f'prefill_mmq_{fmt.lower()}'
+        name = f'pf_gg_mmq_{fmt.lower()}'
         with torch.cuda.device(self.dev):
             mod = Module(name); self.mods[name] = mod
             out = torch.zeros(64 * CFG_WORDS, dtype=torch.int32, device=self.dev); cnt = torch.zeros(1, dtype=torch.int32, device=self.dev)
@@ -394,7 +394,7 @@ def moe_tiles(ncols, n_exp):
     return int(n_exp) + (int(ncols) + MOE_J_MIN - 1) // MOE_J_MIN
 
 
-WMMA_ROWS = 128   # gemm.hip's token tile (prefill_ops.TPAD): a WMMA GEMM writes whole 128-row tiles
+WMMA_ROWS = 128   # pf_gemm.hip's token tile (prefill_ops.TPAD): a WMMA GEMM writes whole 128-row tiles
 
 
 def workspace_layout(T, d):
@@ -410,7 +410,7 @@ def workspace_layout(T, d):
     as test tensors outside every count (+82 MiB measured on the XT at chunk 2048); the chunk loop (S4 / S6 / S7) writes
     them, and may alias them onto outputs it no longer needs (then they leave this layout and the count). The dense GEMMs'
     outputs (o_qkv .. o_sh_down) hold whole 128-row WMMA tiles (tpad(T) rows: the same bytes at T a multiple of 128), since
-    ChunkStack(q6k='wmma') writes them on gemm.hip (its other buffers: caminus.prefill.dense.Bf16Workspace). Each buffer is
+    ChunkStack(q6k='wmma') writes them on pf_gemm.hip (its other buffers: caminus.prefill.dense.Bf16Workspace). Each buffer is
     ALIGN-aligned in one allocation"""
     T, k = int(T), d['k']
     Tw = -(-T // WMMA_ROWS) * WMMA_ROWS                 # the dense outputs at whole WMMA row tiles (ChunkStack(q6k='wmma'))

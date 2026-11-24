@@ -12,7 +12,7 @@
              the halves the F16 row kernel stores for the same q | k | v (the chunk's own last-layer buffer)
   tools/guard.sh LOG 900 python -I tests/prefill/test_q3m_prefill.py GGUF --ref REF.npz [--llama LL.bin] [--from P] [--kv q8]
 --kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True): q3p_qk_rope_q8 / q3mp_attn_q8 and
-k3_q3m_lean_kvq8); the same G-model, geometry and bounds checks.
+dec_q3m_kvq8); the same G-model, geometry and bounds checks.
 New kernel code: a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -62,7 +62,7 @@ def q8_rows_check(last):
     from caminus import ref_kv
     from caminus.prefill import q3m_ops
     Mk = eng.nkv * eng.hd; ldq = eng.nh * eng.hd + 2 * Mk; lay = ref_kv.Q8KVLayout(eng.nkv, eng.hd)
-    oops = q3m_ops.Ops(torch.device(f'cuda:{eng.dev}'), 'q3m_prefill')
+    oops = q3m_ops.Ops(torch.device(f'cuda:{eng.dev}'), 'pf_q3m')
     oc = torch.zeros(P * 2 * Mk, dtype=torch.float16, device='cuda'); oq = torch.zeros(P * eng.nh * eng.hd, dtype=torch.float16, device='cuda')
     oops.qk_rope(pf.qkv, ldq, eng.nh, eng.nkv, eng.L[-1]['qk_par'], 0, oq, oc, P); torch.cuda.synchronize()
     hh = oc.float().cpu().numpy().reshape(P, 2, eng.nkv, eng.hd)

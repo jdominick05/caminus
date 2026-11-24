@@ -14,7 +14,7 @@ files at --commit and compares them with headers that carry --label (only the co
 passes exactly when the fork's files are the same at both commits.
 
 Device code is kept verbatim; the only changes, all in mmq.cuh, are listed in EDITS (the host launch code is replaced by
-python/caminus/prefill/mmq.py, and only the RDNA3 config is compiled in). kernels/prefill_mmq.hip instantiates the kernels; build.sh
+python/caminus/prefill/mmq.py, and only the RDNA3 config is compiled in). kernels/pf_gg_mmq.hip instantiates the kernels; build.sh
 compiles it against the same fork's base headers (common.cuh, mma.cuh, vecdotq.cuh, ggml-common.h), as the decode modules do.
 """
 import argparse, os, re, subprocess, sys
@@ -73,7 +73,7 @@ EDITS = [
 # the two config dispatchers (host, device): bodies replaced by the RDNA3 config (regex on the whole function)
 DISPATCH = [
     ('host config dispatcher: the RDNA3 config (the host launch is python/caminus/mmq.py, which reads the configs from '
-     'the device: kernels/prefill_mmq.hip k3_mmq_configs)',
+     'the device: kernels/pf_gg_mmq.hip k3_mmq_configs)',
      r'static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config\(const ggml_type type, const int J, const bool fallback, const int cc, const ggml_prec prec_src1\) \{\n.*?\n\}\n',
      'static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type type, const int J, const bool fallback, const int cc, const ggml_prec prec_src1) {\n'
      '    GGML_UNUSED_VARS(cc, prec_src1);\n    return ggml_cuda_mmq_get_config_rdna3(type, J, fallback); // [caminus] RDNA3 only\n}\n'),

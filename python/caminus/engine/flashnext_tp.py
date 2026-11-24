@@ -71,13 +71,13 @@ class FlashNextTP(FlashNextK3):
         XT) instead, beside the K3 drafter (caminus.decode.dflash) that reads it there (the residual is the same bits on both cards).
         tape_only: build the tapes even if their module lacks some (op, format) pair (k3.Engine.build(strict=False):
         self.engines[c].inventory() / unsupported() to inspect; a launch is refused); else such a tape raises at build.
-        module: 'k3_gguf' (the REAP-308 cut's formats) or 'k3_gguf_gsq' (the GSQ-RCO Coder's whitelist, with OP_BF16_MV);
+        module: 'dec_q4x_gg' (the REAP-308 cut's formats) or 'dec_q4x_gsq' (the GSQ-RCO Coder's whitelist, with OP_BF16_MV);
         None picks it from the tensor formats (flashnext.pick_module).
         A split GGUF is given by its first shard (the PLE table is read from its own shard with O_DIRECT).
         max_ctx: the KV cache's positions per attention layer (ntok <= max_ctx <= the model's context_length). Every pass's
         positions i0 .. i0 + ntok - 1 and its commit are checked against it on the host before anything is staged or
         launched (k3.check_span; k3.ContextBoundsError), and on the device k3_run's prologue skips the whole tape when a
-        position leaves the cache's allocation or the commit leaves [0, ntok] (defense in depth, kernels/k3.hip: nothing
+        position leaves the cache's allocation or the commit leaves [0, ntok] (defense in depth, kernels/dec_core.hip: nothing
         written; the engine then refuses passes until reset()). Up to the model's context_length (262,144).
         QSA (docs/specs/spec-qsa.md): qsa=None (auto) wires the model's QSA attention into the 12 attention layers of the
         GSQ-RCO Coder when max_ctx > capacity.QSA_EXACT (2051): per layer the indexer (k_proj / q_proj BF16 matvecs on the
@@ -391,10 +391,10 @@ class FlashNextTP(FlashNextK3):
         # hc up (10240 rows): block half 107 tasks (XTX) / 160 (XT), FFN half 320 on both (best measured; 640 before);
         # router logits (308 rows): 77 tasks of 4 rows (154 x 2 before); attn_qkv on the XT (3840 rows): 160 tasks, one
         # round of its 210 WGs. Kept at 16 / 8: attn_q, MoE gate-up / down (larger rpt measured slower or no better).
-        # fn_bench 96 --tp: 16.16 -> 15.81 ms/token. Re-swept with the loads-first Q8_0 rows (k3_gguf_ops.h gg_mv1): block
+        # fn_bench 96 --tp: 16.16 -> 15.81 ms/token. Re-swept with the loads-first Q8_0 rows (ops_gg.h gg_mv1): block
         # half hc up on the XT 64 -> 32 rows (320 tasks), 10.77 -> 10.70 ms/token; the others stay (XTX block 32 / 64 / 128,
         # FFN 16 / 40 / 48 / 64, hc down 4: no better)
-        # T > 1 (the k3_gguf_mt module, swept on the T=4 verify pass at fixed positions, tmp/ceiling/s13/sweep_t4.py): ssm_out
+        # T > 1 (the dec_q4x_gg_ver module, swept on the T=4 verify pass at fixed positions, tmp/ceiling/s13/sweep_t4.py): ssm_out
         # and attn_output 16 -> 8, router logits 2 -> 4, shared-expert down 16 -> 32, hc down 8 -> 4 rows per task: 17.28 ->
         # 16.44 ms per pass (per card no further gain above noise; hc up, qkv, attn_q, MoE, head, z flat or worse); re-swept
         # with the T > 1 prefetch off: all at their optimum but the shared-expert down, 32 -> 64 (16.16 -> 16.09)
@@ -453,7 +453,7 @@ class FlashNextTP(FlashNextK3):
         # each layer's selection rows [T][QSA_SELW]
         prow = (self.max_ctx + 3) // 4
         self.qsa_score, self.qsa_sel = [], [[], []]
-        # the split attention (the Coder's modules, k3.ATTN_SPLIT_MODULES: kernels/k3_attn_split.h): the longest cell list a
+        # the split attention (the Coder's modules, k3.ATTN_SPLIT_MODULES: kernels/ops_attn_split.h): the longest cell list a
         # pass row can have (the dense tape stops below QSA_EXACT unless dense_beyond_qsa; a QSA row keeps <= QSA_EXACT
         # cells) and one record buffer per card for every attention layer of both tapes (a layer's PART starts only after
         # the previous layer's COMB, through the residual chain), allocated by the first split attention segment
@@ -509,7 +509,7 @@ class FlashNextTP(FlashNextK3):
                     e.params = self.stage[c][0:16].view(torch.int32); assert e.params.data_ptr() == pos[c].data_ptr() - 64; out.append(e)
             return out
 
-        # pre-wait prefetch byte cap per matvec (k3_gguf_ops.h k3_extra_prefetch; Seg.aux = cap + 1, 0 = the whole task):
+        # pre-wait prefetch byte cap per matvec (ops_gg.h k3_extra_prefetch; Seg.aux = cap + 1, 0 = the whole task):
         # the first 16 KB of each task (fn_bench 96 --tp 10.74 -> 10.40 ms/token; uncapped hc down tasks are 87 KB, three
         # serial rounds before the dependency wait). Env K3_PF_CAP = 'name-regex:bytes,...' overrides (re.search on the
         # tensor name, or f32_router_logits / f32_shexp_gate; first match wins; 0 = off)
@@ -520,7 +520,7 @@ class FlashNextTP(FlashNextK3):
         # BF16 rows per task (OP_BF16_MV only, so REAP-308's Q8_0 / F32 segments keep RPT's values): BF16_RPT below, then the
         # call site's value; env K3_BF16_RPT = 'name-regex:rpt,...' goes first (re.search on the tensor name, or
         # f32_router_logits / f32_shexp_gate; first match wins; 'a/b': card 0 / 1). Swept on the Coder with the split-K
-        # kernel (k3_gguf_ops.h bf16_sk / bf16_short; tmp/m1/s6/bf/sweep_coder.py, interleaved, bitwise in every config):
+        # kernel (ops_gg.h bf16_sk / bf16_short; tmp/m1/s6/bf/sweep_coder.py, interleaved, bitwise in every config):
         # T = 1: hc down 8 -> 1 row (each row is one workgroup's 8 waves now; 40 -> 320 tasks): 11.79 -> 10.71 ms/token;
         # inject, alpha / beta, router, PLE, hc up and output_hc flat or worse. T > 1: hc down 4 -> 2, alpha / beta 16 -> 4,
         # router logits 4 -> 2: T=4 pass 20.98 -> 20.11 ms (hc down 1 / 3 / 8, alpha / beta 2 / 8, router 1 / 8: no better or
@@ -533,7 +533,7 @@ class FlashNextTP(FlashNextK3):
                   for k, v in [e.rsplit(':', 1) for e in os.environ.get('K3_BF16_RPT', '').split(',') if e] + BF16_RPT]
         bfr = lambda name, rpt, c: next((v[c] for k, v in bf_rpt if k.search(name)), rpt)
 
-        # GG (K-quant) rows per task of the GSQ-RCO Coder (k3_gguf_gsq modules only: REAP-308 keeps RPT and the call sites'
+        # GG (K-quant) rows per task of the GSQ-RCO Coder (dec_q4x_gsq modules only: REAP-308 keeps RPT and the call sites'
         # values): GG_RPT below, then RPT / the call site's value; env K3_GG_RPT = 'name-regex:rpt,...' goes first (any
         # module; re.search on the tensor name, first match wins; 'a/b': card 0 / 1). Every OP_GG_MV path clamps the last
         # task (r1 = min(N, r0 + rpt)), so any value is bitwise the same. Swept per card on the Coder's TP pass at grids

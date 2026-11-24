@@ -1,4 +1,4 @@
-"""Gates of the batched prefill's own dense quantized GEMMs (caminus.prefill.dense, kernels/prefill_dense.hip): the Q6_K dense matrices
+"""Gates of the batched prefill's own dense quantized GEMMs (caminus.prefill.dense, kernels/pf_gg_dense.hip): the Q6_K dense matrices
 against the vendored MMQ's mul_mat_q they replace (caminus.prefill.mmq.MMQ.mm), on the same quantized activations.
 
   python -I tests/prefill/test_prefill_dense.py CODER STAGE... [--small] [--vds 0,1,2,3] [--json OUT] [--reps N]
@@ -24,7 +24,7 @@ Stages (one card, cuda:0: HIP_VISIBLE_DEVICES picks it; the XT first for a chang
   speed  per shape at n 1024 / 2048: MMQ (mmq.mm, llama.cpp's J) vs ours per VD (dense.choose_J, and every J for the default
          VD), interleaved rounds, medians of --reps launches per round, 3 rounds; the longest single launch; the 48 layers'
          dense Q6_K ms per chunk (the Coder's per-layer counts) for chunk 2048 as 1 x 2048 and 2 x 1024; for reference the
-         bf16 WMMA GEMM (gemm.hip, round_bf16) and torch's bf16 F.linear at the same shapes (no dequantization counted)
+         bf16 WMMA GEMM (pf_gemm.hip, round_bf16) and torch's bf16 F.linear at the same shapes (no dequantization counted)
 Prints PASS / FAIL per check and RESULT PASS / FAIL; exit 0 = PASS."""
 import argparse, json, os, statistics, sys, time
 import numpy as np
@@ -321,7 +321,7 @@ def deq64(raw, R, K):
 
 
 def stage_tol(torch, rd, ref_stock, scratch):
-    """candidate (b) (ChunkStack(q6k='wmma'): dense.deq_bf16 + the activation's bf16 copy + gemm.hip's WMMA) as a measured
+    """candidate (b) (ChunkStack(q6k='wmma'): dense.deq_bf16 + the activation's bf16 copy + pf_gemm.hip's WMMA) as a measured
     tolerance: its error vs fp64 <= llama.cpp's own batched op's (the stock build's hipBLAS path for dense Q6_K above 128
     columns: --ref-stock gg_mmq_ref), max |err| / max |ref| and mean |err| / mean |ref|, with the bf16-rounded output
     (prefill_ops.WMMA_OUT's default) and fp32; the dequantization's bytes in a guarded buffer, == fp32 d * sc * q rounded to

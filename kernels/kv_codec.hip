@@ -2,7 +2,7 @@
 // enable a model's cache format: attention / transforms / persistence must agree
 // before a model may use it. The same block codec is compiled in the host gate.
 #include <hip/hip_runtime.h>
-#include "own_kv_codec.h"
+#include "kv_codec_ops.h"
 
 // Error bits: 1 position span, 2 numerical domain, 4 layout. Any error makes the
 // WHOLE append unusable; valid blocks may already be written. Invalid blocks and

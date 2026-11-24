@@ -1,13 +1,13 @@
-"""The Qwen3.6-35B-A3B one-card engine's (op, format) instances (build/k3_gguf_q35h{,_mt}.hsaco, kernels/k3_gguf_q35h.hip),
+"""The Qwen3.6-35B-A3B one-card engine's (op, format) instances (build/dec_q35m_hh{,_ver}.hsaco, kernels/dec_q35m_hh.hip),
 on real HauhauCS Q3_K_P tensors read with O_DIRECT, as tests/engine/test_k3_gguf_gsq.py checks the Coder's:
   MV       Q3_K Q4_K Q5_K Q6_K (whole matrices: one card, no splits), q8_1 and fp32 (AQ) activations
   MOE_GU   Q3_K (layer 0) Q5_K (layer 20), 512 rows per expert, h fp32 and h q8_1
   MOE_DOWN Q4_K (layer 2) Q5_K (layer 0), K 512
-checks (a) the engine op is bitwise the standalone kernels (gg_mv_*; gg_mv_q3_k is built into k3_gguf_q35h only, K3_MV_Q3K)
-at each --wgp grid; (b) T = 2 / 3 / 4 rows (the _mt module) are bitwise the T = 1 rows; (c) float64 (gguf-py's dequantizer,
+checks (a) the engine op is bitwise the standalone kernels (gg_mv_*; gg_mv_q3_k is built into dec_q35m_hh only, K3_MV_Q3K)
+at each --wgp grid; (b) T = 2 / 3 / 4 rows (the _ver module) are bitwise the T = 1 rows; (c) float64 (gguf-py's dequantizer,
 the same q8_1 activations) over every row / every expert: rel <= 1e-6; (d) unlisted (op, format) pairs refused, a forced
 launch writes nothing. New kernel code: run it on the XT alone first (HIP_VISIBLE_DEVICES=1, --cards 0).
-  tools/guard.sh LOG SECS python -I tests/engine/test_q36_formats.py GGUF [--module k3_gguf_q35h | k3_gguf_q35g] [--cards 0] [--wgp 3,6,7,8]
+  tools/guard.sh LOG SECS python -I tests/engine/test_q36_formats.py GGUF [--module dec_q35m_hh | dec_q35m_gg] [--cards 0] [--wgp 3,6,7,8]
       [--ops MV,MOE_GU,MOE_DOWN,BF16,REFUSE]
       [--small] (--small: the first case of each op only, grids 8 only)"""
 import os, sys
@@ -31,8 +31,8 @@ SMALL = '--small' in a
 if SMALL: a.remove('--small'); WGP = [8]
 ONLY = opt('--only', None)   # debugging: only cases whose label contains this
 OPS = opt('--ops', 'MV,MOE_GU,MOE_DOWN,BF16,REFUSE').split(',')
-M1 = opt('--module', 'k3_gguf_q35h'); assert M1 in ('k3_gguf_q35h', 'k3_gguf_q35g'), M1
-MT = M1 + '_mt'
+M1 = opt('--module', 'dec_q35m_hh'); assert M1 in ('dec_q35m_hh', 'dec_q35m_gg'), M1
+MT = M1 + '_ver'
 PATH = a[0] if a else devpaths.catalog('qwen3.6-hauhau', 'HAUHAU')
 RD = G.GGUFReader(PATH, 'r'); TT = {t.name: t for t in RD.tensors}
 DR = DirectReader(PATH)
@@ -149,12 +149,12 @@ def np_(t):
 
 # ---- MV ----
 MV_CASES = {  # (name, None): whole matrices, every format the module lists
-    'k3_gguf_q35h': [
+    'dec_q35m_hh': [
         ('blk.1.attn_gate.weight', None), ('blk.0.ssm_out.weight', None), ('blk.11.attn_q.weight', None), ('blk.1.ssm_alpha.weight', None),   # Q3_K
         ('blk.3.attn_output.weight', None), ('blk.4.attn_qkv.weight', None), ('blk.2.ffn_down_shexp.weight', None),                       # Q4_K
         ('blk.0.attn_gate.weight', None), ('blk.0.ssm_alpha.weight', None), ('blk.0.ffn_down_shexp.weight', None), ('blk.20.ffn_gate_shexp.weight', None),  # Q5_K
         ('output.weight', None)],                                                                                                         # Q6_K
-    'k3_gguf_q35g': [   # Q8_0 everywhere dense (the GSQ checkpoint's INT8 weights)
+    'dec_q35m_gg': [   # Q8_0 everywhere dense (the GSQ checkpoint's INT8 weights)
         ('blk.0.attn_qkv.weight', None), ('blk.0.ssm_out.weight', None), ('blk.3.attn_q.weight', None), ('blk.3.attn_k.weight', None),
         ('blk.0.ffn_down_shexp.weight', None), ('blk.0.ffn_gate_shexp.weight', None), ('output.weight', None)],
 }[M1]
@@ -203,8 +203,8 @@ def run_mv(card):
 
 
 # ---- MoE ----
-GU_LAYERS, DOWN_LAYERS = {'k3_gguf_q35h': ({'Q3_K': 0, 'Q5_K': 20}, {'Q4_K': 2, 'Q5_K': 0}),
-                          'k3_gguf_q35g': ({'Q2_0': 0}, {'Q2_0': 0})}[M1]
+GU_LAYERS, DOWN_LAYERS = {'dec_q35m_hh': ({'Q3_K': 0, 'Q5_K': 20}, {'Q4_K': 2, 'Q5_K': 0}),
+                          'dec_q35m_gg': ({'Q2_0': 0}, {'Q2_0': 0})}[M1]
 if SMALL: GU_LAYERS = dict(list(GU_LAYERS.items())[:1]); DOWN_LAYERS = dict(list(DOWN_LAYERS.items())[:1])
 IDS = [[0, 255, 17, 42, 99, 150, 200, 7], [255, 3, 17, 64, 0, 77, 190, 128],
        [5, 6, 7, 8, 250, 251, 252, 253], [17, 0, 255, 42, 99, 1, 2, 128]]   # T = 4: repeats across tokens
@@ -300,7 +300,7 @@ def run_moe_down(card):
     return n_ok, n_all
 
 
-# ---- BF16 (k3_gguf_q35g: ssm_alpha / ssm_beta) ----
+# ---- BF16 (dec_q35m_gg: ssm_alpha / ssm_beta) ----
 def run_bf16(card):
     """OP_BF16_MV on the GSQ checkpoint's BF16 matrices vs float64 (bf16 values are exact in float64): rel <= 1e-6, T = 4 rows ==
     T = 1, every grid. The Coder's tests/engine/test_k3_bf16_mv.py checks the same op bitwise against llama.cpp's mmvf"""
@@ -330,9 +330,9 @@ def run_bf16(card):
 
 # ---- (d) unlisted pairs ----
 UNLISTED = {
-    'k3_gguf_q35h': [('MV', 'IQ3_S'), ('MV', 'IQ4_XS'), ('MV', 'Q8_0'), ('MV', 'IQ4_NL'), ('MOE_GU', 'Q4_K'), ('MOE_GU', 'IQ3_XXS'),
+    'dec_q35m_hh': [('MV', 'IQ3_S'), ('MV', 'IQ4_XS'), ('MV', 'Q8_0'), ('MV', 'IQ4_NL'), ('MOE_GU', 'Q4_K'), ('MOE_GU', 'IQ3_XXS'),
                      ('MOE_GU', 'Q6_K'), ('MOE_DOWN', 'Q3_K'), ('MOE_DOWN', 'Q6_K'), ('MOE_DOWN', 'IQ4_XS')],
-    'k3_gguf_q35g': [('MV', 'Q4_K'), ('MV', 'Q6_K'), ('MV', 'IQ4_XS'), ('MV', 'Q3_K'), ('MOE_GU', 'Q4_K'), ('MOE_GU', 'IQ3_XXS'),
+    'dec_q35m_gg': [('MV', 'Q4_K'), ('MV', 'Q6_K'), ('MV', 'IQ4_XS'), ('MV', 'Q3_K'), ('MOE_GU', 'Q4_K'), ('MOE_GU', 'IQ3_XXS'),
                      ('MOE_GU', 'Q3_K'), ('MOE_DOWN', 'IQ4_NL'), ('MOE_DOWN', 'Q4_K'), ('MOE_DOWN', 'Q3_K')],
 }[M1]
 SENT = 1234.5
@@ -386,7 +386,7 @@ for card in CARDS:
     print(f'card {card}: {torch.cuda.get_device_name(card)}, {torch.cuda.get_device_properties(card).multi_processor_count} WGPs, '
           f'grids {[grid(M1, n) for n in WGP]}', flush=True)
     for fn, op in ((run_mv, 'MV'), (run_moe_gu, 'MOE_GU'), (run_moe_down, 'MOE_DOWN'), (run_bf16, 'BF16'), (run_refuse, 'REFUSE')):
-        if op == 'BF16' and M1 != 'k3_gguf_q35g': continue
+        if op == 'BF16' and M1 != 'dec_q35m_gg': continue
         if op not in OPS: continue
         ok_, all_ = fn(card); tot_ok += ok_; tot += all_
         print(f' card {card} {op}: {ok_}/{all_} bitwise / refusal checks pass', flush=True)

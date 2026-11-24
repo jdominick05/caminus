@@ -1,6 +1,6 @@
 """Our WMMA GEMM (caminus.device.gemm.gemm_tn) vs torch / rocBLAS on the S1 step's shapes:
   1. int4 codes with fp32 output, informational: bf16 WMMA is NOT exact on gfx1100 (each negative product loses ~1 LSB
-     at 2^-24 x the dot's largest product; kernels/wmma_probe.hip), so this reports the error instead of gating on it;
+     at 2^-24 x the dot's largest product; kernels/bench_wmma_probe.hip), so this reports the error instead of gating on it;
   2. bf16 output: bitwise equal to rocBLAS (F.linear) on every tested shape (the gate: a drop-in without new numerics);
   3. speed per shape vs torch (rocBLAS), and the LDS-only main loop (the microbench gate: >= 95 TFLOPS).
   python tests/device/test_gemm.py [--quick]"""

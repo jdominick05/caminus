@@ -1,5 +1,5 @@
 """The dense qwen35 prefill's GEMMs on their real shapes and formats (one GDN block and one attention block of a GGUF file:
-Swift 1.5 Q4_K_M by default), M tokens at a time: our own WMMA GEMMs reading the quantized blocks (kernels/q35_prefill.hip
+Swift 1.5 Q4_K_M by default), M tokens at a time: our own WMMA GEMMs reading the quantized blocks (kernels/pf_q35_swift.hip
 via prefill/q35own.py Ops.mm: Q4_K, Q6_K, Q8_0, Q5_K), next to yardsticks on the SAME (M, N, K) with dense operands:
   torch      torch.matmul in fp16 (PyTorch picks rocBLAS or hipBLASLt): fp16 weights, 2 bytes per weight
   flydsl     FlyDSL's RDNA3 WMMA GEMMs (kernels/gemm/rdna3_f16_gemm_autotune.py, rdna3_int8_gemm_autotune.py from a FlyDSL
@@ -11,7 +11,7 @@ Timing: events around ITERS back-to-back launches, median of REPS such groups, t
 arms replay the ITERS launches from a captured HIP graph (its own tuner's method), the others launch eagerly.
 TFLOPS = 2 M N K / t. 'per chunk' = the shape's time x its count in the model (48 GDN blocks, 16 attention blocks).
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_gemm.py [GGUF] [--M 512,2048] [--arms own,torch,flydsl]
-      [--flydsl-src DIR] [--reps 7] [--iters 10] [--module q35_prefill_abl1]
+      [--flydsl-src DIR] [--reps 7] [--iters 10] [--module OBJECT]
 Run it on the XT alone first.
 --engine (a MoE file: qwen3moe, Qwen3-30B-A3B; qwen35moe, Qwen3.6-35B-A3B): every GEMM of one real chunk. The engine and its
 batched prefill load on the card, M tokens of --tokens REF.npz's 'seq' (a reference's public text: real routing) prefill as
@@ -22,7 +22,7 @@ expert at its own count (the middle MoE layer's routing, padded to FlyDSL's 32-r
 launch count). TFLOPS of experts = 2 pairs R K / t. 'per chunk' = the sum over the recorded launches (the formats as the
 file mixes them; the last layer's attention output and FFN are skipped by the prefill). Also the routing: pairs per
 expert, work items, their fill. --ref-module NAME (an object in the kernel dir, e.g. a copy of the base build's
-q3m_prefill.hsaco as q3m_prefill_base.hsaco): ours on both objects, interleaved rep by rep, every output compared bitwise.
+pf_q3m.hsaco as q3m_prefill_base.hsaco): ours on both objects, interleaved rep by rep, every output compared bitwise.
   tools/guard.sh LOG SECS python -I benchmarks/q35_prefill_gemm.py GGUF --engine --tokens REF.npz [--M 2048]
       [--arms own,torch,flydsl] [--ref-module NAME] [--set A=1,..] [--ref-set A=0,..] [--only REGEX] [--tokens-from GGUF]
 --set / --ref-set set Ops attributes (the A / B flags: q3m_ops.Ops / q35moe.Ops wide, gu, wide_min_wg) on the own / ref arm;
@@ -41,7 +41,7 @@ from caminus.prefill import q35own, q3m_ops
 ap = argparse.ArgumentParser()
 ap.add_argument('gguf', nargs='?', default=os.path.expanduser(os.environ.get('SWIFT', '')))
 ap.add_argument('--M', default='512,2048'); ap.add_argument('--arms', default='own,torch')
-ap.add_argument('--module', default=None, help='the prefill object of the own arm (default the file\'s: q35_prefill / q35_prefill_tcap); a measurement build such as q35_prefill_abl1 times what is left of the tile without one of its parts (kernels/q3m_prefill.hip Q3P_ABL; its outputs are wrong by design)')
+ap.add_argument('--module', default=None, help='the prefill object of the own arm (default the file\'s: pf_q35_swift / pf_q35_tcap); a measurement build of kernels/pf_q35_swift.hip with -DQ3P_ABL=N times what is left of the tile without one of its parts (kernels/pf_q3m.hip Q3P_ABL; its outputs are wrong by design)')
 ap.add_argument('--flydsl-src', default=None); ap.add_argument('--reps', type=int, default=7); ap.add_argument('--iters', type=int, default=10)
 ap.add_argument('--engine', action='store_true', help='a MoE file: every GEMM of one real chunk (above)')
 ap.add_argument('--tokens', default=None, help='--engine: a reference .npz whose seq is the chunk\'s text')
@@ -69,7 +69,7 @@ if not A.engine:
     NAMES = [(gb, 'attn_qkv', 48), (gb, 'attn_gate', 48), (gb, 'ssm_out', 48), (gb, 'ffn_gate', 48), (gb, 'ffn_up', 48), (gb, 'ffn_down', 48),
              (ab, 'attn_q', 16), (ab, 'attn_k', 16), (ab, 'attn_v', 16), (ab, 'attn_output', 16), (ab, 'ffn_gate', 16), (ab, 'ffn_up', 16), (ab, 'ffn_down', 16)]
     # (Dense35Own._w's host half and its upload: each matrix straight to the card, as the engine's layout)
-    fake = types.SimpleNamespace(F=F, tcap=False, module='k3_q35_swift', one_rt=(),
+    fake = types.SimpleNamespace(F=F, tcap=False, module='dec_q35_swift', one_rt=(),
                                  h2d=types.SimpleNamespace(up=lambda b, *_: torch.from_numpy(b).to(dev)))
     fake._w_host = lambda name: Dense35Own._w_host(fake, name)
     ops = q35own.Ops(dev) if A.module is None else q35own.Ops(dev, module=A.module)
@@ -164,7 +164,7 @@ def engine_mode():
         for kv in filter(None, (spec or '').split(',')):
             nm, v = kv.split('='); setattr(o_, nm, int(v))
             if nm in ('wide', 'gu') and int(v) and getattr(o_, 'wmod', None) is None:
-                raise SystemExit(f'--set {nm}=1: {o_.module} was built without the wide tiles (q3m_ops.Ops(wide=None) loads them with q3m_prefill)')
+                raise SystemExit(f'--set {nm}=1: {o_.module} was built without the wide tiles (q3m_ops.Ops(wide=None) loads them with pf_q3m)')
     def widemod(o_, name):   # (--wide-module / --ref-wide-module: the arm's wide tiles from a measurement build)
         if name:
             from caminus.device import hip

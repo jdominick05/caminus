@@ -11,8 +11,8 @@ The block has no reference mode in the engine yet, so its fp32 forward stands in
 
 Per tensor, on 256 sampled rows x every recorded vector of its site:
   G-acc   |y - y_ref| / rms(y_ref), y_ref the float64 dot of our decoders' rows (bitwise gguf-py's) with the fp32
-          activation; mean and p99 over rows x vectors; own (fp16 activations, kernels/own_quant_q4_0.h on the plane
-          layout) against llama.cpp (ggml-cuda's vec_dot_q4_0_q8_1 on q8_1 activations, kernels/gg_mv_ref.hip). PASS when
+          activation; mean and p99 over rows x vectors; own (fp16 activations, kernels/quant_q4_0.h on the plane
+          layout) against llama.cpp (ggml-cuda's vec_dot_q4_0_q8_1 on q8_1 activations, kernels/ref_gg_mv.hip). PASS when
           own's mean and p99 are both at most llama.cpp's.
   G-self  4 tokens in one launch (nt = 4) equal 4 one-token launches, bit for bit, on every row.
   speed   cold: copies of the tensor rotated past the Infinity Cache (at least 512 MiB); median us per matvec over
@@ -145,7 +145,7 @@ DEV = eng.dev
 del B, blk, ch, REC, H, eng; gc.collect(); torch.cuda.empty_cache()   # (the trunk's weights go: the timing copies need the room)
 
 # ---- 2. per tensor: G-acc, G-self, speed -------------------------------------------------------------------------------
-OWN = Module('own_mv_q35'); GG = Module('gg_mv_ref'); RD = Module('own_mv')   # (own_read: the plain read)
+OWN = Module('bench_own_mv_q35'); GG = Module('ref_gg_mv'); RD = Module('bench_own_mv')   # (own_read: the plain read)
 sink = torch.zeros(1, dtype=torch.int32, device=dev)
 
 

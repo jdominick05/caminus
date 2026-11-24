@@ -1,4 +1,4 @@
-"""docs/specs/spec-own-quant.md's G-acc for the own Q2_0 tile (kernels/own_quant_q2_0.h, kernels/own_mv_q2_0.hip) on
+"""docs/specs/spec-own-quant.md's G-acc for the own Q2_0 tile (kernels/quant_q2_0.h, kernels/bench_own_mv_q2_0.hip) on
 recorded activations, one card: Qwen3.6-35B-A3B's routed experts (gate / up K 2048, down K 512), and with --coder-acts
 the GSQ-RCO Coder's Q2_0 expert down (K 640 cut 384 / 256 over its two cards), plus a standalone speed read.
 
@@ -11,7 +11,7 @@ the GSQ-RCO Coder's Q2_0 expert down (K 640 cut 384 / 256 over its two cards), p
   sampled rows of each routed expert with the vectors routed to it: |y - y_ref| / rms(y_ref), y_ref the float64 dot of
   caminus.own_dequant's rows with the recorded fp32 row; mean and p99 per tensor and pooled per (op, format), for
   own (fp16 activations, own_mv_q2_0_k3: the tile in K3's form) and llama.cpp (ggml-cuda's vec_dot_q2_0_q8_1 on q8_1
-  activations, kernels/gg_mv_ref.hip). PASS when own's mean and p99 are both at most llama.cpp's, per pair.
+  activations, kernels/ref_gg_mv.hip). PASS when own's mean and p99 are both at most llama.cpp's, per pair.
 --coder-acts FILE --coder GGUF: the same on the Coder's recording (tests/engine/test_k3_gguf_gsq.py --record), its
   MOE_DOWN Q2_0 sets sampled as that test's (e) samples them, per card cut; --coder-baseline JSON (its --gacc-out) is
   checked to equal the llama.cpp numbers computed here.
@@ -98,7 +98,7 @@ if A.record:
 # ---- --acts: G-acc and speed --------------------------------------------------------------------------------------------------
 if not A.acts: sys.exit('q36_gacc: --record ACTS or --acts ACTS')
 if A.gacc_out and os.path.exists(A.gacc_out): sys.exit(f'--gacc-out: {A.gacc_out} exists: refusing to overwrite')
-OWN = Module('own_mv_q2_0'); GG = Module('gg_mv_ref'); RD = Module('own_mv')   # (own_read: the plain read)
+OWN = Module('bench_own_mv_q2_0'); GG = Module('ref_gg_mv'); RD = Module('bench_own_mv')   # (own_read: the plain read)
 sink = torch.zeros(1, dtype=torch.int32, device=dev)
 
 
@@ -237,7 +237,7 @@ if A.gacc_out:
     if os.path.exists(A.gacc_out): sys.exit(f'--gacc-out: {A.gacc_out} appeared during the run: refusing to overwrite')
     with open(A.gacc_out, 'w') as f:
         json.dump(dict(acts=os.path.basename(A.acts), acts_meta=meta, coder_acts=A.coder_acts and os.path.basename(A.coder_acts), layers=A.layers,
-                       exp_rows=gacc.EXP_ROWS, arms=dict(own='build/own_mv_q2_0.hsaco own_mv_q2_0_k3 (fp16)', llama='build/gg_mv_ref.hsaco (q8_1)'),
+                       exp_rows=gacc.EXP_ROWS, arms=dict(own='build/bench_own_mv_q2_0.hsaco own_mv_q2_0_k3 (fp16)', llama='build/ref_gg_mv.hsaco (q8_1)'),
                        pairs=pairs, tensors=tensors, speed_us=us), f, indent=1)
     print(f'wrote {A.gacc_out}')
 print('RESULT', 'PASS' if ok_all else 'FAIL'); sys.exit(0 if ok_all else 1)

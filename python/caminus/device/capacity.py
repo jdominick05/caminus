@@ -80,7 +80,7 @@ def geometry(path_or_reader):
 
 def tp_kv_bytes(g, max_ctx, q8=True):
     """per card: the TP engine's KV cache bytes for max_ctx positions in its cache format (q8_0 K and V, else fp32: the
-    bytes FlashNextTP allocates, kernels/k3_gguf_ops.h kv_pos_bytes; VRAM or, with kv_host, pinned host memory)"""
+    bytes FlashNextTP allocates, kernels/ops_gg.h kv_pos_bytes; VRAM or, with kv_host, pinned host memory)"""
     m = g['nkv'] // 2 * g['hd']
     return g['n_attn'] * max_ctx * (2 * q8_bytes(m) if q8 else 4 * m)
 
@@ -233,10 +233,10 @@ def drafter_need_mib(kind, g, max_ctx, ntok=4, dflash_geom=None, ring=None):
 # (caminus.prefill.plan.PrefillPlan), which FlashNextTP(vram_prefill=...) builds and counts before the target allocates, and
 # checked again by each allocation
 PREFILL_TABLE_CARD = 1     # the token_embd table's card: the XT, which has the most headroom at 262,144 + DFlash
-# the prefill's code objects on each card (the 11 prefill_mmq_* modules, prefill_glue, prefill_gdn, prefill_tp and gemm:
-# ~1.1 MB of ELF; since impl:moe-gemm also the 7 prefill_moe_* modules, ~1.4 MB; since impl:q6k-dense prefill_dense_q6_k, 0.27 MB) as HIP
+# the prefill's code objects on each card (the 11 pf_gg_mmq_* modules, pf_gg_glue, pf_gg_gdn, pf_tp and pf_gemm:
+# ~1.1 MB of ELF; since impl:moe-gemm also the 7 pf_gg_moe_* modules, ~1.4 MB; since impl:q6k-dense pf_gg_dense_q6_k, 0.27 MB) as HIP
 # loads them: measured +1.3 / +1.3 MiB device-level (impl:prefill-safety, test_prefill_mmq tp at 262,144 + DFlash,
-# 11-04), the prefill_moe modules +1.5 MiB more (the XT alone, 11-04), counted with room for growth. What else the 11-03 comparison (XT 17,078 measured vs 16,772 projected) was
+# 11-04), the pf_gg_moe modules +1.5 MiB more (the XT alone, 11-04), counted with room for growth. What else the 11-03 comparison (XT 17,078 measured vs 16,772 projected) was
 # missing, measured the same way: the card's own use before the process started (XT 271 / XTX 110 MiB: the desktop and
 # the driver, read live by check() and subtracted by the k3_capacity table, but not in a projection's total) and the
 # GEMMs' fp32 inputs, which S2's test allocated outside every count (+82 MiB on the XT; now in mmq.workspace_layout)

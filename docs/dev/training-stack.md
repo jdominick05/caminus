@@ -5,7 +5,7 @@ The repository began as a ground-up training stack for small hybrid models (S1 1
 S1 model, its trainer, data and design notes live in a private research repository; only `training/tools/bench_gemm.py` of the tools
 that drove them is here. What remains here:
 
-- `kernels/*.hip` (actq, attn, core, fuse, gdn, gemm, headloss, wquant, the S1 K3 engine `k3*.hip`): device code only,
+- `kernels/*.hip` (`train_*`: actq, attn, core, fuse, gdn, headloss, wquant; `pf_gemm`; the S1 K3 engine `dec_core*.hip`): device code only,
   `extern "C"` kernels. `./build.sh` compiles each to `build/<name>.hsaco` (gfx1100 code object v5) with TheRock clang.
 - `python/caminus/device/hip.py`: loads code objects through the HIP runtime PyTorch already loaded (one runtime per process) and
   launches on torch's streams. The inference engine uses the same loader.
@@ -18,5 +18,5 @@ that drove them is here. What remains here:
   reproduces `F.linear` bit for bit. build.sh builds its tests (`build/test_*`); they need golden tensors from the private
   trainer to run.
 
-The Python modules ship in the `caminus` package; of the kernels, only `gemm` (its WMMA BF16 GEMMs also serve the batched
+The Python modules ship in the `caminus` package; of the kernels, only `pf_gemm` (its WMMA BF16 GEMMs also serve the batched
 prefill) is in the package's runtime set.

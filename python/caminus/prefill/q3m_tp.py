@@ -11,7 +11,7 @@ Per layer and card, the one-card chunk's ops in its order, split where the decod
              streams, ordered by HIP events only, then p0 + p1 in place, card 0's partial first on both)
   ffn half   x += o (one row), h, h16 = norm(x, ffn_norm); the router (fp32), top-k, grouping (replicated: the same bits on
              both cards from the same inputs); gate / up over its expert rows, swiglu, the down over its columns -> the k
-             slot rows per token, weighted on the card (q3p_slot_sum, kernels/q3m_prefill_tp.hip: OP_OWN_SLOT_SUM's fma
+             slot rows per token, weighted on the card (q3p_slot_sum, kernels/pf_q3m_tp.hip: OP_OWN_SLOT_SUM's fma
              chain) into its PARTIAL [n, D]
   exchange   as above; the next layer's attn half adds it
 The last layer stops after its cache rows on each card (as the one-card prefill): 2 (nl - 1) exchanges per micro-chunk.
@@ -30,7 +30,7 @@ exchange each change a summation order); G-model gated as the one-card prefill (
 prefill then two-card decode against the float64 / fp32 references, llama.cpp as the bound. Served as
 the prompt path of `caminus serve --cards 2` for Qwen3-30B-A3B (caminus.arch.Q3MoETP). Imports no gguf-py and no tokenizers (prefill/tp.py imports the vendored MMQ path: not imported here).
 A Q8 KV engine (Q3MoETP(q8=True), caminus serve --cards 2 --kv q8): the same chunk, each card's rows written and read as Q8_0 blocks by the
-one-card Q8 kernels at that card's local shapes (q3m_prefill_kvq8's q3p_qk_rope_q8 / q3mp_attn_q8: both take the kv head
+one-card Q8 kernels at that card's local shapes (pf_q3m_kvq8's q3p_qk_rope_q8 / q3mp_attn_q8: both take the kv head
 count, so its 2 kv heads and their 16 query heads; the one-card engine's format, q3moe_one.KV_FORMAT_Q8). Each card has
 its own KV error word (the layout's kverr): the settle reads both before the routing flags, and a refused block raises
 caminus.errors.InvalidKVEncoding with the engine marked broken."""
@@ -52,7 +52,7 @@ MODES = ('overlap', 'serial', 'local')
 MICRO = 2            # pieces per chunk (the dense two-card prefill's measured best at chunk 2048: m 2; unmeasured here)
 MIN_PIECE = 512      # no piece below it (q3p_group's 64-pair tiles: at 512 tokens x 8 slots / 128 experts, 32 pairs an expert)
 GRID = 128           # piece boundaries (a multiple of the GEMMs' 64-token tiles and the attention's 16-position blocks)
-SLOT_OBJ = 'q3m_prefill_tp'
+SLOT_OBJ = 'pf_q3m_tp'
 I = ctypes.c_int
 
 
@@ -99,13 +99,13 @@ def buffer_need_tp_mib(shapes, T):
 
 def need_tp_mib(shapes, T):
     """per card: everything Q3MPrefillTP takes at construction (checked before its first allocation): the buffers and receive
-    rows (buffer_need_tp_mib), its code objects (capacity.PREFILL_CODE_MIB; q3m_prefill and a Q8 engine's q3m_prefill_kvq8 together are about 0.2 MiB of code, well inside it) and
+    rows (buffer_need_tp_mib), its code objects (capacity.PREFILL_CODE_MIB; pf_q3m and a Q8 engine's pf_q3m_kvq8 together are about 0.2 MiB of code, well inside it) and
     the exchange's streams (capacity.PREFILL_STREAMS_MIB: a stream takes device memory at its first use)"""
     return [b + capacity.PREFILL_CODE_MIB[c] + capacity.PREFILL_STREAMS_MIB[c] for c, b in enumerate(buffer_need_tp_mib(shapes, T))]
 
 
 class SlotSum:
-    """kernels/q3m_prefill_tp.hip's q3p_slot_sum on one device (launched on its current stream)"""
+    """kernels/pf_q3m_tp.hip's q3p_slot_sum on one device (launched on its current stream)"""
 
     def __init__(self, dev):
         self.dev = torch.device(dev) if not isinstance(dev, torch.device) else dev
@@ -152,7 +152,7 @@ class Q3MPrefillTP(PrefillDriver):
         self.crossover = CROSSOVER if crossover is None else int(crossover)
         self.W = [[card_weights(m, c, il) for il in range(m.nl)] for c in (0, 1)]
         bad = [f'blk.{il} {k} card {c}: {self.W[c][il][k][0]}' for c in (0, 1) for il in range(m.nl) for k in MM_KEYS
-               if self.W[c][il][k][0] not in q3m_ops.formats('q3m_prefill')]
+               if self.W[c][il][k][0] not in q3m_ops.formats('pf_q3m')]
         if m.emb.type != 'Q4_K': bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q3MPrefillTP: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
         self.yarn = getattr(m, 'rope', None) is not None   # (the long-context mode: q3p_qk_rope from its YaRN build on each card)
@@ -167,7 +167,7 @@ class Q3MPrefillTP(PrefillDriver):
             with torch.cuda.device(dev):
                 # (wide False: the narrow tiles; the wide ones and the fused gate | up keep each row's bits but have not run
                 # on two cards)
-                self.O.append(q3m_ops.Ops(dev, 'q3m_prefill', q8=self.q8, yarn=self.yarn, wide=False)); self.S.append(SlotSum(dev))
+                self.O.append(q3m_ops.Ops(dev, 'pf_q3m', q8=self.q8, yarn=self.yarn, wide=False)); self.S.append(SlotSum(dev))
                 b = {}
                 for n, k in f32.items(): b[n] = torch.zeros(k, dtype=torch.float32, device=dev)
                 for n, k in f16.items(): b[n] = torch.zeros(k, dtype=torch.float16, device=dev)

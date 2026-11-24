@@ -1,4 +1,4 @@
-"""Canary checks of the batched prefill's own MoE path (caminus.prefill.moe, kernels/prefill_moe.hip), investigation run 1 after the
+"""Canary checks of the batched prefill's own MoE path (caminus.prefill.moe, kernels/pf_gg_moe.hip), investigation run 1 after the
 11-04 09:24 SDMA page fault on the XTX (docs/AGENTIC-PLAN.md, "MoE grouped GEMM ... halted on a GPU fault"). One card:
 cuda:0, which must be the XT (HIP_VISIBLE_DEVICES=1; the GPU stages refuse an XTX).
 

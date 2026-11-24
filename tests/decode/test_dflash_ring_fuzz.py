@@ -111,7 +111,7 @@ class Dev:
             df._rec = dict(a=[0] * T, j=0, anchor=int(anchor), pos_d=n0, flag=0)
         if kind == 'inject': return
         self.put(n0, n0 + T, 2)                         # the draft block (after the inject's rows)
-        lo = max(0, n0 - (df.window - 1))               # the kernel's window (k3_draft_ops.h df_attn_window), row 0
+        lo = max(0, n0 - (df.window - 1))               # the kernel's window (ops_q4x_dflash.h df_attn_window), row 0
         xs = np.arange(lo, n0)
         if xs.size:
             r = self.ring.numpy()[xs & df.rmask]

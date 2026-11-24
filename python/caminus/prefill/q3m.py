@@ -1,5 +1,5 @@
 """The batched prefill of a one-card qwen3moe engine (caminus.engine.q3moe_one.Q3MoEOne: Qwen3-30B-A3B) on Caminus's own
-kernels (kernels/q3m_prefill.hip through caminus.prefill.q3m_ops; no ggml-cuda code). It reads the decode engine's own
+kernels (kernels/pf_q3m.hip through caminus.prefill.q3m_ops; no ggml-cuda code). It reads the decode engine's own
 weights (Q4_K raw, Q6_K in the decode's planes) and writes its KV caches in place: nothing copied.
 
 Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's ops in its order:
@@ -20,7 +20,7 @@ The hand-off is the shared driver's (caminus.prefill.driver.PrefillDriver): run(
 [i0 - commit, p1) (the KV rows written in place; no recurrent state), sets m.fresh and returns (i0 = p1, commit = 0).
 No drafter yet (draft must be None).
 A Q8 KV engine (Q3MoEOne(q8=True)): the same chunk with the rows written as Q8_0 blocks and the attention reading them
-(q3m_prefill_kvq8's q3p_qk_rope_q8 / q3mp_attn_q8: each row the encode of the fp16 values the F16 kernels store, K after
+(pf_q3m_kvq8's q3p_qk_rope_q8 / q3mp_attn_q8: each row the encode of the fp16 values the F16 kernels store, K after
 the head's Walsh-Hadamard transform (caminus.ref_kv.hadamard128), the decode Q8 module's rows; q16 is the same transform
 of the F16 kernel's q16, rounded to fp16, so the attention scores rotated q against rotated K; it rounds the decoded
 values to fp16 for its WMMA operands). A refused block (a non-finite
@@ -91,14 +91,14 @@ class Q3MPrefill(PrefillDriver):
         self.crossover = CROSSOVER if crossover is None else int(crossover)
         fmts = {L[key][0] for L in m.L for key in MM_KEYS}
         if module is None:   # (a file with codebook-format tensors: the study object, as the engine picks its decode module)
-            module = q3m_ops.IQ_MODULE if fmts & set(q3m_ops.IQ_KERNEL) else 'q3m_prefill'
+            module = q3m_ops.IQ_MODULE if fmts & set(q3m_ops.IQ_KERNEL) else 'pf_q3m'
         for il, L in enumerate(m.L):
             for key in MM_KEYS:
                 if L[key][0] not in q3m_ops.formats(module): raise ValueError(f'Q3MPrefill: blk.{il} {key} is {L[key][0]} ({module})')
         self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache format: the Q8 kernels for its rows, never F16 ones)
-        if self.q8 and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the Q8 KV cache runs with q3m_prefill only (not {module})')
+        if self.q8 and module != 'pf_q3m': raise ValueError(f'Q3MPrefill: the Q8 KV cache runs with pf_q3m only (not {module})')
         self.yarn = getattr(m, 'rope', None) is not None   # (the long-context mode: q3p_qk_rope from its YaRN build, on the same par block)
-        if self.yarn and module != 'q3m_prefill': raise ValueError(f'Q3MPrefill: the long-context mode runs with q3m_prefill only (not {module})')
+        if self.yarn and module != 'pf_q3m': raise ValueError(f'Q3MPrefill: the long-context mode runs with pf_q3m only (not {module})')
         T = self.chunk
         self.need_mib = buffer_need_mib(m, T)
         if check: capacity.check([dev.index], [self.need_mib], f'Q3MPrefill buffers (chunk {T})')

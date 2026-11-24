@@ -1,10 +1,10 @@
 """Gates of the batched prefill's BF16 GEMMs and glue (docs/specs/spec-prefill-cache.md M5 S3; caminus.prefill.glue,
-kernels/prefill_glue.hip, kernels/gemm.hip's WMMA).
+kernels/pf_gg_glue.hip, kernels/pf_gemm.hip's WMMA).
 
   python -I tests/prefill/test_prefill_glue.py CODER STAGE... [--scratch DIR] [--ref-stock BIN] [--golden DIR] [--json OUT]
 
 Stages (GPU stages on cuda:0: HIP_VISIBLE_DEVICES picks the card; 'gpu' = g1 g2 wmma speed):
-  g1     every bitwise op against K3's own decode op (caminus.engine.k3.Engine, module k3_gguf_gsq, one token per pass) on the same
+  g1     every bitwise op against K3's own decode op (caminus.engine.k3.Engine, module dec_q4x_gsq, one token per pass) on the same
          inputs, real Coder weights, over the first T of 2048 tokens for T = 1, 4, 512, 777, 2048, bitwise:
          rms_mul, hc_post_rms, hc_post, hc_mean, router (forced exact ties and near ties included), gdn_conv + its state,
          ple_gate, ple_conv + its history (and fused with add_sum), add_sum, bf16_mv (router logits, shared-expert gate,
@@ -15,7 +15,7 @@ Stages (GPU stages on cuda:0: HIP_VISIBLE_DEVICES picks the card; 'gpu' = g1 g2 
          512 + 788 + 748 / 5 + 3 + 2040 / 1 + 4 + 2043 (state and history carried between chunks; chunks shorter than the
          3- and 9-token windows) == one T = 2048 pass, bitwise per position and in the final state; the WMMA GEMMs at the
          same splits (every token at another row of its 128-row tile)
-  wmma   the wide BF16 GEMMs on gemm.hip's WMMA (hc down / up, output_hc down / up, ple key / value, indexer k / q, and
+  wmma   the wide BF16 GEMMs on pf_gemm.hip's WMMA (hc down / up, output_hc down / up, ple key / value, indexer k / q, and
          the router logits: router_logits' default mode, lead decision 11-03) on
          recorded activations (--golden: hc_norm / hc_mixed rows dumped by gg_golden, 768 of each; the default dump is
          REAP-308's, the same architecture, NOT the Coder's own activations; the hc up input from them through an fp64 hc
@@ -26,7 +26,7 @@ Stages (GPU stages on cuda:0: HIP_VISIBLE_DEVICES picks the card; 'gpu' = g1 g2 
          WMMA's fp32 accumulation only (<= 1e-5 of max |floor|); llama.cpp's op is reported next to it, not gated (it
          rounds its output to bf16, which scatters its error around the floor); and the share of tokens whose top-10
          experts from the WMMA logits equal those from the exact logits and from fp64. wmma_out 'bf16' (fix:prefill-s6:
-         gemm.hip's *_rbf kernels): every element bitwise RNE to bf16 of the fp32 mode's (the gate), its agreement with
+         pf_gemm.hip's *_rbf kernels): every element bitwise RNE to bf16 of the fp32 mode's (the gate), its agreement with
          llama.cpp's batched op (which rounds its output to bf16 above 8 columns) and the router top-10 sets vs llama.cpp's
          logits reported. G2 / xcard run both output modes
   xcard  both cards: the same inputs on the XTX and the XT give the same bits, every op (WMMA included) and the states
@@ -175,7 +175,7 @@ class Dec:
         self.torch, self.dev, self.k3 = torch, dev, k3
 
     def eng(self):
-        return self.k3.Engine(module='k3_gguf_gsq', grid=self.k3.resident_grid('k3_gguf_gsq'), T=1)
+        return self.k3.Engine(module='dec_q4x_gsq', grid=self.k3.resident_grid('dec_q4x_gsq'), T=1)
 
     def z(self, *s, dt=None):
         return self.torch.zeros(*s, dtype=dt or self.torch.float32, device=self.dev)
@@ -574,7 +574,7 @@ def stage_wmma(torch, dev, wt, ref_bin, gdir, scratch):
             G.to_bf16(xt, xb, T, K); G.bf16_gemm(wt_, N, K, xb, out, T); Gb.bf16_gemm(wt_, N, K, xb, outb, T)
         mine = out[:T].cpu().numpy()
         # wmma_out 'bf16': each result of the fp32 mode rounded to bf16 (RNE), bitwise, on the bf16 grid; next to llama.cpp's
-        # own batched op, which rounds its output the same way above 8 columns (gemm.hip RBF)
+        # own batched op, which rounds its output the same way above 8 columns (pf_gemm.hip RBF)
         mb_ = outb[:T].cpu().numpy(); u = mine.view(np.uint32).astype(np.uint64)
         want = ((((u + 0x7FFF + ((u >> 16) & 1)) >> 16) << 16) & 0xFFFFFFFF).astype(np.uint32).view(np.float32)
         b_def = bool(np.array_equal(mb_.view(np.uint32), want.view(np.uint32)))

@@ -1,4 +1,4 @@
-"""The device sampler's candidates on Caminus's own kernel (kernels/own_topk.hip), in place of torch.topk / index_select.
+"""The device sampler's candidates on Caminus's own kernel (kernels/samp_topk.hip), in place of torch.topk / index_select.
 
 `Candidates(dev, rows, width, cols=None)` holds one card's device buffers (checked against the card's cap through
 caminus.device.capacity before they exist; cols, the shard's width, sizes the chunk lists up front, else on first use); `Candidates.run(L, k, pid)` queues, on the current stream of that card, for each row of L (a float32
@@ -18,14 +18,14 @@ KCAP = 512           # the kernel's largest k (its LDS sort buffer: TK_KCAP)
 CHUNK = 2048         # columns per workgroup (TK_CHUNK)
 MAXCHUNKS = 256      # chunks per row (TK_MAXCHUNKS): rows of at most 524,288 columns
 
-_mods = {}           # device index -> the own_topk module loaded on it
+_mods = {}           # device index -> the samp_topk module loaded on it
 
 
 def _kernel(d):
     m = _mods.get(d)
     if m is None:
         with torch.cuda.device(d):
-            m = _mods[d] = hip.Module('own_topk')
+            m = _mods[d] = hip.Module('samp_topk')
     return m.own_topk_rows
 
 

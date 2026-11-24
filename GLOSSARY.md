@@ -47,7 +47,7 @@ The project's own terms, as the code, the tests and the docs use them. Prefer th
 - **K3.** The persistent decode megakernel engine: one launch per pass, every op of every layer on one tape.
 - **Tape.** The list of segments one K3 launch runs.
 - **Segment.** A run of tasks the persistent kernel's workgroups claim; segments wait on each other's done counters.
-- **Module.** One compiled build of the K3 engine with its own op / format whitelist (`k3_gguf_gsq`, `k3_gguf_q35h`, ...).
+- **Module.** One compiled build of the K3 engine with its own op / format whitelist (`dec_q4x_gsq`, `dec_q35m_hh`, ...).
 - **Hand-off.** The batched prefill's end: the state left so the next K3 pass continues it (commit 0).
 - **T.** Tokens per pass (4 on the Coder: one fed token + three drafts; 1 on the one-card engines).
 - **Drafter.** Proposes the drafts a verify pass checks: DFlash (inside K3) or MTP. A **filler** draft is a placeholder when

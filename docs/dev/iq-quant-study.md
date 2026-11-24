@@ -148,7 +148,7 @@ read, written down before the IQ2_XXS tile's first run:
 ## How it is run
 
 - **A study module, not the shipped one.** All four arms run one new decode module that holds every format's tile.
-  The shipped `k3_q3m_lean` stays as it is; arm A on the shipped module against arm A on the study module is reported
+  The shipped `dec_q3m` stays as it is; arm A on the shipped module against arm A on the study module is reported
   as what carrying the formats costs.
 - **Grids are staged only by the tapes that use them,** so arm A does not pay for them, and the staging is timed on
   its own.
@@ -267,7 +267,7 @@ the next (1.4e-05).
 ### Whole tokens (RX 7900 XTX), and the predictions scored
 
 `benchmarks/q3moe_depth.py --tokens 32 --rounds 3`, five rounds of processes in the order A, B, C, D (one arm's file
-in the page cache at a time), every arm on the study module `k3_q3m_iq` at the card's grid; A also on the shipped
+in the page cache at a time), every arm on the study module `dec_q3m_iq` at the card's grid; A also on the shipped
 module in the same process. ms per token, median of the five rounds (lowest .. highest):
 
 | Arm | Depth 8 | 1,024 | 4,096 | 16,384 | Predicted at depth 8 | Reference line |
@@ -290,7 +290,7 @@ Against A on the same module in the same round, at depth 8: B −0.003 to −0.0
 - **Carrying the four formats costs A 0.10 ms** per token at depth 8 and 0.17 at 4,096 (same bits, shipped module
   against study module in one process): the study module spills 66 scalars against 53.
 
-One traced token per arm (`benchmarks/q3moe_trace.py --modules k3_q3m_iq_trace`), µs per layer on the critical path:
+One traced token per arm (`benchmarks/q3moe_trace.py --modules dec_q3m_iq_trace`), µs per layer on the critical path:
 
 | Arm | Expert gate and up | Expert down | Predicted | Everything else in the token |
 |---|---|---|---|---|
@@ -502,7 +502,7 @@ reference; llama.cpp fills the prompt in batches and decodes the same 64. B, C a
 
 ### Prefill (H3), RX 7900 XT then RX 7900 XTX
 
-The codebook formats' prefill GEMMs are a study object of their own (`kernels/q3m_prefill_iq.hip`: the shipped
+The codebook formats' prefill GEMMs are a study object of their own (`kernels/pf_q3m_iq.hip`: the shipped
 prefill object plus four kernels, weights exact in the WMMA's B operand). Gates on both cards:
 `tests/prefill/test_q3m_iq_ops.py` (every role and format against float64 on real expert rows: worst row 9.6e-6 of
 the rms) and `tests/prefill/test_q3m_prefill.py` per arm (64 positions prefilled, 64 decoded, against the arm's fp32

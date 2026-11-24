@@ -1,4 +1,4 @@
-"""C = A . B^T on our gfx1100 WMMA GEMM (kernels/gemm.hip): A [M, K], B [N, K] bf16, K-contiguous; fp32 accumulation
+"""C = A . B^T on our gfx1100 WMMA GEMM (kernels/pf_gemm.hip): A [M, K], B [N, K] bf16, K-contiguous; fp32 accumulation
 in a fixed K order; bf16 or fp32 output; optional fp32 row scales rs [M] and column scales cs [N] on the accumulator.
 round_bf16 (fp32 output, no scales): every result rounded to bf16 (round to nearest even) and stored as fp32 (the *_rbf
 kernels: llama.cpp's batched BF16 mul_mat output precision on RDNA3, caminus.prefill.glue.Glue(wmma_out='bf16'))."""
@@ -13,7 +13,7 @@ TILES_RBF = {(128, 128): 'gemm_tn_128x128_rbf', (128, 64): 'gemm_tn_128x64_rbf',
 
 def _m():
     dev = torch.cuda.current_device()
-    if dev not in _mod: _mod[dev] = Module('gemm')
+    if dev not in _mod: _mod[dev] = Module('pf_gemm')
     return _mod[dev]
 
 

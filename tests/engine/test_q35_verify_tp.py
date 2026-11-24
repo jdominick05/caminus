@@ -1,5 +1,5 @@
 """Dense35VerifyTP (the dense qwen35 line's T-token verify passes on TWO cards: the two-card verify modules
-kernels/k3_q35_{swift,tcap}_tp_ver.hip with OP_XCHG exchanging T * D partials) against Dense35TP's decode steps on the
+kernels/dec_q35_{swift,tcap}_tp_ver.hip with OP_XCHG exchanging T * D partials) against Dense35TP's decode steps on the
 same tokens and positions, bit for bit, over a prefilled context of real text (this repository's docs) and from an empty
 one:
   for T = 1 .. 4, a walk of passes with rejections: each pass accepts a of its T rows (the schedule cycles T, 1, T - 1,

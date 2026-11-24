@@ -4,7 +4,7 @@
 // Changes from the original (device code otherwise verbatim):
 //   - gfx1100 only: refuse any other device target (only the RDNA3 config is vendored)
 //   - only the RDNA3 tile config is included (the other architectures' config headers are not vendored)
-//   - host config dispatcher: the RDNA3 config (the host launch is python/caminus/mmq.py, which reads the configs from the device: kernels/prefill_mmq.hip k3_mmq_configs)
+//   - host config dispatcher: the RDNA3 config (the host launch is python/caminus/mmq.py, which reads the configs from the device: kernels/pf_gg_mmq.hip k3_mmq_configs)
 //   - device config dispatcher: the RDNA3 config (gfx1100: the branch upstream takes for RDNA3 without RDNA3_5)
 //   - the host launch code (struct mmq_args .. end: launch_mul_mat_q, mul_mat_q_switch_J, mul_mat_q_case, the DECL_MMQ_CASE externs, ggml_cuda_mul_mat_q / ggml_cuda_should_use_mmq declarations) removed: python/caminus/mmq.py launches the kernels
 //

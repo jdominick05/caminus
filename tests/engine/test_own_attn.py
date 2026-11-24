@@ -1,10 +1,10 @@
-"""OP_OWN_ATTN (a query head's whole decode attention as one task, kernels/k3_own_ops.h) against the five segments it
+"""OP_OWN_ATTN (a query head's whole decode attention as one task, kernels/ops_own.h) against the five segments it
 replaces (OP_QK_NR on k and q, OP_KV_APPEND, OP_ATTN_DEC with its loads in batches, OP_OWN_F16) on the same random inputs,
 position by position, each form with its own cache: the fp16 outputs and the cache rows are bitwise equal at every
 position, across the 512-position chunk boundary of the softmax. Needs no model. Prints PASS / FAIL and RESULT PASS | FAIL.
 The positions are enough for the rounding cases to occur: an exact fp16 tie of the fp32 output is about one value in
 8000 (4096 values per position), and a merged multiply-add in the fused op shows on the first position.
-  tools/guard.sh LOG 300 python -I tests/engine/test_own_attn.py [--positions 660] [--module k3_gguf_q3m_own]
+  tools/guard.sh LOG 300 python -I tests/engine/test_own_attn.py [--positions 660] [--module dec_q3m_gg]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -12,7 +12,7 @@ import numpy as np, torch
 from caminus.device import capacity
 from caminus.engine import k3
 ap = argparse.ArgumentParser()
-ap.add_argument('--positions', type=int, default=660); ap.add_argument('--module', default='k3_gguf_q3m_own')
+ap.add_argument('--positions', type=int, default=660); ap.add_argument('--module', default='dec_q3m_gg')
 A = ap.parse_args()
 nh, nkv, hd = 32, 4, 128                       # qwen3moe's attention: 32 query heads, 4 kv heads, head dim 128
 M, CTX = nkv * hd, A.positions

@@ -1,10 +1,10 @@
 """The dense qwen35 line (Swift 1.5): T-token verify passes for speculative decoding, on the verify module
-(kernels/k3_q35_swift_ver.hip: the Swift decode module's ops with their T-token forms).
+(kernels/objects.tsv dec_q35_swift_ver: the Swift decode module's ops with their T-token forms).
 
 A pass runs T tokens at positions pos0 .. pos0 + T - 1 in one launch, on the decode engine's weights, KV caches and
 Gated DeltaNet states. Token t's logits, its KV rows and the recurrent states it leaves are bit for bit what T decode
 steps of Dense35Own give for the same tokens: every sum is the decode tile's statements on the same operands, in the
-same order (the one-round-trip tiles' T-token forms, kernels/own_quant_mt.h; the rows tiles per token; the glue ops one
+same order (the one-round-trip tiles' T-token forms, kernels/quant_ver.h; the rows tiles per token; the glue ops one
 task per token and head).
 
 The recurrent state is committed lazily, as in decode: a pass stores the state from before its own tokens and keeps
@@ -31,9 +31,9 @@ from . import k3
 from .q35_dense import attn_part_elems
 from ..device import capacity
 
-MAX_T = 4                        # own_quant_mt.h's OWN_MT
-MODULE = 'k3_q35_swift_ver'
-MODULE_TCAP = 'k3_q35_tcap_ver'   # (ThinkingCap's: its formats' T-token tiles, kernels/own_quant_tcap_mt.h)
+MAX_T = 4                        # quant_ver.h's OWN_MT
+MODULE = 'dec_q35_swift_ver'
+MODULE_TCAP = 'dec_q35_tcap_ver'   # (ThinkingCap's: its formats' T-token tiles, kernels/quant_tcap_ver.h)
 
 
 class Dense35Verify:
@@ -70,14 +70,14 @@ class Dense35Verify:
 
     def __init__(self, eng, T, module=None, per_wgp=None, vram_check=True, feature_layers=()):
         """eng: a Dense35Own (Swift's or ThinkingCap's module) with spec_T >= T (its weights, caches, states and bounds); T:
-        tokens per pass, 1 .. 4; module: None (the engine's line: k3_q35_swift_ver, or k3_q35_tcap_ver on ThinkingCap's
+        tokens per pass, 1 .. 4; module: None (the engine's line: dec_q35_swift_ver, or dec_q35_tcap_ver on ThinkingCap's
         module) or one of those modules' _trace builds; per_wgp: workgroups per WGP of this tape's grid
         (None: the decode engine's; the bits are the same at every grid); feature_layers: layers whose entering residual
         each pass copies to self.features [len, T, D] fp32 (a DFlash drafter's target layers: the residual after the
         previous layer's feed-forward is added, before the layer's norm; llama.cpp's layer input). The copy is the
         module's own add-rms op on a zeroed buffer (0 + x, exact), so no device code changes and the logits stay bitwise"""
         if isinstance(T, bool) or not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Dense35Verify: T {T!r}: 1 .. {MAX_T}')
-        gsq = self.gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: k3_q35_gsq_ver, and k3_q35_gsq_ver_m for IQ1_M)
+        gsq = self.gsq = eng.module in k3.Q35R_MODULES   # (the plain Qwen3.8-27B GSQ-RCO files: dec_q35_gsq_ver, and dec_q35_gsq_ver_m for IQ1_M)
         q8 = bool(getattr(eng, 'q8', False))
         if q8 and gsq and not all(m in k3.Q35_KV_Q8_OF for m in k3.Q35RV_MODULES + k3.Q35RVM_MODULES):
             # (a GSQ pass is two verify objects' launches; neither has a Q8 build yet, and an F16 object would read the
@@ -121,7 +121,7 @@ class Dense35Verify:
             e.guard_T = eng.spec_T   # (the device bound on the commit, as the decode tape's: the host bounds it by the last pass)
             return e
         # A pass is one launch, or three on the GSQ files: their one IQ1_M matrix (a block's ffn_gate) runs alone on
-        # k3_q35_gsq_ver_m between the tape's two halves (its T-token loop and the other formats' did not fit one k3_run in
+        # dec_q35_gsq_ver_m between the tape's two halves (its T-token loop and the other formats' did not fit one k3_run in
         # 96 VGPRs). The launches run in stream order, so a segment's inputs from an earlier launch are complete; a
         # dependency is only kept inside a launch. Each launch's segments are the single tape's, in its order.
         E = self.E = engine(self.module)

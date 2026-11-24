@@ -2,7 +2,7 @@
 the GGUF file to the logits: our reader (caminus.ggufio), our weight layout (engine/own_layout.py: Q6_K planes), our
 matvec tiles on fp16 activations (the one-round-trip tiles for Q4_K / Q6_K, the general rows tiles for Q8_0 / Q5_K), the
 embedding row decoded on the device, and the K3 engine's own Gated DeltaNet and gated-attention ops built without
-llama.cpp's headers (kernels/k3_q35_ops.h; module k3_q35_swift). One token per pass (T = 1). The test oracle is
+llama.cpp's headers (kernels/ops_q35.h; module dec_q35_swift). One token per pass (T = 1). The test oracle is
 caminus.ref_q35 (float64, the same reading of the model).
 
 Per block (fp32 residual x; h = rms(x) * norm, h16 = fp16(h): the matvecs' input):
@@ -36,9 +36,9 @@ from . import k3, upload
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1m_records
 from .q3moe_one import card_per_wgp
 
-MODULE = 'k3_q35_swift'
-MODULE_TCAP = 'k3_q35_tcap'   # (ThinkingCap's formats: kernels/k3_q35t_ops.h)
-MODULE_GSQ = 'k3_q35_gsq'     # (the Qwen3.8-27B GSQ-RCO files: ThinkingCap's formats + IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K)
+MODULE = 'dec_q35_swift'
+MODULE_TCAP = 'dec_q35_tcap'   # (ThinkingCap's formats: kernels/ops_q35_tcap.h)
+MODULE_GSQ = 'dec_q35_gsq'     # (the Qwen3.8-27B GSQ-RCO files: ThinkingCap's formats + IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K)
 GSQ_ONLY_FMT = frozenset({'IQ2_XS', 'Q2_K', 'IQ1_M', 'IQ2_XXS'})   # (a trunk matrix in one of these: the GSQ module)
 SWIFT_FMT = frozenset({'Q4_K', 'Q6_K', 'Q8_0', 'Q5_K', 'F32'})   # (the matrices the Swift module's tiles read)
 
@@ -118,7 +118,7 @@ def _shapes(F):
 
 
 def attn_part_elems(T, heads, cells):
-    """floats of the split attention pair's records (kernels/k3_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
+    """floats of the split attention pair's records (kernels/ops_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
     for T pass rows of `heads` query heads over lists of up to `cells` cache rows: one record of k3.ATTN_RS floats per
     (row, head, ATTN_SS-cell split); one buffer shared by a tape's attention blocks (they run one after another)"""
     return int(T) * int(heads) * ((int(cells) + k3.ATTN_SS - 1) // k3.ATTN_SS) * k3.ATTN_RS

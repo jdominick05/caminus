@@ -349,16 +349,16 @@ class DirectReader:
 
 EPS = 9.999999974752427e-07
 
-# formats only the GSQ-RCO Coder's module implements (k3.CAPS_GSQ): a model with any of them runs on k3_gguf_gsq
+# formats only the GSQ-RCO Coder's module implements (k3.CAPS_GSQ): a model with any of them runs on dec_q4x_gsq
 _GSQ_ONLY = {'BF16', 'Q4_K', 'Q5_K', 'IQ4_XS', 'IQ2_S', 'IQ3_S', 'Q2_0'}
 
 
 def pick_module(T):
-    """the K3 code object for a model's tensors {name: ReaderTensor}: 'k3_gguf_gsq' if a tensor the tapes read uses a
-    format of the Coder's module only, else 'k3_gguf' (REAP-308). Not counted: the host-side token_embd /
+    """the K3 code object for a model's tensors {name: ReaderTensor}: 'dec_q4x_gsq' if a tensor the tapes read uses a
+    format of the Coder's module only, else 'dec_q4x_gg' (REAP-308). Not counted: the host-side token_embd /
     per_layer_token_embd and the QSA indexer (BF16 in both models, unused until QSA)"""
     used = lambda n: n not in ('token_embd.weight', 'per_layer_token_embd.weight') and '.indexer.' not in n
-    return 'k3_gguf_gsq' if any(t.tensor_type.name in _GSQ_ONLY for n, t in T.items() if used(n)) else 'k3_gguf'
+    return 'dec_q4x_gsq' if any(t.tensor_type.name in _GSQ_ONLY for n, t in T.items() if used(n)) else 'dec_q4x_gg'
 
 
 class FlashNextK3:
@@ -398,7 +398,7 @@ class FlashNextK3:
         self.ple = PLE(self.rd, self.extra)
         self.dr = DirectReader(path)
         # max_ctx: the KV cache's positions (every pass's positions are checked against it before any launch, and k3_run's
-        # prologue skips the tape for a position past the allocation: k3.check_span, kernels/k3.hip); at most the model's
+        # prologue skips the tape for a position past the allocation: k3.check_span, kernels/dec_core.hip); at most the model's
         # context_length
         self.n_ctx_train = int(hp('context_length')) if 'qwen4exp.context_length' in f else None
         if isinstance(max_ctx, bool) or not isinstance(max_ctx, (int, np.integer)) or max_ctx < 1:

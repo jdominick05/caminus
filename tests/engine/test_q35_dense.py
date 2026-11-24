@@ -1,5 +1,5 @@
-"""Dense35Own (the dense qwen35 line on one card, Caminus's own code from the GGUF to the logits; module k3_q35_swift, or
-with --variant tcap ThinkingCap's formats on k3_q35_tcap) against caminus.ref_q35 (the float64 host forward on the same
+"""Dense35Own (the dense qwen35 line on one card, Caminus's own code from the GGUF to the logits; module dec_q35_swift, or
+with --variant tcap ThinkingCap's formats on dec_q35_tcap) against caminus.ref_q35 (the float64 host forward on the same
 reader and decoders).
 
 Without a model file, on the tiny synthetic quantized model of tests/engine/tiny_q35.py (every matrix format the module
@@ -28,7 +28,7 @@ ap.add_argument('--positions', type=int, default=128); ap.add_argument('--depths
 ap.add_argument('--depth-positions', type=int, default=12); ap.add_argument('--max-ctx', type=int, default=256)
 ap.add_argument('--module', default=None)
 ap.add_argument('--variant', choices=('swift', 'tcap', 'gsq'), default='swift',
-                help='the tiny model\'s formats (tcap: ThinkingCap\'s, module k3_q35_tcap; gsq: the Qwen3.8-27B GSQ-RCO files\', k3_q35_gsq)')
+                help='the tiny model\'s formats (tcap: ThinkingCap\'s, module dec_q35_tcap; gsq: the Qwen3.8-27B GSQ-RCO files\', dec_q35_gsq)')
 A = ap.parse_args()
 if bool(A.model) != bool(A.ref): ap.error('--model and --ref go together')
 os.makedirs(A.scratch, exist_ok=True)

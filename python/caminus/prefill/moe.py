@@ -25,7 +25,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""The batched prefill's routed-expert GEMMs of our own (kernels/prefill_moe.hip; project decision 11-03: prefill GEMM kernels
+"""The batched prefill's routed-expert GEMMs of our own (kernels/pf_gg_moe.hip; project decision 11-03: prefill GEMM kernels
 of our own), replacing the vendored MMQ's mul_mat_id (caminus.prefill.mmq) for the MoE gate / up / down projections:
 
   group(ids, ...)   k3_mmq_ids_clamp (the ids clamped in range and distinct per token, in place; the flag word set), then
@@ -86,16 +86,16 @@ class MoE:
         assert self.dev.type == 'cuda', device
         self.mods, self.cfg, self.kmm, self.kgu = {}, {}, {}, {}
         with torch.cuda.device(self.dev):
-            self.glue = Module('prefill_moe_glue'); self.mods['prefill_moe_glue'] = self.glue
+            self.glue = Module('pf_gg_moe_glue'); self.mods['pf_gg_moe_glue'] = self.glue
             self.kgroup = self.glue.k3_moe_group
             if mm is None:
-                self._mglue = Module('prefill_mmq_glue'); self.kclamp = self._mglue.k3_mmq_ids_clamp
+                self._mglue = Module('pf_gg_mmq_glue'); self.kclamp = self._mglue.k3_mmq_ids_clamp
             else:
                 assert mm.dev == self.dev, (mm.dev, self.dev); self.kclamp = mm.kclamp
             for f in formats: self._load(f)
 
     def _load(self, fmt):
-        name = f'prefill_moe_{fmt.lower()}'
+        name = f'pf_gg_moe_{fmt.lower()}'
         with torch.cuda.device(self.dev):
             mod = Module(name); self.mods[name] = mod
             out = torch.zeros(16 * CFG_WORDS, dtype=torch.int32, device=self.dev); cnt = torch.zeros(1, dtype=torch.int32, device=self.dev)

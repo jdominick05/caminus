@@ -1,5 +1,5 @@
-"""The QSA indexer ops (kernels/k3_qsa_ops.h: OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT) in the GSQ-RCO Coder's QSA
-modules (k3_gguf_gsq_qsa T = 1, k3_gguf_gsq_qsa_mt T = 4: the trunk modules plus these ops), on ONE card (run it on the XT alone: HIP_VISIBLE_DEVICES=1).
+"""The QSA indexer ops (kernels/ops_qsa.h: OP_IDX_APPEND, OP_QSA_SCORE, OP_QSA_SELECT) in the GSQ-RCO Coder's QSA
+modules (dec_q4x_gsq_qsa T = 1, dec_q4x_gsq_qsa_ver T = 4: the trunk modules plus these ops), on ONE card (run it on the XT alone: HIP_VISIBLE_DEVICES=1).
   ref DIR [DIR..] : vs llama.cpp's own tensors from one-token decodes (build/gg_golden --lc 'qsa' jobs: indexer_k_raw,
                     indexer_pool_k_new, indexer_q, indexer_k, indexer_score, indexer_top_k of the dumped layers):
                     IDX_APPEND fed llama.cpp's raw keys -> its pooled keys before quantization (indexer_pool_k_new) and the
@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from caminus.engine import k3, qsa
 
-MOD = 'k3_gguf_gsq'
+MOD = 'dec_q4x_gsq'
 EPS = np.float32(1e-6)
 TS = None   # theta_scale: libm powf(1e7, -2 / 64) as caminus.engine.flashnext (= llama.cpp's host value)
 RES = []

@@ -4,7 +4,7 @@ directly (no prompt is processed first): decode time does not depend on the cach
 attention reads, so a 40K-position measurement takes seconds instead of 40,960 real passes. Prints one line per depth
 and arm, then RESULT DONE.
   tools/guard.sh LOG 1800 python -I benchmarks/q3moe_depth.py GGUF [--depths 8,1024,4096,16384,40900] [--max-ctx N]
-      [--arms new=k3_q3m_lean old=k3_gguf_q3m_own:attn_split=0 ...]
+      [--arms new=dec_q3m old=dec_q3m_gg:attn_split=0 ...]
 An arm is name=module[@workgroups per WGP][:option=int ...] (engine options: attn_split, splits, lmin, gh, ...).
 --cards 2: the two-card engine (engine/q3moe_tp.py Q3MoETP, torch devices 0 and 1, its default split; CAMINUS_UPLOAD_LOG on
 every two-card run); --arms then names grids only (name=@workgroups per WGP, default: each card's own; :cap=N after it: at most
@@ -15,8 +15,8 @@ own span is printed beside it. --local-only (with --cards 2): every exchange cop
 runs alone (its ceiling; the logits are not the model's): the two-card time minus the slower card's alone is the coupling.
 The one-card engine does not fit card 0 beside the two-card one, so compare with a one-card run of this script in the
 same window, runs alternated.
---kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True); the default arm k3_q3m_lean_kvq8; with --cards 2
-Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8). The F16 and Q8 caches do not both fit at depth, so the decode A/B of the two is
+--kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True); the default arm dec_q3m_kvq8; with --cards 2
+Q3MoETP(q8=True) on dec_q3m_tp_kvq8). The F16 and Q8 caches do not both fit at depth, so the decode A/B of the two is
 runs of this script alternated in one window (F16, Q8, F16, Q8, ...), the same depths, tokens and rounds.
 --engine q35moe: Qwen3.6-35B-A3B (engine/q35_moe.py Moe35Own, --kv f16 or q8) instead, its arms pass-time options on one
 engine (name=:option=int ...: attn_from, attn_splits, pair=1 the split pair launched alone between the slices, the cost of
@@ -105,11 +105,11 @@ if A.engine == 'q35moe':
     print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}, module {eng.module}, grid {eng.E.grid}', flush=True)
     forms = {n: (o.get('attn_from', eng.attn_from), o.get('attn_splits'), 'pair' if o.get('pair') else 'kernel') for n, o in ARMS}
     keys = ('attn_from', 'attn_splits', 'attn_launch')
-if A.engine == 'q3moe': A.arms, ARMS = A.arms or ['default=' + ('k3_q3m_lean_kvq8' if A.kv == 'q8' else 'k3_q3m_lean')], []
+if A.engine == 'q3moe': A.arms, ARMS = A.arms or ['default=' + ('dec_q3m_kvq8' if A.kv == 'q8' else 'dec_q3m')], []
 for a in (A.arms if A.engine == 'q3moe' else ()):
     name, spec = a.split('=', 1); spec, *kv = spec.split(':'); mod, _, g = spec.partition('@')
     if mod not in k3.MODULE_CAPS:   # (a measurement build under another name: of the module its name starts with, else the full one's ops)
-        base = max((m for m in k3.Q3M_LEAN_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES) if mod.startswith(m + '_')), key=len, default='k3_gguf_q3m_own')
+        base = max((m for m in k3.Q3M_LEAN_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES) if mod.startswith(m + '_')), key=len, default='dec_q3m_gg')
         k3.MODULE_CAPS[mod] = k3.MODULE_CAPS[base]; k3.Q3M_MODULES = k3.Q3M_MODULES + (mod,)
         if base in k3.Q3M_LEAN_MODULES: k3.Q3M_LEAN_MODULES = k3.Q3M_LEAN_MODULES + (mod,)
         if base in k3.Q3M_IQ_MODULES: k3.Q3M_IQ_MODULES = k3.Q3M_IQ_MODULES + (mod,); k3.ROUTER_NE[mod] = k3.ROUTER_NE[base]

@@ -300,8 +300,8 @@ def stage_kernels(S):
         if keep is None: os.environ.pop('CAMINUS_KERNEL_DIR', None)
         else: os.environ['CAMINUS_KERNEL_DIR'] = keep
     names = set(K.RUNTIME_SET)
-    check('kernels: the runtime set has unique names and no trace / swiglu / test-reference builds',
-          not any(n.endswith(('_trace', '_swiglu')) or n == 'gg_mmvf_ref' for n in names)
+    check('kernels: the runtime set has unique names and no trace / test-reference builds',
+          not any(n.endswith('_trace') or n == 'ref_gg_mmvf' for n in names)
           and len(names) == len(K.RUNTIME_SET), str(len(names)))
     if not os.path.isfile(os.path.join(ROOT, 'build', 'BUILD-INFO')):
         print('NOTE kernels: no build/BUILD-INFO (./build.sh not run): the staging checks are skipped', flush=True); return
@@ -329,12 +329,12 @@ def stage_kernels(S):
                        capture_output=True, text=True, env=dict(noepoch, SOURCE_DATE_EPOCH='yesterday'))
     check('kernels: a SOURCE_DATE_EPOCH that is not whole seconds is refused', r.returncode == 2 and 'SOURCE_DATE_EPOCH' in r.stderr
           and not os.path.exists(os.path.join(S, 'staged-bad')), r.stderr.strip()[-200:])
-    p = os.path.join(st, 'k3_guard.hsaco')
+    p = os.path.join(st, 'dec_guard.hsaco')
     b = bytearray(open(p, 'rb').read()); b[-1] ^= 1; open(p, 'wb').write(bytes(b))
     os.rename(os.path.join(st, 'smoke.hsaco'), os.path.join(st, 'smoke.hsaco.moved'))
     _, res = K.verify(st)
     bad = {n: dt for n, ok, dt in res if not ok}
-    check('kernels: verify finds a changed byte and a missing object', set(bad) == {'k3_guard.hsaco', 'smoke.hsaco'}, str(bad))
+    check('kernels: verify finds a changed byte and a missing object', set(bad) == {'dec_guard.hsaco', 'smoke.hsaco'}, str(bad))
     r = subprocess.run([PY, '-I', os.path.join(ROOT, 'tools', 'release', 'stage_kernels.py'), '--out', os.path.join(S, 'staged2')], capture_output=True, text=True)
     info = dict(l.split('\t', 1) for l in open(os.path.join(ROOT, 'build', 'BUILD-INFO')).read().splitlines() if l)
     if info.get('source_dirty') == '1':

@@ -1,6 +1,6 @@
 // dec_q35m_attn: the qwen35moe (Qwen3.6-35B-A3B) decode attention as its own kernel, outside the K3 megakernel: one launch
 // per attention layer, T = 1, 16 query heads over 2 kv heads, head dim 256, the F16 or the Q8_0 cache. The inputs and the
-// output are the split pair's (kernels/k3_attn_split.h OP_ATTN_PART + OP_ATTN_COMB, caminus.engine.k3 attn_dec): q fp32
+// output are the split pair's (kernels/ops_attn_split.h OP_ATTN_PART + OP_ATTN_COMB, caminus.engine.k3 attn_dec): q fp32
 // [16][256] as the tape's qk_nr leaves it, the cache rows 0 .. pos (pos: the int32 device word the tape's ops read), per
 // position [K | V] in kv_get's layout (F16: 512 halves each; Q8: 16 blocks {fp16 d, int8 qs[32]} each), out fp32 [16][256].
 // The Q8 tape's Hadamard rotations stay outside (q / k over 256 and v in blocks of 64 before, the output back after).
@@ -18,7 +18,7 @@
 // What is Caminus's own (the 35B's 8 query heads fill half of WMMA's 16 columns): the other 8 columns carry the low
 // half of an fp16 hi + lo split, of Q (scores) and of P (sums), each lo scaled by 2^11 into fp16's normal range, so the
 // products are fp32-grade on an F16 cache (fp16 K / V values are exact operands) instead of fp16-rounded Q and P.
-// Q8: each value decoded as fp16(code * d) (kv_get's value, one rounding: half an fp16 ulp; q3m_prefill's q3p_attn_q8
+// Q8: each value decoded as fp16(code * d) (kv_get's value, one rounding: half an fp16 ulp; pf_q3m's q3p_attn_q8
 // does the same), the code turned into fp16 exactly by the 0x6400 bias.
 //
 // Launch: grid NS * 4 workgroups (workgroup b: dv half b & 1, kv head (b >> 1) & 1, split b >> 2: a split's four

@@ -9,7 +9,7 @@ sit on and beside every edge of its layout (a 16-key tile, a 64-key run, the las
     the one deliberate rounding, each K / V value to fp16 (u = 2^-11 of it): u max |V| for V, and for K every score
     moved by at most delta = scale u max_k sum_d |q_d k_d| (natural units), so every p by a factor in
     [e^-2delta, e^2delta]: (e^2delta - 1) max |V|; plus the 1e-5 x max |V| above. The measured error is printed beside it
-  - against the split pair itself (OP_ATTN_PART + OP_ATTN_COMB on k3_q35_moe / k3_q35_moe_kvq8, a tape of just that
+  - against the split pair itself (OP_ATTN_PART + OP_ATTN_COMB on dec_q35m / dec_q35m_kvq8, a tape of just that
     pair): F16 within 2e-5 x max |V| (both within 1e-5 of float64), Q8 within the bound above + 1e-5 x max |V|
   - the rows past the last cell filled with NaN (64 rows, every length): the output unchanged (no read past pos)
   - an exactly sized cache (F16 16384 rows = 32 MiB, Q8 32768 rows = 34 MiB, whole 2 MiB pages as the benchmark's
@@ -101,7 +101,7 @@ for kv in A.kv.split(','):
     raw, kvk, kv32 = make_cache(rng, ROWS, Q8)
     kv64 = kv32.astype(np.float64) if Q8 else None
     cache = torch.from_numpy(raw).to('cuda')
-    module = 'k3_q35_moe_kvq8' if Q8 else 'k3_q35_moe'
+    module = 'dec_q35m_kvq8' if Q8 else 'dec_q35m'
     vmax = float(np.abs(kvk[:, 1]).max())
     rowsv = cache.view(torch.uint8).view(ROWS, pb)
     att = DecQ35mAttn(Q8)
@@ -152,7 +152,7 @@ for kv in A.kv.split(','):
         check(b_worst, f'q8: against float64 over code * d (max {e_32:.2e}) and against the split pair (max {e_pair:.2e}) '
                        f'within each case\'s fp16-rounding bound (u + (e^2delta - 1) + 1e-5, x max |V|)')
     else:
-        check(e_pair <= 2e-5, f'f16: against the split pair (k3_q35_moe): max |difference| {e_pair:.2e} x max |V| (<= 2e-5)')
+        check(e_pair <= 2e-5, f'f16: against the split pair (dec_q35m): max |difference| {e_pair:.2e} x max |V| (<= 2e-5)')
     check(pois, f'{kv}: NaN in the 64 rows past the last cell never reaches the output (every length)')
     check(rep, f'{kv}: two launches bitwise equal (every length and q)')
     # other split counts

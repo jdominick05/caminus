@@ -207,8 +207,8 @@ themselves are checked against `packaging/gfx1100-kernels.sha256`). Nothing in t
 `__hip_cuid_<hash>` whose hash covers the compile command's options, and those hold the absolute `-I<IGNITE>/ggml/...`
 include paths and the toolchain's (`ROCM_PATH`) paths. The objects therefore differ when `IGNITE` or `ROCM_PATH` is
 another path string, with the same instructions and read-only data: symbol names and the symbol hash and string tables
-built from them. (Only `IGNITE` changing touches the 28 objects that include ggml headers, `k3_gguf*`, `prefill_mmq_*`,
-`prefill_moe_*` and `prefill_dense_*`; `ROCM_PATH` changing touches every object.) The repository's own path and the temporary directory
+built from them. (Only `IGNITE` changing touches the 28 objects that include ggml headers, the `k3.GGUF_BUILDS`, `pf_gg_mmq_*`,
+`pf_gg_moe_*` and `pf_gg_dense_*`; `ROCM_PATH` changing touches every object.) The repository's own path and the temporary directory
 do not enter them. A byte-for-byte rebuild needs the same toolchain, the same fork commit at the same absolute `IGNITE` path and
 the same `ROCM_PATH` string as the release build; `packaging/gfx1100-kernels.sha256` holds the release build's hashes, and
 kernels.yml's "N of M equal" count is low for this reason as well as the compiler's.

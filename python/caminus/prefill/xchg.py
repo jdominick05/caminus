@@ -1,6 +1,6 @@
 """The prefill's two-card exchange without gguf-py (caminus.prefill.q35own_tp imports only this; caminus.prefill.tp re-exports
 every name): the all-reduce of [T, D] fp32 partials between the two TP cards by hipMemcpyPeerAsync pushes on copy streams and
-the in-place sum (kernels/prefill_tp.hip pf_xchg_add, card 0's partial first on both cards), ordered by HIP events only. The
+the in-place sum (kernels/pf_tp.hip pf_xchg_add, card 0's partial first on both cards), ordered by HIP events only. The
 measurements and the overlap modes are described in caminus.prefill.tp's docstring."""
 import ctypes
 import torch
@@ -41,16 +41,16 @@ class SysEvent:
 
 
 F32 = torch.float32
-_check = LaunchCheck('prefill_tp', align=4, short_dtype=True)   # every launch: each fp32 buffer stated once
+_check = LaunchCheck('pf_tp', align=4, short_dtype=True)   # every launch: each fp32 buffer stated once
 
 
 class Tp:
-    """the prefill_tp kernels on one device (every launch with that device current, on its current stream)"""
+    """the pf_tp kernels on one device (every launch with that device current, on its current stream)"""
     def __init__(self, device, module=None):
         self.dev = torch.device(device)
         if module is not None: self.m = module
         else:
-            with torch.cuda.device(self.dev): self.m = Module('prefill_tp')
+            with torch.cuda.device(self.dev): self.m = Module('pf_tp')
 
     def _go(self, fn, n, *args):
         with torch.cuda.device(self.dev):
