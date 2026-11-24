@@ -706,6 +706,25 @@ extern "C" __global__ void __launch_bounds__(256) q35p_kv_append16(const float *
     }
 }
 
+#ifdef Q35P_KV_Q8
+// q35p_kv_append_q8 (the Q8 KV object, kernels/q35m_prefill_kvq8.hip): OP_KV_APPEND's Q8_0 rows, the decode Q8 module's
+// (k3_q35_kvq8_ops.h q35_op_kv_append_q8: one thread per block, own_kv_q8_encode): cache[pos0 + t] = the blocks of k[t]
+// then of v[t], fp32 (the host rotates them first: K by Hadamard256, V by Hadamard64). A refused block ORs 2 into *err
+// and keeps its bytes; a row at or past `rows` is not written and ORs 1. Grid T.
+extern "C" __global__ void __launch_bounds__(256) q35p_kv_append_q8(const float * __restrict__ k, int ldk, const float * __restrict__ v,
+                                                                    int ldv, uint8_t * __restrict__ cache, int M, int pos0, int rows,
+                                                                    int * __restrict__ err) {
+    const int tt = blockIdx.x, pos = pos0 + tt;
+    if (pos < 0 || pos >= rows) { if (threadIdx.x == 0) atomicOr(err, 1); return; }
+    OwnKvQ8Block * dst = (OwnKvQ8Block *)(cache + (size_t)pos * own_kv_q8_row_bytes(M));
+    const int nb = M / 32;
+    for (int b = threadIdx.x; b < 2 * nb; b += blockDim.x) {
+        const float * x = (b < nb ? k + (size_t)tt * ldk : v + (size_t)tt * ldv) + (size_t)(b % nb) * 32;
+        if (!own_kv_q8_encode(x, dst + b)) atomicOr(err, 2);
+    }
+}
+#endif
+
 // q35p_attn16: OP_ATTN_DEC over a chunk's rows (own_op_attn_dec's batched form on the f16 cache, k3_own_ops.h): one
 // workgroup per (row, query head), the decode's task index h = row * heads + head; row r sees cache positions 0 .. pos0 + r.
 // The same statements in the same order: 512-position chunks, a wave scores positions t and t + 8 (4 K loads of each in
@@ -799,6 +818,8 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn16(const float * __re
 // with fp32 fmas, tiles past the pair skipped, K's rows independent).
 // q: the chunk's [n][heads][256] fp32 (the q norm + RoPE output; rounded to fp16 here), out the same shape (fp32).
 // scale_log2 = scale * log2(e). Grid (8-position blocks blk0 .. blk0 + gridDim.x - 1, nkv), block 256.
+// Not in the qwen35moe objects (Q35P_NO_ATTN_WM: kernels/q35m_prefill.hip's q35mp_attn is theirs).
+#ifndef Q35P_NO_ATTN_WM
 #define AW_C 32
 #define AW_D 256
 #define AW_KP (AW_D + 8)
@@ -954,6 +975,7 @@ extern "C" __global__ void __launch_bounds__(256) q35p_attn_wm(const float * __r
 #pragma unroll
         for (int v = 0; v < 8; v++) op[d * 16 + 2 * v + hi] = O[d][v] * il;
 }
+#endif
 
 // q35p_gate_mul16: OP_GATE_MUL16 over values i < N: y16[i] = fp16(a[i] * sigmoid(gate[h * stride + off + d])), h = i / D,
 // d = i % D (the q GEMM's [q | gate] head pairs: stride 2 D, offset D; h counts heads across the chunk's rows).

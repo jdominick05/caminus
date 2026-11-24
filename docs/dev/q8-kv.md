@@ -124,6 +124,25 @@ The second checks verify passes on a Q8 cache bitwise against Q8 one-token decod
 None of these has run on a GPU. Still missing after them: model accuracy at depth (KLD against the F16 cache),
 speed, matching prefill, cache park/restore, the GSQ verify objects and two cards.
 
+## Qwen3.6-35B-A3B (one card)
+
+`Moe35Own(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q35_moe_kvq8` (`k3.Q35MOE_KV_Q8_OF`), with the dense
+line's format and rotations above (`kv_format_id` `q8_0-v1:qk-hadamard256:v-hadamard64-v1`; eight query heads per KV
+head). Its batched prefill `Q35MoEPrefill` follows the engine: the rotations run as `prefill_attn_q35`'s `pf_hadamard`
+(the decode op's butterflies), `kernels/q35m_prefill_kvq8.hip` (`kernels/q35_prefill.hip` and `kernels/q35m_prefill.hip` under `Q35P_KV_Q8`) adds the
+append (`q35p_kv_append_q8`: the decode's `own_kv_q8_encode`, one thread per block) and the tiled attention over the rows
+(`q35mp_attn_q8`: each staged value fp16(code x scale), one rounding more than the decode's reader; at F16's speed, 48 TF
+at 30K: docs/dev/yardsticks.md). A
+refused block sets error bit 2 and marks the engine broken (`k3.InvalidKVEncoding`). `caminus serve --kv q8` takes the
+batched prefill in either rope mode (YaRN: `prefill_attn_q35_yarn`, `PF_QK_YARN`: the decode op's table and magnitude
+scale; prefill-then-decode against the float64 YaRN x2 reference 3.61e-4 / 64 of 64, decode-only 4.45e-4).
+
+Gates (RX 7900 XT): `tests/prefill/test_q35m_prefill_ops.py` (the append bitwise the decode module's, the refusals);
+prefill of positions 0 .. 63 then decode of 64 .. 127 against the float64 reference (`tests/prefill/test_q35_prefill.py
+--kv q8`): mean KLD 2.41e-4, top-1 64/64, decode-only on the same rows 2.49e-4, 64/64 (F16: 3.35e-4 / 3.45e-4); chunk
+geometry and prompt-cache stops change no logit and no cache byte; 16,384 tokens from empty in 3.37 s (4,856 tok/s; F16
+3.30 s).
+
 ## Qwen3-30B-A3B (one card)
 
 `Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `k3_q3m_lean_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to

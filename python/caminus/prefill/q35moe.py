@@ -10,7 +10,7 @@ Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's 
             attn_gate (GEMM), the recurrence (the decode's state in place), the output norm with the SiLU gate as fp16,
             ssm_out (GEMM)
   attention attn_q / k / v (GEMMs); k norm + RoPE, the f16 KV append, q norm + RoPE, the attention over positions
-            0 .. pos (q35p_attn_wm: WMMA tiles; 8 query heads per kv head, head dim 256), the output gate as fp16,
+            0 .. pos (q35mp_attn: WMMA tiles; 8 query heads per kv head, head dim 256), the output gate as fp16,
             attn_output (GEMM)
   h, h16 = add_rms16(x += block, post_attention_norm)
   MoE       router logits (F32 [256], pf_f32_mv_k2048) and the shared expert's gate logit (F32 [1]); the top 8 with the
@@ -30,7 +30,7 @@ import ctypes
 import numpy as np
 import torch
 
-from ..device import capacity
+from ..device import capacity, hip
 from ..engine import k3
 from . import q3m_ops, q35own
 from .attn import Attn
@@ -41,6 +41,7 @@ from .glue import Glue
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
 MODULE = 'q35m_prefill'
+KVQ8_MODULE = 'q35m_prefill_kvq8'   # the Q8 KV cache's append and attention (kernels/q35m_prefill_kvq8.hip)
 ROUTER_FLOOR = 6.103515625e-5   # (the router's clamp on the top-k sum: Moe35Own's router_shexp default)
 # T*: below it a prompt part runs as K3 one-token passes (bitwise the decode). Unmeasured: q35own's value until a speed
 # test sets it
@@ -50,8 +51,26 @@ CROSSOVER = q35own.CROSSOVER
 class Ops(q35own.Ops):
     """kernels/q35m_prefill.hip's launchers: q35_prefill's (included as they are) + the MoE line's own"""
 
-    def __init__(self, dev, module=MODULE):
+    # the tiled attention: q35mp_attn (kernels/q35m_prefill.hip: rocKE's gfx11 pipeline on q35p_attn_wm's absolute-position
+    # tiles; attn_wm's contract), q35mp_attn_q8 from the Q8 object
+    WM_KERNEL = ('q35mp_attn', 'q35mp_attn_q8')
+
+    def __init__(self, dev, module=MODULE, q8=False):
+        """q8: the KV cache is Q8_0 rows (kernels/own_kv_codec.h): kv_append_q8 and attn_wm's Q8 kernel run KVQ8_MODULE's
+        kernels, every other kernel stays on `module`"""
         super().__init__(dev, module)
+        self.q8 = bool(q8)
+        if self.q8:
+            with torch.cuda.device(dev): self.kvmod = hip.Module(KVQ8_MODULE)
+
+    def kv_append_q8(self, k, ldk, v, ldv, cache, M, pos0, n, rows, err):
+        """cache rows pos0 .. pos0 + n - 1 = the Q8_0 blocks of (k, v), fp32 (the decode's own_kv_q8_encode); a refused block
+        ORs 2 into err, a row past `rows` 1 (k3.check_span refuses such chunks first)"""
+        if not self.q8: raise ValueError('q35moe kv_append_q8: an F16 Ops')
+        alloc = k3.kv_rows(cache, int(M), True)
+        if not 0 < int(rows) <= alloc: raise ValueError(f'q35moe kv_append_q8: rows {rows} of a cache of {alloc}')
+        k3.check_span(pos0, n, int(rows), what='q35moe kv_append_q8')
+        self.kvmod.q35p_kv_append_q8((int(n),), (256,), k, I(ldk), v, I(ldv), cache, I(M), I(pos0), I(rows), err)
 
     def add_rms16(self, x, nw, eps, h16, n, N, d=None, w=None, S=0, h=None):
         """q3p_add_rms16: per row x += the S slots of d weighted by w (w None: summed), then h = rms_norm(x) * nw and
@@ -115,14 +134,15 @@ def shapes_of(path):
 
 
 class Q35MoEPrefill(PrefillDriver):
-    """the batched prefill of a Moe35Own engine m (F16 KV, native rope), chunks of up to `chunk` tokens; buffers
+    """the batched prefill of a Moe35Own engine m (F16 or Q8 KV, native rope or YaRN), chunks of up to `chunk` tokens; buffers
     preallocated (checked against the card's guard line first: capacity.check)"""
 
     def __init__(self, m, chunk=2048, crossover=None, check=True):
-        if getattr(m, 'q8', False): raise ValueError('Q35MoEPrefill: the Q8 KV cache has no batched prefill yet (F16 only)')
-        if getattr(m, 'yarn_factor', None) is not None:
-            raise ValueError('Q35MoEPrefill: the YaRN mode has no batched prefill yet (the prefill rope has no YaRN table)')
         self.m, self.chunk = m, int(chunk)
+        self.yarn = getattr(m, 'yarn_factor', None) is not None   # (the long-context mode: pf_qk_nr's YaRN form)
+        self.q8 = bool(getattr(m, 'q8', False))   # (the engine's cache: Q8_0 rows, its Hadamard transforms; never F16 kernels)
+        if self.q8 and (m.hd != 256 or m.nh != 8 * m.nkv):
+            raise ValueError(f'Q35MoEPrefill: the Q8 cache needs head dim 256 and 8 query heads per kv head ({m.hd}, {m.nh} / {m.nkv})')
         if not 16 <= self.chunk <= 4096: raise ValueError(f'Q35MoEPrefill: chunk {chunk} (16 .. 4096)')
         if m.nl_build != m.nl: raise ValueError('Q35MoEPrefill: a debug_layers engine is refused')
         if m.D != 2048: raise ValueError(f'Q35MoEPrefill: n_embd {m.D} (the F32 matvec kernel is pf_f32_mv_k2048)')
@@ -142,10 +162,12 @@ class Q35MoEPrefill(PrefillDriver):
         if check: capacity.check([dev.index], [self.need_mib], f'Q35MoEPrefill buffers (chunk {T})')
         f32, f16, i32 = layout(m, T)
         with torch.cuda.device(dev):
-            self.O = Ops(dev)
+            self.O = Ops(dev, q8=self.q8)
             self.Gl = Glue(dev, module='prefill_glue_q35')
             self.Gd = Gdn(dev, module='prefill_gdn_q35')
-            self.A = Attn(dev, name='prefill_attn_q35')
+            self.A = Attn(dev, name='prefill_attn_q35_yarn' if self.yarn else 'prefill_attn_q35')
+            # (the YaRN mode: the decode tape's table and magnitude scale, the same fp32 values: Moe35Own.yarn)
+            self.ytab = None if not self.yarn else (torch.tensor(m.yarn[0], dtype=torch.float32, device=dev), float(m.yarn[1]))
             for n, c in f32.items(): setattr(self, n, torch.zeros(c, dtype=torch.float32, device=dev))
             for n, c in f16.items(): setattr(self, n, torch.zeros(c, dtype=torch.float16, device=dev))
             for n, c in i32.items(): setattr(self, n, torch.zeros(c, dtype=torch.int32, device=dev))
@@ -162,11 +184,14 @@ class Q35MoEPrefill(PrefillDriver):
         if draft is not None: raise PrefillRefused('Q35MoEPrefill: no drafter for this line yet')
 
     def numerics(self):
-        """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the F32 router"""
-        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='none', dense='own-wmma')
+        """the engine key's prefill part: own WMMA GEMMs (fp16 x, exact weights, fp32 sums), the F32 router; a Q8 engine's
+        rows (the decode's encode of the rotated k / v); a YaRN engine's rope key"""
+        return dict(wmma_out='f32', router_logits='f32', moe='own-wmma', q6k='none', dense='own-wmma',
+                    **({'kv': self.m.kv_format_id} if self.q8 else {}), **({'rope': self.m.rope_key} if self.yarn else {}))
 
     def _chunk(self, toks, a, b):
         m, O, Gl, Gd, A = self.m, self.O, self.Gl, self.Gd, self.A
+        if getattr(m, 'broken', None): raise k3.InvalidKVEncoding(f'Q35MoEPrefill: refused: {m.broken}')
         n, p = b - a, a
         D, nh, nkv, hd, S, NK, NV, eps = m.D, m.nh, m.nkv, m.hd, m.S, m.NK, m.NV, m.eps
         ff, fs, E, k = m.ffn, m.ffn_shexp, m.n_exp, m.k_used
@@ -218,13 +243,18 @@ class Q35MoEPrefill(PrefillDriver):
                 qo = W[o0:o0 + n * QH]; o0 += n * QH
                 att = W[o0:o0 + n * QH]
                 O.mm(L['k'], h16, D, kr, M, n=n); O.mm(L['v'], h16, D, vr, M, n=n)
-                A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n)
-                O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
+                A.qk_nr(kr, hd, nkv, hd, L['kn'], m.nrot, m.theta_scale, eps, p, ko, n, yarn=self.ytab)
+                if self.q8:   # (the decode Q8 tape's transforms: K and q by Hadamard256, V and the output by Hadamard64)
+                    A.hadamard(ko, 256, n * M // 256); A.hadamard(vr, 64, n * M // 64)
+                    O.kv_append_q8(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
+                else: O.kv_append16(ko, M, vr, M, L['cache'], M, p, n, m.max_ctx, self.err)
                 if il == last: break                       # (the last layer: only its cache rows are needed)
                 O.mm(L['q'], h16, D, qf, 2 * QH, n=n)
-                A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n)
+                A.qk_nr(qf, 2 * hd, nh, hd, L['qn'], m.nrot, m.theta_scale, eps, p, qo, n, yarn=self.ytab)
+                if self.q8: A.hadamard(qo, 256, n * QH // 256)
                 for b0, b1 in O.attn_blocks(p, n):
                     O.attn_wm(qo, L['cache'], p, n, nh, nkv, hd, scale, att, m.max_ctx, b0, b1)
+                if self.q8: A.hadamard(att, 64, n * QH // 64)
                 O.gate_mul16(att, qf, x16, n * QH, hd, 2 * hd, hd)
                 O.mm(L['o'], x16, QH, blk, D, n=n)
             O.add_rms16(x, L['post_norm'], eps, h16, n, D, d=blk, S=1, h=h)
@@ -244,6 +274,12 @@ class Q35MoEPrefill(PrefillDriver):
 
     def check_flags(self, what='prefill'):
         e, r = int(self.err.item()), int(self.rerr.item())
+        if e & 2:   # (a Q8 block refused by the encode: rows may already be written; the engine is unusable)
+            self.err.zero_(); self.rerr.zero_()
+            why = f'{what}: a KV block was refused (error word {e:#x}); the cache rows are unusable'
+            mark = getattr(self.m, 'mark_broken', None)
+            if mark is not None: mark(why, error_cls=k3.InvalidKVEncoding)
+            raise k3.InvalidKVEncoding(why)
         if e or r:
             self.err.zero_(); self.rerr.zero_()
             raise k3.ContextBoundsError(f'{what}: the KV append refused rows (word {e:#x}) / the routing flag word is {r:#x} '
