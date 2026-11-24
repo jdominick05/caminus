@@ -139,8 +139,11 @@ CLAUDE.md imports this file.
   for Qwen3.6's routed experts and the Coder's Q2_0 down; no decode module includes it yet. `kernels/own_mv_q2_0.hip` holds
   its standalone plain and grouped forms (`tests/engine/test_own_q2_0.py`, `benchmarks/q36_gacc.py`).
 - `kernels/dec_q35m_attn.hip`: Qwen3.6-35B-A3B's decode attention (T 1, F16 / Q8_0 KV, split-KV with a fused merge) as its own
-  launch outside k3_run, through `engine/dec_q35m_attn.py`; no tape uses it yet (`tests/engine/test_dec_q35m_attn.py`,
-  `benchmarks/attn_bench.py --new`; docs/dev/yardsticks.md). Not in the installed runtime set.
+  launch outside k3_run, through `engine/dec_q35m_attn.py` (`tests/engine/test_dec_q35m_attn.py`, `benchmarks/attn_bench.py --new`;
+  docs/dev/yardsticks.md). `Moe35Own` runs it from `q35_moe.ATTN_FROM` on: its tape cut at each attention layer's split
+  pair (`k3.Engine.split`: launches of their own on one stream, a dependency on an earlier launch dropped), the kernel
+  between the slices (`tests/engine/test_q35m_slices.py`: the slices with the pair launched alone are the single launch's
+  bits). Not in the installed runtime set (the 35B is paused; it joins with `k3_q35_moe`).
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects; pair each new object's scalar-spill count with its F16

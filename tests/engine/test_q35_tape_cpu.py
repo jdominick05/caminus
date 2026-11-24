@@ -183,6 +183,42 @@ check(sg.op == k3.OP_PREFETCH and (sg.ntask, sg.dep, sg.rows_per_task, sg.K) == 
       and rec == [pw[0].data_ptr() & ~127, lines(pw[0]), pw[1].data_ptr() & ~127, lines(pw[1])] and sg.N == rec[1] + rec[3]
       and e_q.prefetch([B(0)], 16) is None and refused(lambda: e_s.prefetch(pw, 16)),
       f'OP_PREFETCH: one segment, 16 tasks x 16 threads over {sg.N} lines of two ranges; nothing for no bytes; the dense module refuses it')
+# k3.Engine.split (the qwen35moe sliced pass, Moe35Own._build_slices): a tape cut around its split attention pair runs as
+# launches of their own, each on its own sync row; a dependency inside a launch is renumbered, one on an earlier launch
+# dropped (stream order holds it); the pass parameters, the bound guard and the Q8 error word stay the tape's
+e_sp = k3.Engine(module='k3_q35_moe_kvq8'); M_, R_ = 2 * 256, 64
+cache_, pos_ = torch.zeros(R_ * k3.kv_pos_bytes(M_, True), dtype=torch.uint8), torch.zeros(1, dtype=torch.int32)
+ap_ = e_sp.kv_append(B(M_), B(M_), cache_, pos_, q8=True)
+cb_ = e_sp.also(e_sp.attn_dec(B(16 * 256), cache_, pos_, B(16 * 256), 16, 2, 256, 0.0625, q8=True, dep=ap_, max_cells=R_), ap_)
+g1_ = e_sp.gate_mul16(B(16 * 256), B(2 * 16 * 256), 512, 256, B(16 * 256, torch.float16), 256, dep=cb_)
+g2_ = e_sp.also(e_sp.gate_mul16(B(16 * 256), B(2 * 16 * 256), 512, 256, B(16 * 256, torch.float16), 256, dep=g1_), ap_)
+e_sp.build()
+lns, blk = e_sp.split([1, 3])
+dd = [[(sg.op, sg.dep, sg.dep2p1) for sg in e.segs] for e in lns]
+check(len(lns) == 3 and tuple(blk.shape) == (3, k3.SYNC_WORDS + 8) and all(e.sync.data_ptr() == blk[j].data_ptr() for j, e in enumerate(lns))
+      and [e.base for e in lns] == [0, 1, 3] and dd == [[(k3.OP_KV_APPEND, -1, 0)], [(k3.OP_ATTN_PART, -1, 0), (k3.OP_ATTN_COMB, 0, 0)],
+                                                        [(k3.OP_GATE_MUL16, -1, 0), (k3.OP_GATE_MUL16, 0, 0)]]
+      and all(e.kv_error is e_sp.kv_error and e.params is e_sp.params and e.guard_caps == e_sp.guard_caps and e.module == e_sp.module
+              and e.grid == e_sp.grid and not e.refuse for e in lns)
+      and [(sg.op, sg.dep, sg.dep2p1) for sg in e_sp.segs][3:] == [(k3.OP_GATE_MUL16, 2, 0), (k3.OP_GATE_MUL16, 3, 1)]
+      and refused(lambda: e_sp.split([3, 1])) and refused(lambda: e_sp.split([0])) and refused(lambda: e_sp.split([5])),
+      f'k3.Engine.split: 3 launches on rows of one sync block, dependencies {dd}, the tape\'s guard, parameters and Q8 error '
+      f'word; the tape itself unchanged; cuts out of order or outside (0, 5) refused')
+# split(cuts, order): the launches run the tape in another order (Moe35Own: each attention block's prefetch behind its
+# pair); cuts are positions in it, dependencies renumbered through it, .orig the tape indices; an order that puts a
+# segment before its dependency, or is not a permutation, refused
+e_so = k3.Engine(module='k3_q35_moe_kvq8')
+ao_ = e_so.kv_append(B(M_), B(M_), cache_, pos_, q8=True)
+pf_ = e_so.prefetch([B(4096)], 4, dep=ao_)
+co_ = e_so.also(e_so.attn_dec(B(16 * 256), cache_, pos_, B(16 * 256), 16, 2, 256, 0.0625, q8=True, dep=ao_, max_cells=R_), ao_)
+go_ = e_so.gate_mul16(B(16 * 256), B(2 * 16 * 256), 512, 256, B(16 * 256, torch.float16), 256, dep=co_)
+e_so.build()
+lo_, _ = e_so.split([1, 3], order=[0, 2, 3, 1, 4])
+do_ = [[(sg.op, sg.dep, sg.dep2p1) for sg in e.segs] for e in lo_]
+check(pf_ == 1 and [e.orig for e in lo_] == [[0], [2, 3], [1, 4]] and [e.base for e in lo_] == [0, 1, 3]
+      and do_ == [[(k3.OP_KV_APPEND, -1, 0)], [(k3.OP_ATTN_PART, -1, 0), (k3.OP_ATTN_COMB, 0, 0)], [(k3.OP_PREFETCH, -1, 0), (k3.OP_GATE_MUL16, -1, 0)]]
+      and refused(lambda: e_so.split([1, 3], order=[0, 3, 2, 1, 4])) and refused(lambda: e_so.split([1, 3], order=[0, 2, 3, 1, 1])),
+      f'k3.Engine.split(order): the prefetch moved behind the pair, launches {do_}; an order against a dependency or with a repeat refused')
 e_m.own_matvec_1rt(q4(8, 256), 'Q4_0', 8, 256, B(256, torch.float16), B(8)); e_m.own_argmax(B(300), 300, torch.zeros(1, dtype=torch.int64))
 e_m.build()
 check(set(e_m.inventory()) == {('OWN_MV', 'Q4_0/a16_1rt'), ('OWN_ARGMAX', '-')} and not e_m.unsupported(), 'the drafter module builds a Q4_0 matvec and the argmax')
