@@ -48,6 +48,10 @@ __shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G * ATTN_PT + ATTN_SS + 1 + ATTN_PT
 __shared__ float ATTN_OWN_LDS[ATTN_SS * ATTN_G + ATTN_SS + 1];
 #endif
 #define ATTN_LDS ((__attribute__((address_space(3))) float *)ATTN_OWN_LDS)   // [ATTN_SS][ATTN_G] scores / p, then cells [ATTN_SS]
+#ifdef ATTN_QL   // (the qwen35moe modules: OP_ATTN_PART's query heads in LDS)
+__shared__ float4 ATTN_OWN_QL[ATTN_G * ATTN_D / 4];
+#define ATTN_QL4 ((__attribute__((address_space(3))) float4 *)ATTN_OWN_QL)
+#endif
 #ifdef K3_Q35_KV_Q8
 #ifdef K3_Q35_ATTN_PACK
 #error "Q8 verify uses the unpacked PART until its packed loads are implemented and gated"
@@ -135,6 +139,12 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
         __syncthreads();
         if (tid < nb) cl[tid] = attn_cell(L, k0 + tid);
         if (tid == 0) cl[ATTN_SS] = nb;
+#ifdef ATTN_QL   // the task's ATTN_G query heads into LDS once, not a global load per head per round of cells
+        {
+            const float4 * q0 = (const float4 *)((const float *)sg.a + ((size_t)a.tt * a.heads + (size_t)a.g * ATTN_G) * ATTN_D);
+            for (int i = tid; i < ATTN_G * ATTN_D / 4; i += blockDim.x) ATTN_QL4[i] = q0[i];
+        }
+#endif
         __syncthreads();
     }
     {   // scores
@@ -181,7 +191,11 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
             }
 #pragma unroll 1
             for (int h = 0; h < ATTN_G; h++) {
+#ifdef ATTN_QL
+                const float4 qa = ATTN_QL4[(h * ATTN_D + 8 * lane) / 4], qc = ATTN_QL4[(h * ATTN_D + 8 * lane) / 4 + 1];
+#else
                 const float4 qa = *(const float4 *)(qb + h * ATTN_D), qc = *(const float4 *)(qb + h * ATTN_D + 4);
+#endif
                 const float qv[8] = {qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w};
                 float a[ATTN_CPR];
 #pragma unroll
@@ -252,8 +266,24 @@ __device__ __forceinline__ void op_attn_part(const Seg & sg, int t) {
             float acc[ATTN_VH];
 #pragma unroll
             for (int h = 0; h < ATTN_VH; h++) acc[h] = 0.0f;
+            int c = 0;
+#ifdef ATTN_VU   // (ATTN_VU cells' values loaded before any is used: more loads in flight, the same fmas in the same order)
 #pragma unroll 1
-            for (int c = 0; c < nb; c++) {
+            for (; c + ATTN_VU <= nb; c += ATTN_VU) {
+                float v[ATTN_VU];
+#pragma unroll
+                for (int j = 0; j < ATTN_VU; j++) {
+                    const uint8_t * vp = vb + (size_t)cl[c + j] * pb;
+                    v[j] = type ? (float)(int8_t)vp[vo] * ATTN_H2F(vp) : ATTN_H2F(vp);
+                }
+#pragma unroll
+                for (int j = 0; j < ATTN_VU; j++)
+#pragma unroll
+                    for (int h = 0; h < ATTN_VH; h++) acc[h] = __builtin_fmaf(sp[(c + j) * ATTN_G + h0 + h], v[j], acc[h]);
+            }
+#endif
+#pragma unroll 1
+            for (; c < nb; c++) {
                 const uint8_t * vp = vb + (size_t)cl[c] * pb;
                 const float v = type ? (float)(int8_t)vp[vo] * ATTN_H2F(vp) : ATTN_H2F(vp);
 #pragma unroll

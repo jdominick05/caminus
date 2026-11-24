@@ -514,6 +514,14 @@ different things.
   tasks with no dependencies. Under lag-1 it stalls the boundary token.
 - **Open:** the MALL replacement policy is not LRU (gradual falloff over 96-160 MB). Whether staging next to NT streams
   keeps the trunk resident is unmeasured (sparse Sec. 4 Q4), and M7 measures it.
+- **Measured (qwen35moe decode, RX 7900 XT, 80 MB):** `OP_PREFETCH` (`kernels/k3_q35_ops.h`) is a `STAGE` op. From
+  each block's first norm, 16 workgroups with 16 loading threads each touch that block's router and shared expert,
+  then the next block's trunk matrices. The Q8_0 row tile loads nontemporally, so the 515 MB head leaves the staged
+  lines in place. Result: 5.88 -> 5.04 ms per token at short context (32K 7.73 -> 7.34, Q8 KV 128K 13.81 -> 13.53),
+  with the same bits.
+  - More misses in flight slow the latency-bound ops beside them: 2 x 256 threads 5.62 ms, 32 x 16 5.74.
+  - Nontemporal expert loads gained nothing.
+  - A plain 64 MB stream evicts a staged 27 MB range; a nontemporal one leaves it in place.
 - **Memory tables:** with ids known at launch start (token id; n-gram hash from the token ring), `TABLE_LOOKUP` has no
   dependencies and is claimed first. Its 1-6 KB cold gather overlaps blocks 0-1. The projection and gate join a later
   stage's fused row group as an extra (K, act) pair, which adds 0 hops. A whole-row context gate (Engram) adds 1 hop

@@ -73,6 +73,10 @@ for src in kernels/*.hip; do
     # code spills at the 96-VGPR cap sooner than under the default scheduler (check llvm-readelf after changes)
     case "$src" in kernels/k3_q3m*.hip|kernels/k3_q35_*.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;   # (the own decode modules: k3_gguf's scheduler, no ggml headers)
     esac
+    # k3_q35_moe*: max-memory-clause instead (XT, 35B, prefetch 16 x 16): the same bits; 79 / 83 -> 77 / 81 VGPRs, fewer
+    # spilled SGPRs; F16 short 4.75 -> 4.74 ms, Q8 32K 6.36 -> 6.38, Q8 128K 11.07 -> 10.94. The default scheduler: 5.27 /
+    # 7.18 / 13.08 (it issues the matvec loads one wait at a time)
+    case "$src" in kernels/k3_q35_moe*.hip) extra=(-mllvm -amdgpu-sched-strategy=max-memory-clause) ;; esac
     # q3m_prefill_mm (the 30B's wide prefill GEMM tiles): max-ilp too (the Q4_K GEMMs 216 -> 205 ms a 2048-token chunk, the
     # same bits); q3m_prefill itself stays on the default scheduler (its q3p_mm_q4k and attention spill under max-ilp)
     case "$src" in kernels/q3m_prefill_mm.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp) ;; esac
