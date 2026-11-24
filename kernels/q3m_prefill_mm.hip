@@ -5,6 +5,7 @@
 // helpers without its kernels. caminus.prefill.q3m_ops launches the three from this object. No ggml-cuda code.
 #define Q3P_WIDE_OBJECT
 #include "q3m_prefill.hip"
+#include "prefill_mm_w.h"   // (the wide tiles' work item, rows and stores: one source with the 35B's Q2_0 tile)
 
 // ---- the wide tiles: two 16-row tiles per wave ---------------------------------------------------------------------------
 // q3p_mm_q4k / q3p_mm_q6k with two row tiles per wave: each A operand (a token tile's 16 values, from LDS) feeds the WMMAs
@@ -16,8 +17,7 @@
 // dense matrices (items null) and the grouped experts (items, xsrc / ydst) as the narrow tiles, with the experts' gate |
 // up fused, a partial item's empty token tiles skipped and the Q4_K weights one chunk ahead. The dense line keeps its own
 // (this body on its objects measured 0.8 % slower on Swift's GEMMs under their default scheduler). Rows past R read
-// row 0 and are never written.
-#define MMW_N 256   // (rows per workgroup of the wide tiles: 8 waves x 32 rows)
+// row 0 and are never written. The work item, rows and stores: kernels/prefill_mm_w.h.
 
 // q4k_b with fp16's exponent byte (0x64: 1024 + q) taken by v_perm from its first source instead of OR-ed in after it:
 // the same bits, two VALU instructions fewer per four values (the wide tile's limit is this unpack: with B = 1 it runs at
@@ -48,8 +48,7 @@ __device__ __forceinline__ void mm_q4k_w(const uint8_t * __restrict__ W, const u
                                          float * __restrict__ Y, _Float16 * __restrict__ Y16, int ldy, const int * __restrict__ ydst,
                                          const MMItem * __restrict__ items, const int * __restrict__ nitems, int ntok) {
     MMItem it;
-    if (items) { if ((int)blockIdx.x >= *nitems) return; it = items[blockIdx.x]; }
-    else { it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off); }
+    MMW_ITEM(it, items, nitems, ntok)
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
     const int NB = K / 256;
     const size_t RB = (size_t)NB * 144;
@@ -59,10 +58,9 @@ __device__ __forceinline__ void mm_q4k_w(const uint8_t * __restrict__ W, const u
     int r[2]; bool rok[2]; const uint8_t * wrow[2];
 #pragma unroll
     for (int rt = 0; rt < 2; rt++) {
-        r[rt] = GU ? blockIdx.y * MM_N + wave * 16 + (lane & 15) : blockIdx.y * MMW_N + wave * 32 + rt * 16 + (lane & 15);
+        r[rt] = MMW_ROW(GU, rt, wave, lane);
         rok[rt] = r[rt] < R;
-        // (dense: the row's offset written as the dense line's tile had it, so its object keeps its code)
-        wrow[rt] = (GU && rt ? W1 : W) + (items ? (size_t)it.e * R + (rok[rt] ? r[rt] : 0) : (size_t)(rok[rt] ? r[rt] : 0)) * RB;
+        wrow[rt] = (GU && rt ? W1 : W) + mmw_grow(it, items, R, r[rt], rok[rt]) * RB;
     }
     f8_t acc[2][4];
 #pragma unroll
@@ -179,31 +177,7 @@ __device__ __forceinline__ void mm_q4k_w(const uint8_t * __restrict__ W, const u
 #pragma unroll
         for (int rt = 0; rt < 2; rt++) hd[rt] = hdn[rt];
     }
-    if (GU) {
-        if (!rok[0]) return;
-#pragma unroll
-        for (int mt = 0; mt < 4; mt++)
-#pragma unroll
-            for (int v = 0; v < 8; v++) {
-                const int t = mt * 16 + 2 * v + (lane >> 4);
-                if (t < it.cnt) {
-                    const float gv = acc[0][mt][v];
-                    Y16[(size_t)(ydst ? ydst[it.off + t] : it.off + t) * ldy + r[0]] = (_Float16)(gv / (1.0f + expf(-gv)) * acc[1][mt][v]);
-                }
-            }
-        return;
-    }
-#pragma unroll
-    for (int rt = 0; rt < 2; rt++) {
-        if (!rok[rt]) continue;
-#pragma unroll
-        for (int mt = 0; mt < 4; mt++)
-#pragma unroll
-            for (int v = 0; v < 8; v++) {
-                const int t = mt * 16 + 2 * v + (lane >> 4);
-                if (t < it.cnt) Y[(size_t)(ydst ? ydst[it.off + t] : it.off + t) * ldy + r[rt]] = acc[rt][mt][v];
-            }
-    }
+    MMW_STORE(GU, acc, r, rok, it, Y, Y16, ldy, ydst, lane)
 }
 
 // q4k_b's Q6_K form (q6k_b) with the exponent byte from v_perm (the same bits)
@@ -228,17 +202,16 @@ __device__ __forceinline__ void mm_q6k_w(const uint8_t * __restrict__ W, int R, 
                                          const int * __restrict__ ydst, const MMItem * __restrict__ items,
                                          const int * __restrict__ nitems, int ntok) {
     MMItem it;
-    if (items) { if ((int)blockIdx.x >= *nitems) return; it = items[blockIdx.x]; }
-    else { it.e = 0; it.off = blockIdx.x * MM_M; it.cnt = min(MM_M, ntok - it.off); }
+    MMW_ITEM(it, items, nitems, ntok)
     const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
     const int NB = K / 256;
     const int nmt = (it.cnt + 15) >> 4;   // (mm_q4k_w's skip of a partial item's empty token tiles)
     int r[2]; bool rok[2]; const uint8_t * pa[2], * pb[2]; const uint16_t * pc[2];
 #pragma unroll
     for (int rt = 0; rt < 2; rt++) {
-        r[rt] = blockIdx.y * MMW_N + wave * 32 + rt * 16 + (lane & 15);
+        r[rt] = MMW_ROW(false, rt, wave, lane);
         rok[rt] = r[rt] < R;
-        const size_t g = items ? (size_t)it.e * R + (rok[rt] ? r[rt] : 0) : (size_t)(rok[rt] ? r[rt] : 0);
+        const size_t g = mmw_grow(it, items, R, r[rt], rok[rt]);
         pa[rt] = W + g * NB * 192; pb[rt] = W + (size_t)Rtot * NB * 192 + g * NB * 16;
         pc[rt] = (const uint16_t *)(W + (size_t)Rtot * NB * 208) + g * NB;
     }
@@ -299,17 +272,7 @@ __device__ __forceinline__ void mm_q6k_w(const uint8_t * __restrict__ W, int R, 
             }
         }
     }
-#pragma unroll
-    for (int rt = 0; rt < 2; rt++) {
-        if (!rok[rt]) continue;
-#pragma unroll
-        for (int mt = 0; mt < 4; mt++)
-#pragma unroll
-            for (int v = 0; v < 8; v++) {
-                const int t = mt * 16 + 2 * v + (lane >> 4);
-                if (t < it.cnt) Y[(size_t)(ydst ? ydst[it.off + t] : it.off + t) * ldy + r[rt]] = acc[rt][mt][v];
-            }
-    }
+    MMW_STORE(false, acc, r, rok, it, Y, (_Float16 *)nullptr, ldy, ydst, lane)
 }
 
 // ---- the kernels: q3p_mm_q4k / q3p_mm_q6k's interface; grid (work items or tokens / 64, rows / 256). q3p_mm_q4k_gu: W the

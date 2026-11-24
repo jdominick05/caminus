@@ -16,6 +16,10 @@
 // in slot 8, weighted by q35mp_router_sh's [n][9] weights (the decode's own_op_add_rms16 9-slot form: fma in slot order).
 // q3p_add_rms16 writes h16 as the qwen35moe decode module's mixed fma does (one rounding of the exact product): only in this
 // object, so q3m_prefill's and q35_prefill's code stays unchanged; likewise q3p_group's third index (Q3P_GROUP_Y9)
+#ifdef Q35M_WIDE_OBJECT   // (kernels/q35m_prefill_mm.hip: the helpers of this file and of the files it includes, no kernels)
+#define Q3P_WIDE_OBJECT
+#define Q35P_WIDE_OBJECT
+#endif
 #define Q3P_ADD_RMS16_MIX
 #define Q3P_GROUP_Y9
 #define Q35P_NO_ATTN_WM
@@ -69,6 +73,7 @@ __device__ __forceinline__ void q2_block(const Q2Step & S, bool rok, int lane, f
         for (int v = 0; v < 8; v++) acc[mt][v] = __builtin_fmaf(d, P[v], acc[mt][v]);
     }
 }
+#ifndef Q35M_WIDE_OBJECT
 extern "C" __global__ void __launch_bounds__(256) q35mp_mm_q2_0(
         const uint8_t * __restrict__ W, int R, int K, const _Float16 * __restrict__ X, int ldx, const int * __restrict__ xsrc,
         float * __restrict__ Y, int ldy, const int * __restrict__ ydst, const MMItem * __restrict__ items, const int * __restrict__ nitems,
@@ -219,3 +224,4 @@ extern "C" __global__ void __launch_bounds__(256) q35mp_emb_bf16(const uint16_t 
 #define PA_QT float
 #define PA_OT float
 #include "prefill_attn_g8.h"
+#endif   // Q35M_WIDE_OBJECT
