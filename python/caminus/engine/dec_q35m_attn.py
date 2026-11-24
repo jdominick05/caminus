@@ -1,7 +1,7 @@
 """The qwen35moe decode attention as its own kernel (kernels/dec_q35m_attn.hip): one launch per attention layer, outside
 the K3 tape, with attn_dec's inputs and output (k3.Engine.attn_dec on the split pair: q fp32 [16][256], the F16 or
 Q8_0 cache of 2 kv heads x 256, the int32 position word on the device, out fp32 [16][256]; the Q8 tape's rotations stay
-outside). Not served yet: nothing builds it into a tape.
+outside). caminus.engine.q35_moe.Moe35Own runs it between the slices of its tape past a depth (attn_from).
 
   A = DecQ35mAttn(q8=False)            # its code object, the workspace (counters + split records) and the error word
   A(q, cache, pos, out, scale)         # queued on the current torch stream (or stream=); no wait, no read-back
@@ -47,7 +47,9 @@ class DecQ35mAttn:
     """one layer's launcher on the current device: q8 picks the kernel (dec_q35m_attn_q8 / _f16); the workspace is this
     object's (layers that run one after another on one stream may share it: each launch re-arms its counters)"""
 
-    def __init__(self, q8, ns_max=NS_MAX):
+    def __init__(self, q8, ns_max=NS_MAX, err=None):
+        """err: an int32 device word to use as the error word (None: allocated here; Moe35Own passes one beside its
+        launches' status words, so one copy reads them all)"""
         dev = torch.cuda.current_device()
         if dev not in _mods: _mods[dev] = Module('dec_q35m_attn')
         self.q8, self.ns_max = bool(q8), int(ns_max)
@@ -55,7 +57,8 @@ class DecQ35mAttn:
         n = workspace_floats(self.ns_max)
         capacity.check([dev], [(n + 1) * 4 / 2 ** 20], 'dec_q35m_attn workspace')
         self.ws = torch.zeros(n, dtype=torch.float32, device='cuda')
-        self.err = torch.zeros(1, dtype=torch.int32, device='cuda')
+        self.err = torch.zeros(1, dtype=torch.int32, device='cuda') if err is None else err
+        assert self.err.dtype == torch.int32 and self.err.is_cuda and self.err.numel() == 1, self.err
 
     def rows(self, cache):
         """positions the cache holds (k3.kv_rows: whole positions of NKV x D values each of K and V)"""

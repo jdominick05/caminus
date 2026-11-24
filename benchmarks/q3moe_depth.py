@@ -17,7 +17,11 @@ The one-card engine does not fit card 0 beside the two-card one, so compare with
 same window, runs alternated.
 --kv q8: the engine with its KV cache as Q8_0 rows (Q3MoEOne(q8=True); the default arm k3_q3m_lean_kvq8; with --cards 2
 Q3MoETP(q8=True) on k3_q3m_lean_tp_kvq8). The F16 and Q8 caches do not both fit at depth, so the decode A/B of the two is
-runs of this script alternated in one window (F16, Q8, F16, Q8, ...), the same depths, tokens and rounds."""
+runs of this script alternated in one window (F16, Q8, F16, Q8, ...), the same depths, tokens and rounds.
+--engine q35moe: Qwen3.6-35B-A3B (engine/q35_moe.py Moe35Own, --kv f16 or q8) instead, its arms pass-time options on one
+engine (name=:option=int ...: attn_from, attn_splits, pair=1 the split pair launched alone between the slices, the cost of
+the launch boundaries alone; default one=:attn_from=1073741824 sliced=:attn_from=0: the single launch against the sliced
+pass with the attention kernel at every depth, which sets q35_moe.ATTN_FROM)."""
 import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -31,6 +35,7 @@ ap.add_argument('--tokens', type=int, default=24); ap.add_argument('--rounds', t
 ap.add_argument('--arms', nargs='+', default=None)
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--local-only', action='store_true')
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
+ap.add_argument('--engine', default='q3moe', choices=('q3moe', 'q35moe'))
 A = ap.parse_args()
 depths = [int(x) for x in A.depths.split(',')]
 if A.local_only and A.cards != 2: raise SystemExit('q3moe_depth: --local-only is a two-card option (--cards 2)')
@@ -85,9 +90,23 @@ if A.cards == 2:
             print(f'  {n:10s} fit (depths past the first): {ic:.3f} ms + {sl * 1e3:.4f} us per position per token')
     print('RESULT DONE')
     sys.exit(0)
-A.arms = A.arms or ['default=' + ('k3_q3m_lean_kvq8' if A.kv == 'q8' else 'k3_q3m_lean')]
-ARMS = []
-for a in A.arms:
+if A.engine == 'q35moe':
+    if A.cards != 1: raise SystemExit('q3moe_depth --engine q35moe: one card')
+    from caminus.engine.q35_moe import Moe35Own
+    ARMS = []
+    for a in A.arms or ['one=:attn_from=1073741824', 'sliced=:attn_from=0']:
+        name, spec = a.split('=', 1); mod, *kv = spec.split(':')
+        o = {k_: int(v_) for k_, v_ in (x.split('=') for x in kv)}
+        if mod or set(o) - {'attn_from', 'attn_splits', 'pair'}: raise SystemExit(f'q3moe_depth --engine q35moe: arm {a}: options attn_from, attn_splits, pair only')
+        ARMS.append((name, o))
+    print(torch.cuda.get_device_name(0), flush=True)
+    max_ctx = A.max_ctx or max(depths) + A.tokens + 1
+    eng = Moe35Own(A.gguf, max_ctx=max_ctx, q8=A.kv == 'q8')
+    print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}, module {eng.module}, grid {eng.E.grid}', flush=True)
+    forms = {n: (o.get('attn_from', eng.attn_from), o.get('attn_splits'), 'pair' if o.get('pair') else 'kernel') for n, o in ARMS}
+    keys = ('attn_from', 'attn_splits', 'attn_launch')
+if A.engine == 'q3moe': A.arms, ARMS = A.arms or ['default=' + ('k3_q3m_lean_kvq8' if A.kv == 'q8' else 'k3_q3m_lean')], []
+for a in (A.arms if A.engine == 'q3moe' else ()):
     name, spec = a.split('=', 1); spec, *kv = spec.split(':'); mod, _, g = spec.partition('@')
     if mod not in k3.MODULE_CAPS:   # (a measurement build under another name: of the module its name starts with, else the full one's ops)
         base = max((m for m in k3.Q3M_LEAN_MODULES + k3.Q3M_IQ_MODULES + tuple(k3.Q3M_RS_MODULES) if mod.startswith(m + '_')), key=len, default='k3_gguf_q3m_own')
@@ -99,17 +118,18 @@ for a in A.arms:
     if g: o['per_wgp'] = int(g)
     for x in kv: k_, v_ = x.split('='); o[k_] = int(v_)
     ARMS.append((name, o))
-print(torch.cuda.get_device_name(0), flush=True)
-max_ctx = A.max_ctx or max(depths) + A.tokens + 1
-eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, q8=A.kv == 'q8', **ARMS[0][1])   # (+ a tape per arm, built below)
-print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}', flush=True)
-keys = ('E', 'S', 'dstage', 'hstage', 'tok', 'pos')
-forms = {}
-for name, opt in ARMS:
-    for k, v in opt.items(): setattr(eng, k, v)
-    with torch.cuda.device(eng.dev): eng._build_tape()
-    forms[name] = tuple(getattr(eng, k) for k in keys)
-    print(f'  arm {name}: {eng.module}, {eng.per_wgp} workgroups per WGP ({k3.resident_grid(eng.module, eng.per_wgp)} in all)', flush=True)
+if A.engine == 'q3moe':
+    print(torch.cuda.get_device_name(0), flush=True)
+    max_ctx = A.max_ctx or max(depths) + A.tokens + 1
+    eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, q8=A.kv == 'q8', **ARMS[0][1])   # (+ a tape per arm, built below)
+    print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}', flush=True)
+    keys = ('E', 'S', 'dstage', 'hstage', 'tok', 'pos')
+    forms = {}
+    for name, opt in ARMS:
+        for k, v in opt.items(): setattr(eng, k, v)
+        with torch.cuda.device(eng.dev): eng._build_tape()
+        forms[name] = tuple(getattr(eng, k) for k in keys)
+        print(f'  arm {name}: {eng.module}, {eng.per_wgp} workgroups per WGP ({k3.resident_grid(eng.module, eng.per_wgp)} in all)', flush=True)
 def use(n):
     for k, v in zip(keys, forms[n]): setattr(eng, k, v)
 ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]

@@ -12,6 +12,8 @@ difference|; the gate: mean KLD <= llama.cpp's and top-1 >= llama.cpp's. The GGU
       smoke runs under a 600 s guard); 256 positions not yet timed
       tools/guard.sh LOG 900 python -I tools/gates/q35_gmodel.py $CODER --ref REF.npz --llama LLAMA [--kv q8|f16]
   python -I tools/gates/q35_gmodel.py --ref REF.npz --llama LLAMA --ref-only     # the reference against llama.cpp, no card
+  qwen35moe (Moe35Own, one card, --kv f16 or q8): --attn-from 0 scores every row on the sliced pass with the decode attention
+      kernel (engine/dec_q35m_attn.py; --attn-splits N forces its splits, so a short reference exercises its merge)
 LLAMA: llama.cpp's one-token-decode logits rows of the same tokens: a .bin of f32 [N, vocab] (build/gg_golden MODEL --lc JOBS
 with the lines 'nctx N+64', 'kv f16' (or 'kv q8_0'), 'onecard' (dense only: the Coder needs both cards), 'tfx ref TOKENS.txt 0
 N 1 1 OUT'), or a gg_golden dump directory (stepI's result_output; its tokens.txt must be the reference's tokens: the stored
@@ -67,6 +69,10 @@ if __name__ == '__main__':
                     help='the YaRN factor (qwen35moe only): the engine builds the long-context rope from it, so the '
                          'reference and llama.cpp must be run in the same mode for the rows to be comparable')
     ap.add_argument('--speed', type=int, default=0, help='then this many greedy passes (step_token) after the rows: median ms per token')
+    ap.add_argument('--attn-from', type=int, default=None,
+                    help='qwen35moe only: Moe35Own(attn_from=): from this position on the passes run sliced with the decode '
+                         'attention as its own kernel (0: every row; default the engine\'s switch)')
+    ap.add_argument('--attn-splits', type=int, default=None, help='qwen35moe only: the attention kernel\'s splits (default: by depth)')
     A = ap.parse_args()
     arch = None
     if not A.ref_only:
@@ -126,8 +132,10 @@ if __name__ == '__main__':
         #  so a YaRN run is gated against a YaRN reference and a YaRN llama.cpp, never against native rows)
         from caminus.engine.q35_moe import Moe35Own
         print(torch.cuda.get_device_name(0), flush=True)
-        eng = Moe35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module, yarn=A.yarn, q8=A.kv == 'q8')
-        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}; kv {getattr(eng, "kv_format_id", None) or "f16"}', flush=True)
+        eng = Moe35Own(A.gguf, max_ctx=len(seq) + 8 + A.speed, module=A.module, yarn=A.yarn, q8=A.kv == 'q8',
+                       attn_from=A.attn_from, attn_splits=A.attn_splits)
+        print(f'module {eng.module}; rope {"YaRN x%g" % A.yarn if A.yarn else "native"}; kv {getattr(eng, "kv_format_id", None) or "f16"}; '
+              f'sliced from position {eng.attn_from} (attention kernel splits {A.attn_splits or "by depth"})', flush=True)
         ours = np.stack([eng.step(t).float().cpu().numpy() for t in seq])
     else:
         from caminus.engine.q35_dense import Dense35Own

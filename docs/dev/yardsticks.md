@@ -247,6 +247,15 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
   Not tuned yet: the Q staging loop, no K / V prefetch (V is loaded after the scores), few splits at 4K. Q8 reads 0.42-0.53 TB/s at
   depth against F16's 0.69-0.82: its in-register decode is the likely limit (not profiled).
 
+- In the engine (`Moe35Own`, `benchmarks/q3moe_depth.py --engine q35moe`, XT, ms per token, interleaved, median of 3): the
+  tape in slices around the kernel pays for its launch boundaries. A bare boundary is ~5 us; the rest is the work one
+  launch overlaps. At first it paid about 0.7 ms a token (~35 us per k3_run boundary): each attention block's prefetch
+  segment (OP_PREFETCH, 16 tasks streaming weights into the Infinity Cache) ran in front of the cut, so the trunk's
+  launch could not end before it had, and the attention waited (the gap after a trunk launch 19 us, after a no-op one 5).
+  With that segment behind the block's pair (the same bits) the sliced pass pays 0.26 ms at depth 0 and wins from
+  24,576 (F16) / 20,480 (Q8) on: 131,072 8.83 against 10.83 F16, 7.74 against 10.76 Q8. The switch and its numbers:
+  `q35_moe.ATTN_FROM`.
+
 ## Prefill GEMMs (Qwen3-30B-A3B and Qwen3.6-35B-A3B, grouped experts)
 
 `benchmarks/q35_prefill_gemm.py GGUF --engine --tokens REF.npz --M 2048`, RX 7900 XT alone. It records every GEMM of one
