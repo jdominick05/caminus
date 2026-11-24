@@ -459,8 +459,10 @@ run):
 - The steps, each against the one before: 128 x 128 workgroups of 8 waves 112.4 ms; 128 x 64 of 4 waves 110.1 (more
   workgroups resident); the scale step one tile behind 107.6. Slower: 8 token tiles a wave (128 x 256: 113.6, spills),
   16 waves (124.4).
-- What is left: a measurement build with fp16(d q) staged and no scale step (not bitwise) took 99.5 ms against 112.4, so
-  the scale step is ~12 % of the chunk; the rest is mostly the wave tile. FlyDSL's 64 x 64 wave tile holds 128
+- What is left: the per-block scale step is ~7 % of the chunk. A correct fold (fp16(d q) staged in LDS, no scale step,
+  not bitwise) took 100.9 ms against 108.9 and 1.03x end to end at 4,096 tokens, but raised the mean KLD of
+  `tests/prefill/test_q35_prefill.py` by 28 % (F16) and 102 % (Q8 KV), so it was not kept. (An earlier figure, 99.5
+  against 112.4, came from a measurement build with a wrong scale on half its rows.) The rest is mostly the wave tile. FlyDSL's 64 x 64 wave tile holds 128
   accumulator VGPRs and spills 4 with no scale step. Ours with 16 accumulator tiles a wave (8 token tiles x 2 row tiles)
   took 256 VGPRs and spilled (2 and 18); a 4 x 4 wave tile with the scale step's P and four row tiles' B operands is
   estimated past 256 VGPRs (not built).
