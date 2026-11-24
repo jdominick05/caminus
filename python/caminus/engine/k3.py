@@ -802,7 +802,7 @@ class Engine:
         if swiglu_mul is not None:
             assert self.module in MTP_MODULES, f'bf16_mv swiglu_mul: the MTP modules only (not {self.module})'
             assert swiglu_mul.dtype == torch.float32 and swiglu_mul.numel() == x.numel(), (swiglu_mul.dtype, swiglu_mul.numel(), x.numel())
-        assert (silu_scale is None and swiglu_mul is None) or rows * ncols <= (1280 if '_ver' in self.module or '_mtp' in self.module else 320), f'staged activation of {rows} x {ncols} floats > the LDS stage of {self.module}'
+        assert (silu_scale is None and swiglu_mul is None) or rows * ncols <= (1280 if self.module.startswith(GGUF_BUILDS) and '_ver' in self.module or '_mtp' in self.module else 320), f'staged activation of {rows} x {ncols} floats > the LDS stage of {self.module}'
         self.keep += [w, x, out] + ([] if swiglu_mul is None else [swiglu_mul])
         work = 2 if swiglu_mul is not None else 0 if silu_scale is None else 1
         self.segs.append(Seg(OP_BF16_MV, (nrows + rows_per_task - 1) // rows_per_task, dep, rows_per_task, w.data_ptr(),
