@@ -214,6 +214,39 @@ What it says:
   1.13x); Q8 4,096 850 -> 805 ms (1.06x), 12,288 3.45 -> 3.07 s (1.12x), 24,576 9.76 -> 8.10 s (2,518 -> 3,034 tok/s,
   1.21x). At 12K (F16, `benchmarks/q3moe_prefill.py --ops`) attention is now 31.8 % of the prefill.
 
+## Decode attention as its own kernel (qwen35moe geometry)
+
+`kernels/dec_q35m_attn.hip` (`engine/dec_q35m_attn.py`) is Qwen3.6-35B-A3B's T 1 decode attention (16 query heads over
+2 kv heads, head dim 256, F16 or Q8_0 KV) launched on its own, outside k3_run's register budget, on rocKE's gfx11
+split-KV decode design (THIRD_PARTY.md): workgroup (split, kv head, half of the output dims), 4 waves, each split taking
+every ns-th run of 4 16-key tiles; scores S^T = K Q^T and O^T = V^T P on WMMA, Q and P as fp16 hi + lo halves in the 8
+unused columns (fp32-grade sums from fp16 operands); Q8_0 rows decoded to fp16(code x d) in registers; the merge done by
+the last workgroup of each group (an atomic counter, re-armed by that workgroup). Splits: `splits(cells)`, one per 512
+keys up to 3 workgroups per WGP over the 4 groups (at most 64).
+
+- Accuracy (`tests/engine/test_dec_q35m_attn.py`): against float64 over the values it reads within 1e-5 x max |V| (F16
+  and Q8), against the split pair within 2e-5 (F16) or the Q8 fp16-rounding bound the test prints per case; rows past
+  the last cell NaN-poisoned; an exactly sized cache (its own allocation) read to its last byte.
+- Speed: `benchmarks/attn_bench.py --new [--kv q8] [--cold]`, the kernel and the split pair (`OP_ATTN_PART` +
+  `OP_ATTN_COMB` on `k3_q35_moe` / `k3_q35_moe_kvq8` at the engine's grid) interleaved, a queued batch of 8 launches per
+  round. rocKE's split-KV decode measured on the XT at this geometry: 21.6 us (4K), 61.9 us (32K), 385 us (128K).
+
+  XT, us per layer, batch 8, median of 15 rounds, the kernel and the pair interleaved; warm = the same rows each launch
+  (as rocKE's graph replay), cold = rotating copies so each launch's rows are not in the Infinity Cache. Splits 8 at 4K,
+  31 at 32K and 128K (the XT's 42 WGPs x 3 / 4); untuned:
+
+  | KV | depth | new warm | pair warm | pair / new | new cold | pair cold | pair / new | rocKE (warm) |
+  |---|---|---|---|---|---|---|---|---|
+  | F16 | 4K | 26.5 | 40.3 | 1.52x | 32.2 | 44.9 | 1.40x | 21.6 |
+  | F16 | 32K | 81.9 (819 GB/s) | 153.8 | 1.88x | 119.1 | 163.7 | 1.37x | 61.9 |
+  | F16 | 128K | 389.0 (690 GB/s) | 571.2 | 1.47x | 389.5 | 570.8 | 1.47x | 385 |
+  | Q8 | 4K | 26.2 | 40.2 | 1.54x | 32.2 | 45.9 | 1.42x | |
+  | Q8 | 32K | 84.1 (424 GB/s) | 159.8 | 1.90x | 90.7 | 162.1 | 1.79x | |
+  | Q8 | 128K | 270.6 (527 GB/s) | 584.9 | 2.16x | 271.0 | 589.9 | 2.18x | |
+
+  Not tuned yet: the Q staging loop, no K / V prefetch (V is loaded after the scores), few splits at 4K. Q8 reads 0.42-0.53 TB/s at
+  depth against F16's 0.69-0.82: its in-register decode is the likely limit (not profiled).
+
 ## Prefill GEMMs (Qwen3-30B-A3B and Qwen3.6-35B-A3B, grouped experts)
 
 `benchmarks/q35_prefill_gemm.py GGUF --engine --tokens REF.npz --M 2048`, RX 7900 XT alone. It records every GEMM of one
@@ -380,6 +413,7 @@ End to end, the 35B (`benchmarks/q3moe_prefill.py GGUF35 --chunk 2048 --ab`: pre
 |---|---|---|---|
 | Decode attention, Swift / ThinkingCap modules, 32K (XT, engine grid) | 4.35 ms / layer | our own split pair: 0.52 ms | 8.4x (own fix, not outside code) |
 | Decode attention after the fix, split pair, 32K | 0.52 ms / layer | rocKE split-KV decode: 0.20 ms | 2.6x |
+| Decode attention, qwen35moe, own kernel (`dec_q35m_attn`), 32K F16 warm | 81.9 us / layer (split pair: 153.8 us) | rocKE split-KV decode: 61.9 us | 1.32x (128K: 389.0 vs 385 us, 1.01x) |
 | Verify attention (T 4), split pair, 32K | 1.29 ms / layer with the packed PART (1.52 ms before; T 1: 0.48 ms) | rocKE, GQA-packed: 0.22 ms | 5.9x (each row's arithmetic is still its own: decode's bits) |
 | Prefill GEMMs, Swift chunk of 2048 | 2.26 s | FlyDSL fp16: 1.37 s | 1.65x |
 | Prefill GEMMs, 30B chunk of 2048 (grouped experts) | 243.4 ms, swiglu inside (283.0 ms before, 292.1 with its swiglu launch) | FlyDSL fp16 at the aggregate M: 160.8 ms | 1.51x (1.76x before) |
