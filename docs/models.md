@@ -7,17 +7,18 @@ from its Hugging Face repository and checks every file before using it.
 
 | Name | Model | Cards | Download | Decode | Prompt reading |
 |---|---|---|---|---|---|
-| `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT, or two XTX | 59.1 GB | 104 tok/s, 123-203 with the drafter | 2,800 tok/s |
-| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M (unsloth's, made with an importance matrix) | 1, 24 GB; or 2 | 18.6 GB | 248 tok/s | 6,432 tok/s |
-| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
-| `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 55 tok/s | 800 tok/s (measured on an XT) |
-| `qwen3.6` | Qwen3.6-35B-A3B (a MoE model, 3B active), GSQ-hybrid: 2-bit experts, 8-bit trunk | 1, any | 12.2 GB | 210 tok/s (measured on an XT; XTX: pending the release window) | 6,571 tok/s (measured on an XT) |
-| `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 47 tok/s; 69 on two cards | 942 tok/s |
+| `coder` | Qwen3.8-Flash-Next Coder + its DFlash drafter | 2: an XTX + XT, or two XTX | 59.1 GB | 104 tok/s, 122-201 with the drafter | 2,800 tok/s |
+| `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M (unsloth's, made with an importance matrix) | 1, 24 GB; or 2 | 18.6 GB | 257 tok/s | 7,275 tok/s |
+| `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 44 tok/s; 63 on two cards | 1,233 tok/s |
+| `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 56 tok/s | 794 tok/s (measured on an XT) |
+| `qwen3.6` | Qwen3.6-35B-A3B (a MoE model, 3B active), GSQ-hybrid: 2-bit experts, 8-bit trunk | 1, any | 12.2 GB | 237 tok/s (211 on an XT) | 8,632 tok/s (6,613 on an XT) |
+| `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 50 tok/s; 71 on two cards | 1,059 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
 measured on an RX 7900 XTX; the two-card numbers on an XTX and an XT together. [Benchmarks](dev/benchmarks.md) lists
-where each number comes from and how llama.cpp does on the same cards. The `qwen3-30b-a3b` numbers were measured on
-Qwen's official Q4_K_M file, which has the same weight formats (see
+where each number comes from and how llama.cpp does on the same cards. All of them were measured on the 0.4.0 release
+commit; the `qwen3-30b-a3b` numbers on the file `caminus pull` downloads (unsloth's; until 0.3.0 they were Qwen's
+official file's, which has the same weight formats: see
 [switching from the official file](#switching-from-the-official-qwen3-30b-a3b-file)).
 
 **Paused for this release:** Qwen3.6-35B-A3B's HauhauCS file (`qwen3.6-hauhau`), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
@@ -33,30 +34,31 @@ again.
   conversations, and a drafter that speeds up code. It was tested with 29 GB of system RAM: it reads part of the model from
   disk. Two XT cards are too small for it.
 - **`qwen3-30b-a3b`** is the fastest writer on one 24 GB card and the most exact (4-bit weights, no llama.cpp code on its
-  path). Its context is 40,960 tokens by default, so it suits shorter work: 213 tok/s with 4K tokens of context, 111
+  path). Its context is 40,960 tokens by default, so it suits shorter work: 216 tok/s with 4K tokens of context, 110
   tok/s when full. For longer work, its opt-in long-context mode (`--long-context`, below) reaches about 80K tokens on
   one XTX and 131,072 on two cards. [The details](dev/qwen3-30b-a3b.md).
-- **`qwen3.6`** is the fastest writer on one XT (210 tok/s there) and fits either card at its full 262K context (served on an
-  XT: a 249K-token prompt read in 166 s, then 89 tok/s at that depth). It runs
+- **`qwen3.6`** is the fastest writer on one XT (211 tok/s there, 237 on an XTX) and fits either card at its full 262K
+  context (served: a 249K-token prompt read in 128 s on an XTX and 167 s on an XT, then 89-90 tok/s at that depth). It runs
   on Caminus's own code end to end, like `qwen3-30b-a3b`: 2-bit experts, so it is the least exact of the one-card models.
   `--kv q8` halves the cache, `--long-context` stretches the window with YaRN. [The details](dev/q8-kv.md#qwen36-35b-a3b-one-card).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
   path). `caminus serve --model ... --draft mtp` drafts with the model's
-  own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
+  own prediction block and verifies 4 tokens a pass (about 2.0-2.1x on code and prose, 1.6x on shell, served on an
   XTX; no extra file); `--draft dflash` drafts with its base model's DFlash2 drafter
-  instead (about 2.2x on code and prose, 1.7x on shell, served on an XTX; the drafter's 2 GB leaves ~12-16K tokens of
+  instead (about 2.0-2.1x on code and prose, 1.5x on shell, served on an XTX; the drafter's 2 GB leaves ~12-16K tokens of
   context on a 24 GB card, so with it the server starts from 8K instead of 32K). Either way the output is identical to plain decoding. `caminus pull swift-1.5` (or
   `thinkingcap`) fetches the 2 GB drafter file with the model, once for both. Its speed drops at depth: about
-  15 tok/s with 28K tokens of context.
+  40 tok/s after a 27.7K-token prompt on an XTX (46 on a short one).
 - **`thinkingcap`** is the other dense 27B model on Caminus's own code end to end: a finetune of the same base, quantized
   to 4.2 bits per weight. It is the smaller download and writes a little faster than `swift-1.5`. It fits a 20 GB card
   too: on an XT the server picks about 53K tokens of context by itself. `--draft mtp` drafts with its own
-  prediction block (about 1.8x on code and prose, served on an XT; no extra file); `--draft dflash` drafts with the base
-  model's DFlash2 drafter (output identical to plain decoding; served on an XT about 1.9x on code and prose, 1.5x on
-  shell). It slows with depth (about 16 tok/s with 28K tokens of context).
+  prediction block (about 1.7-1.8x on code and prose, served on an XT; 1.6-1.7x on an XTX; no extra file); `--draft
+  dflash` drafts with the base model's DFlash2 drafter (output identical to plain decoding; served on an XT about 1.8x on
+  code and prose, 1.4x on shell; 1.7x and 1.3x on an XTX). It slows with depth (about 44 tok/s after a 27.7K-token
+  prompt on an XTX, 52 on a short one).
 - **`qwen3.8-27b`** is the plain Qwen3.8 27B, not a finetune, quantized to about 3.6 bits per weight by ISTA-DASLab
   (GSQ-RCO, Apache-2.0). It is the smallest 27B download, fits either card and writes fastest of the three at short
-  context (55 tok/s on an XTX). `--draft dflash` (about 1.2-1.4x, served on an XTX) and `--draft mtp` (about
+  context (56 tok/s on an XTX). `--draft dflash` (about 1.2-1.4x, served on an XTX) and `--draft mtp` (about
   1.1-1.3x) give the same output as plain decoding; on this file the drafters gain less than on the other two.
 
 ## Download and start
@@ -74,19 +76,20 @@ that can't hold at least 32,768 tokens on your cards, rather than run out of mem
 the 27B models: the drafter's memory comes out of the context).
 
 `swift-1.5` and `thinkingcap` also run on two cards at once (`caminus start swift-1.5 --cards 2`, or `caminus serve
---cards 2`). Each card holds half of every layer, so the model writes about 1.5 times as fast and the full 262,144-token
+--cards 2`). Each card holds half of every layer, so the model writes about 1.4 times as fast and the full 262,144-token
 context fits with `--draft off` (with the default drafter it is projected to fit too on an XTX + XT with free memory, a
-little less when the desktop holds memory on the XTX). Reading a prompt is about as fast as on one XTX for now. Both
+little less when the desktop holds memory on the XTX). Reading a prompt is slower than on one XTX for now (by 6-12 %
+at 2,048 tokens). Both
 drafters work on two cards too, with the same output as plain decoding, and `--draft dflash` is the default there when
-the drafter file is present and 32,768 tokens of context still fit with it. On an XTX + XT with 10K-34K-token prompts, Swift 1.5 drafts at 1.36-1.44x and
-ThinkingCap at 1.13-1.18x; on 11K-29K-token agent prompts the range is 1.20-1.45x
+the drafter file is present and 32,768 tokens of context still fit with it. On an XTX + XT with 10K-34K-token prompts, Swift 1.5 drafts at 1.36-1.43x and
+ThinkingCap at 1.13-1.17x with DFlash; on 11K-29K-token agent prompts the range is 1.20-1.38x
 ([benchmarks](dev/benchmarks.md#speculative-decoding-on-two-cards-served)). `--draft off` turns it off.
 
 `qwen3-30b-a3b` runs on two cards too (`caminus start qwen3-30b-a3b --cards 2`, or `caminus serve --cards 2`), but one
 card stays its default. Each card holds half of every layer's attention and part of every expert (two thirds on the
-bigger card, which is card 0). Served, two cards decode more slowly than one XTX on short turns (213 against 245 tok/s)
-and faster from about 32K tokens on (121 against 109 tok/s at 40,768), and read every prompt from 4K tokens on faster
-(1.10x at 4K, 1.29x at 40,768); see [benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards). By default the context
+bigger card, which is card 0). Served, two cards decode more slowly than one XTX on short turns (221 against 253 tok/s)
+and faster from about 32K tokens on (128 against 111 tok/s at 40,768), and read prompts from 16K tokens on faster
+(0.96x at 4K, 1.11x at 16K, 1.12x at 40,768); see [benchmarks](dev/benchmarks.md#qwen3-30b-a3b-on-two-cards). By default the context
 stays 40,960 tokens, so the second card buys speed with a long context; in the long-context mode two cards hold the
 full 131,072. No drafter on one card or two.
 
@@ -138,9 +141,10 @@ q8`), on one card or two (`--cards 2 --kv q8`). F16 stays the default. The cache
 first, which makes them easier to quantize) and takes 0.050 MiB per token of context instead of 0.094 (on two cards
 half of that on each card). The context stays 40,960 tokens, the model's own limit, but the full context fits with
 more of the card in use: on an XTX with the desktop holding 1 GiB, F16 fits 32,768 tokens and the 8-bit cache 40,960
-(projected). Decode runs at about the same speed: on one XTX 0.97x on short turns and 1.06x with a full context,
-where reading half the bytes pays off; on two cards within 2 % at every depth (each card already reads only its half
-of the cache). Both engine-level; served numbers come with the release benchmarks. By mean KL divergence it changes
+(projected). Decode runs at about the same speed: on one XTX 0.95x on short turns and 1.07x with a full context,
+where reading half the bytes pays off; on two cards within 5 % at every depth (each card already reads only its half
+of the cache). Both engine-level; served on one XTX, greedy 234 against 240 tok/s and 135 against 128 tok/s after a
+37,659-token prompt (0.4.0). By mean KL divergence it changes
 the output less than llama.cpp's own 8-bit cache changes llama.cpp's: measured on one XTX and on an XTX + XT at 128,
 16,384 and 40,896 tokens, the mean KL divergence from the F16 cache is 1.2e-3 to 3.6e-3, llama.cpp's from its F16
 cache 4.2e-3 to 6.6e-3 ([details](dev/q8-kv.md)). Top-1 agreement with the F16 cache is within one row of

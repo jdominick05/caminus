@@ -93,9 +93,9 @@ def _model(name, title, arch, items, alias, speed, notes):
 
 ALL = (
     _model('coder', 'Qwen3.8-Flash-Next Coder IQ1_M + DFlash2', 'qwen4exp', ('coder-1', 'coder-2', 'dflash'), 'k3-coder',
-           '~104 tok/s decode, 123-203 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
+           '~104 tok/s decode, 122-201 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
     _model('qwen3.6', 'Qwen3.6-35B-A3B GSQ-hybrid (2-bit)', 'qwen35moe-own', ('qwen3.6',), 'qwen3.6',   # (own code: Moe35Own)
-           '210 tok/s decode, 6,571 tok/s prefill 2K (one XT)', 'fits either card at 262K'),
+           '237 tok/s decode, 8,632 tok/s prefill 2K (one XTX); 211 / 6,613 on one XT', 'fits either card at 262K'),
     _model('qwen3.6-hauhau', 'Qwen3.6-35B-A3B HauhauCS Q3_K_P', 'qwen35moe', ('qwen3.6-hauhau',), 'qwen3.6',
            '192 tok/s decode, 4,136 tok/s prefill 2K (one XTX)', 'the 24 GB card only'),
     _model('arex-2', 'AREX-2 27B dense Q4_K_M', 'qwen35', ('arex-2',), 'arex-2',
@@ -103,16 +103,15 @@ ALL = (
     _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
            '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
     _model('swift-1.5', 'Swift 1.5 (Qwen3.8 27B dense) Q4_K_M (own code end to end)', 'qwen35-own', ('swift-1.5', 'dflash2-27b'), 'swift-1.5',
-           '42 tok/s decode on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'the 24 GB card only, or two cards; --draft mtp (its own MTP block)'),
+           '44 tok/s decode on an XTX (short context); prefill 1,233 tok/s at 2K (XTX)', 'the 24 GB card only, or two cards; --draft mtp (its own MTP block)'),
     _model('thinkingcap', 'ThinkingCap (Qwen3.8 27B dense) RCO 4.2 bpw (own code end to end)', 'qwen35-own', ('thinkingcap', 'dflash2-27b'),
-           'thinkingcap', '47 tok/s decode on an XTX, 39 on an XT (short context); prefill 942 tok/s at 2K (XTX)',
+           'thinkingcap', '50 tok/s decode on an XTX, 42 on an XT (short context); prefill 1,059 tok/s at 2K (XTX)',
            'fits either card (an XT: ~53K context), or two; --draft dflash: its base model\'s DFlash2 drafter'),
     _model('qwen3.8-27b', 'Qwen3.8 27B dense GSQ-RCO IQ3_S (own code end to end)', 'qwen35-own', ('qwen3.8-27b', 'dflash2-27b'),
-           'qwen3.8-27b', '55 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
+           'qwen3.8-27b', '56 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
            'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M, unsloth imatrix (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
-           '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row, '
-           'measured on the official Q4_K_M: the same formats)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
+           '257 tok/s decode at short context, 216 at 4K, 110 at 40.9K; prefill 7,275 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
 )
 # Each served model's recommended sampling for agentic work (thinking on), from its model card: what caminus serve uses as a
 # request's defaults (caminus.serve.sampler.model_defaults: these first, then the GGUF's general.sampling.* where a field is
