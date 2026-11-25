@@ -150,7 +150,7 @@ CLAUDE.md imports this file.
   docs/dev/yardsticks.md). `Moe35Own` runs it from `q35_moe.ATTN_FROM` on: its tape cut at each attention layer's split
   pair (`k3.Engine.split`: launches of their own on one stream, a dependency on an earlier launch dropped), the kernel
   between the slices (`tests/engine/test_q35m_slices.py`: the slices with the pair launched alone are the single launch's
-  bits). Not in the installed runtime set (the 35B is paused; it joins with `dec_q35m`).
+  bits). In the installed runtime set beside `dec_q35m` (`device/kernels.py` `Q35MOE_OWN`): every `Moe35Own` on a card loads it.
 - `MODULE_CAPS` in `engine/k3.py` lists each module's (op, format) pairs; the host refuses anything else (the device's
   default case would silently decode an unknown format as Q8_0).
 - Dense Q8 KV is staged under separate one-card `*_kvq8` objects; pair each new object's scalar-spill count with its F16
