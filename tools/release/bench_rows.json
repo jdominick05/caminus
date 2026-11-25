@@ -100,7 +100,7 @@
   },
   {
    "id": "q3m-served-cards-decode-two",
-   "doc_line": 688,
+   "doc_line": 689,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Decode, two cards (8 / 4,096 / 16,384 / 32,768 / 40,768)",
    "model": "qwen3-30b-a3b",
@@ -112,7 +112,7 @@
   },
   {
    "id": "q3m-served-cards-decode-one",
-   "doc_line": 689,
+   "doc_line": 690,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Decode, one XTX",
    "model": "qwen3-30b-a3b",
@@ -124,7 +124,7 @@
   },
   {
    "id": "q3m-served-cards-decode-ratio",
-   "doc_line": 690,
+   "doc_line": 691,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Decode, two / one",
    "model": "qwen3-30b-a3b",
@@ -136,7 +136,7 @@
   },
   {
    "id": "q3m-served-cards-prefill-two",
-   "doc_line": 691,
+   "doc_line": 692,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Prefill, two cards",
    "model": "qwen3-30b-a3b",
@@ -148,7 +148,7 @@
   },
   {
    "id": "q3m-served-cards-prefill-one",
-   "doc_line": 692,
+   "doc_line": 693,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Prefill, one XTX",
    "model": "qwen3-30b-a3b",
@@ -160,7 +160,7 @@
   },
   {
    "id": "q3m-served-cards-prefill-ratio",
-   "doc_line": 693,
+   "doc_line": 694,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Prefill, two / one",
    "model": "qwen3-30b-a3b",
@@ -172,7 +172,7 @@
   },
   {
    "id": "q3m-served-cards-spread",
-   "doc_line": 695,
+   "doc_line": 696,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Every range sits within 5 % of its median (prose claim)",
    "model": "qwen3-30b-a3b",
@@ -184,7 +184,7 @@
   },
   {
    "id": "q3m-kld-depth-16384-2card",
-   "doc_line": 701,
+   "doc_line": 702,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Two-card accuracy at depth: mean KLD 1.02e-03, last 64 of 16,384 (vs llama.cpp 5.06e-03); reruns on the catalog's file (unsloth's Q4_K_M) against its references; the doc's numbers until 0.4.0 are the official file's",
    "model": "qwen3-30b-a3b",
@@ -196,7 +196,7 @@
   },
   {
    "id": "q3m-kld-depth-40896-2card",
-   "doc_line": 702,
+   "doc_line": 703,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Two-card accuracy at depth: mean KLD 8.0e-04, last 64 of 40,896 (vs llama.cpp 5.73e-03); reruns on the catalog's file (unsloth's Q4_K_M) against its references; the doc's numbers until 0.4.0 are the official file's",
    "model": "qwen3-30b-a3b",
@@ -208,7 +208,7 @@
   },
   {
    "id": "q3m-engine-decode-2card",
-   "doc_line": 703,
+   "doc_line": 705,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Engine level decode, two cards 218 / 195 / 163 / 133 / 125 tok/s at 8 / 4,096 / 16,384 / 32,768 / 40,900",
    "model": "qwen3-30b-a3b",
@@ -220,7 +220,7 @@
   },
   {
    "id": "q3m-engine-decode-1card-cmp",
-   "doc_line": 704,
+   "doc_line": 706,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Engine level decode, one XTX 246 / 210 / 159 / 120 / 105 tok/s (comparison arm of the two-card engine row)",
    "model": "qwen3-30b-a3b",
@@ -232,7 +232,7 @@
   },
   {
    "id": "q3m-engine-prefill-2card",
-   "doc_line": 705,
+   "doc_line": 707,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Engine level prefill from empty, two cards: 7,041 at 4,096 and 3,556 at 32,768 tok/s",
    "model": "qwen3-30b-a3b",
@@ -244,7 +244,7 @@
   },
   {
    "id": "q3m-engine-prefill-1card-cmp",
-   "doc_line": 705,
+   "doc_line": 707,
    "section": "Qwen3-30B-A3B on two cards",
    "what": "Engine level prefill, one XTX comparison: 6,503 at 4,096 and 2,788 at 32,768 tok/s",
    "model": "qwen3-30b-a3b",
@@ -256,7 +256,7 @@
   },
   {
    "id": "yard2-swift-caminus",
-   "doc_line": 718,
+   "doc_line": 723,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Swift 1.5 Q4_K_M, Caminus column 59.8 / 982",
    "model": "swift-1.5",
@@ -268,7 +268,7 @@
   },
   {
    "id": "yard2-swift-llama-tensor",
-   "doc_line": 718,
+   "doc_line": 723,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Swift 1.5 Q4_K_M, llama.cpp -sm tensor 43.5 / 859",
    "model": "swift-1.5",
@@ -280,7 +280,7 @@
   },
   {
    "id": "yard2-swift-llama-layer",
-   "doc_line": 718,
+   "doc_line": 723,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Swift 1.5 Q4_K_M, llama.cpp -sm layer 33.5 / 1,400",
    "model": "swift-1.5",
@@ -292,7 +292,7 @@
   },
   {
    "id": "yard2-tcap-caminus",
-   "doc_line": 719,
+   "doc_line": 724,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "ThinkingCap RCO 4.2 bpw, Caminus column 65.4 / 936",
    "model": "thinkingcap",
@@ -304,7 +304,7 @@
   },
   {
    "id": "yard2-tcap-llama-tensor",
-   "doc_line": 719,
+   "doc_line": 724,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "ThinkingCap RCO 4.2 bpw, llama.cpp -sm tensor 46.0 / 978",
    "model": "thinkingcap",
@@ -316,7 +316,7 @@
   },
   {
    "id": "yard2-tcap-llama-layer",
-   "doc_line": 719,
+   "doc_line": 724,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "ThinkingCap RCO 4.2 bpw, llama.cpp -sm layer 36.3 / 1,509",
    "model": "thinkingcap",
@@ -328,7 +328,7 @@
   },
   {
    "id": "yard2-q3cn-caminus",
-   "doc_line": 720,
+   "doc_line": 725,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-Coder-Next UD-IQ3_S, Caminus column 136.5 / ~135",
    "model": "other",
@@ -340,7 +340,7 @@
   },
   {
    "id": "yard2-q3cn-llama-tensor",
-   "doc_line": 720,
+   "doc_line": 725,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-Coder-Next UD-IQ3_S, llama.cpp -sm tensor 72.5 / 2,046 (even split)",
    "model": "other",
@@ -352,7 +352,7 @@
   },
   {
    "id": "yard2-q3cn-llama-layer",
-   "doc_line": 720,
+   "doc_line": 725,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-Coder-Next UD-IQ3_S, llama.cpp -sm layer 80.8 / 3,625",
    "model": "other",
@@ -364,7 +364,7 @@
   },
   {
    "id": "yard2-coder-caminus",
-   "doc_line": 721,
+   "doc_line": 726,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "The Coder (IQ1_M), Caminus column 104; 123-203 with its drafter / ~2,800",
    "model": "coder",
@@ -376,7 +376,7 @@
   },
   {
    "id": "yard2-coder-llama-tensor",
-   "doc_line": 721,
+   "doc_line": 726,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "The Coder (IQ1_M), llama.cpp -sm tensor 39.6 / 1,336",
    "model": "coder",
@@ -388,7 +388,7 @@
   },
   {
    "id": "yard2-coder-llama-layer",
-   "doc_line": 721,
+   "doc_line": 726,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "The Coder (IQ1_M), llama.cpp -sm layer 40.5 / 2,328",
    "model": "coder",
@@ -400,7 +400,7 @@
   },
   {
    "id": "yard2-q3m-caminus",
-   "doc_line": 722,
+   "doc_line": 727,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-30B-A3B Q4_K_M, Caminus column 206 served (218 engine) / 6,860 served at 4,096",
    "model": "qwen3-30b-a3b",
@@ -412,7 +412,7 @@
   },
   {
    "id": "yard2-q3m-llama-tensor",
-   "doc_line": 722,
+   "doc_line": 727,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-30B-A3B Q4_K_M, llama.cpp -sm tensor 112.4 / 2,909",
    "model": "qwen3-30b-a3b",
@@ -424,7 +424,7 @@
   },
   {
    "id": "yard2-q3m-llama-layer",
-   "doc_line": 722,
+   "doc_line": 727,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-30B-A3B Q4_K_M, llama.cpp -sm layer 126.2 / 5,780",
    "model": "qwen3-30b-a3b",
@@ -436,7 +436,7 @@
   },
   {
    "id": "yard2-q3m-note-onecard",
-   "doc_line": 724,
+   "doc_line": 729,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Note: both two-card llama.cpp modes decode below its one-card row (148 tok/s, ignite-llama fork)",
    "model": "qwen3-30b-a3b",
@@ -448,7 +448,7 @@
   },
   {
    "id": "yard2-dio-note",
-   "doc_line": 726,
+   "doc_line": 731,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Files larger than the page cache need -lm dio (llama-bench stalls otherwise)",
    "model": "other",
@@ -460,7 +460,7 @@
   },
   {
    "id": "yard2-q3cn-assert-note",
-   "doc_line": 728,
+   "doc_line": 733,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "Qwen3-Coder-Next with -sm tensor -ts 53/47 stops on GGML_ASSERT; the even split runs",
    "model": "other",
@@ -472,7 +472,7 @@
   },
   {
    "id": "yard2-ignite-swift-tensor",
-   "doc_line": 729,
+   "doc_line": 734,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "ignite-llama fork (842653396) -sm tensor -ts 53/47: Swift 43.6 / 910",
    "model": "swift-1.5",
@@ -484,7 +484,7 @@
   },
   {
    "id": "yard2-ignite-tcap-tensor",
-   "doc_line": 729,
+   "doc_line": 734,
    "section": "Two-card yardstick: stock llama.cpp, tensor and layer split",
    "what": "ignite-llama fork -sm tensor -ts 53/47: ThinkingCap 46.3 / 969",
    "model": "thinkingcap",
@@ -496,7 +496,7 @@
   },
   {
    "id": "notmeasured-gpus",
-   "doc_line": 734,
+   "doc_line": 739,
    "section": "Not measured",
    "what": "Any other pair of GPUs, host, kernel or driver version",
    "model": "other",
@@ -508,7 +508,7 @@
   },
   {
    "id": "notmeasured-harness",
-   "doc_line": 735,
+   "doc_line": 740,
    "section": "Not measured",
    "what": "Real harness sessions (Qwen Code, Hermes Agent, Claude Code) against the server",
    "model": "other",
@@ -520,7 +520,7 @@
   },
   {
    "id": "notmeasured-other-engines",
-   "doc_line": 737,
+   "doc_line": 742,
    "section": "Not measured",
    "what": "A head-to-head with other engines than llama.cpp",
    "model": "other",

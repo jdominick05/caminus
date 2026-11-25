@@ -148,6 +148,11 @@ geometry and prompt-cache stops change no logit and no cache byte; 16,384 tokens
 
 ## Qwen3-30B-A3B (one card)
 
+The measurements in this section and the two after it are from the development of the Q8 path (2026-11-16, on Qwen's
+official Q4_K_M) and were not rerun as such. The 0.4.0 release commit's Q8 rows, on the catalog's file:
+[benchmarks](benchmarks.md#qwen3-30b-a3b-q4km) (one card, two cards) and [the 30B page](qwen3-30b-a3b.md#which-file)
+(the gates).
+
 `Q3MoEOne(..., q8=True)` stores the KV cache as Q8_0 rows on `dec_q3m_kvq8` (`k3.Q3M_KV_Q8_BASE` maps it to
 `dec_q3m`; the same ops, pairs and lean dispatch check). Its batched prefill `Q3MPrefill` follows the engine:
 `q3p_qk_rope_q8` and `q3mp_attn_q8` from `pf_q3m_kvq8` write and read the rows, every other kernel stays on

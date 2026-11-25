@@ -96,8 +96,8 @@ which every number on this page was measured on unless it says otherwise.
 All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, on the 0.4.0 release commit
 (2026-11-25), on the catalog's file, unsloth's Q4_K_M ([which file](#which-file); up to 0.3.0 these rows were the
 official file's). llama.cpp is the
-[ignite-llama](https://github.com/jdominick05/ignite-llama) fork (77b7e9083: the gates' e4e3f8eda plus drafter commits),
-a HIP build with the same toolchain, on the same file and card (`llama-bench -ngl 99 -fa 1`).
+[ignite-llama](https://github.com/jdominick05/ignite-llama) fork as published at 719ac1c30 (its ggml code is the
+gates' e4e3f8eda's), a HIP build with the same toolchain, on the same file and card (`llama-bench -ngl 99 -fa 1`).
 
 ### Decode (how fast it writes)
 

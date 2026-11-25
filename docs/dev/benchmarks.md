@@ -26,8 +26,8 @@ numbers (not rerun for 0.3.0).
 RX 7900 XT alone on the night of 11-24 to 25, the RX 7900 XTX and both cards on 11-25. Some steps ran on the two commits
 before it (bc8e737, cd758ea); every step's kernel objects have the same digest (the 328 objects of the release build),
 so its numbers hold for 57943f3. A row marked "0.4.0" is from these runs. The llama.cpp rows rerun for 0.4.0 used the
-ignite-llama fork at 77b7e9083 (the gates' fork at e4e3f8eda plus later drafter commits; the same kernels) or stock
-llama.cpp at 7bcbc04 where a row says stock, both HIP builds with the same toolchain. The yardsticks in
+ignite-llama fork as published at 719ac1c30 (its ggml code is the gates' e4e3f8eda's; the two differ in the
+speculative-decoding host code and docs only) or stock llama.cpp at 7bcbc04 where a row says stock, both HIP builds with the same toolchain. The yardsticks in
 [yardsticks.md](yardsticks.md) (FlyDSL, rocKE) were not rerun. Rows that say "not rerun for 0.4.0" keep their dated
 numbers, with the reason.
 
@@ -82,7 +82,7 @@ The prefill misses its own target of 3,000 tok/s at 8K (about 1 % under llama.cp
 | 17408 | 39.5 TF | **64.3 TF** | 13.7 TF | 11-24, 0.4.0 | same |
 | 20480 | 38.6 TF | **59.4 TF** | 13.7 TF | 11-24, 0.4.0 | same |
 
-torch bf16 matmul (rocBLAS) on the same card at the same shapes: 73-79 TF (`benchmarks/fp8_gemm_probe.py`, 11-24, 0.4.0; 76-80 on 11-12); fp8-as-bf16 through torch: 64-67 TF, maxerr 0.10-0.18 vs fp32; triton fp8/int8 and torch fp8 matmul: unsupported on gfx1100.
+torch bf16 matmul (rocBLAS) on the same card at the same shapes: 73-80 TF (`benchmarks/fp8_gemm_probe.py`, 11-24, 0.4.0; 76-80 on 11-12); fp8-as-bf16 through torch: 64-67 TF, maxerr 0.10-0.18 vs fp32; triton fp8/int8 and torch fp8 matmul: unsupported on gfx1100.
 
 Reading: gfx1100 has no fp8 WMMA (the builtins are gfx12-only), and its one 8-bit WMMA (`i32_16x16x16_iu8_w32`) ties the engine's Q4_K wide tile at prefill (both ~59-64 TF) while costing 8 bpw vs Q4_K's ~4.5 - a ~1.8x byte loss at decode, where the card is read-bound. Software fp8 loses ~4x to the per-byte e4m3 decode. So the low-bit lever on these cards is the 4-bit formats already in use; the remaining prefill headroom over our tiles is unpack throughput (rocBLAS bf16's 76-80 TF is the tile-scheduling ceiling), not bit width.
 
@@ -489,7 +489,7 @@ stock llama.cpp's (7bcbc04) llama-server with `--spec-type draft-dflash --spec-d
 - The replies are the plain server's token for token. llama.cpp's drafted output differed from its plain output on prose
   (from token 10) and shell (from token 66).
 - Like for like on the XT: llama.cpp's speed-ups are higher on every prompt; Caminus's tok/s is higher on code, 2 % lower
-  on prose and 11 % lower on shell. On 11-12 (the ignite-llama fork then) llama.cpp's shell run read 48.1 tok/s at 63 %
+  on prose and 11 % lower on shell. On 11-12 llama.cpp's shell run read 48.1 tok/s at 63 %
   accepted; Caminus's columns were 75.9 / 77.0 / 60.5 over a plain 39.5-39.7.
 - A 9,661-token code prompt on the XT (`--max-ctx 12288 --auto-cache-slots 3`): `--draft off` 39.0, `--draft dflash`
   48.5 tok/s (1.25x); `--draft mtp` 44.2 against 38.9 (1.14x).
@@ -520,7 +520,7 @@ stock llama.cpp's (7bcbc04) llama-server with `--spec-type draft-dflash --spec-d
   LDS per workgroup: 8.2 -> 14.4 KB (8 per WGP still fit in 128 KB); the verify module 10.6 -> 16.7 KB (7 per WGP: the
   engines' 4 / 5 and the gates' 3 / 6 / 7 fit); the DFlash module drops its matvec op and both grids (16.1 -> 11.0 KB).
 - The verify pass of 4 tokens: 43.1 ms against a 23.7 ms decode step at depth 512 (XT; `benchmarks/q35_verify.py`; 0.4.0),
-  1.82x (11-11: 43.0 against 25.3, 1.63x: the decode step got faster, the pass did not); Swift's is 1.54x on the XT. At depth
+  1.82x (11-11: 43.0 against 25.3: the decode step got faster, the pass did not); Swift's is 1.54x on the XT. At depth
   (XT, `--depths 16384,28000`): decode 27.1 / 29.7 ms (36.9 / 33.6 tok/s), T = 4 1.94x / 2.01x. `benchmarks/q35_verify_trace.py` puts the rest in the IQ3 / IQ2_S / Q5_K tiles (1.7-1.9x a token).
 
 ### Qwen3.8-27B GSQ-RCO IQ3_S (dense 27B, own code end to end)
@@ -670,6 +670,7 @@ measured against the same reference. [Qwen3-30B-A3B on Caminus's own code](qwen3
 | Mean KLD against the reference, 128 tokens | **3.40e-05**, top-1 128 / 128 | 2.40e-03, 128 / 128 | `tools/gates/q3moe_gmodel.py` (float64 reference) |
 | The same for the last 64 of 16,384 / 40,896 tokens | **9.69e-04**, 62 / 64; **8.98e-04**, 64 / 64 | 7.94e-03, 63 / 64; 3.85e-03, 61 / 64 | `tools/gates/q3moe_depth_gmodel.py` (fp32 reference; prefill, then decode); at 16,384 top-1 is one position below llama.cpp's, which the gate allows (one point, as the KLD floor rule) |
 | `--kv q8`: decode at the same depths; prefill 512 / 4,096 / 32,768 | 243 / 233 / 213 / 166 / 132 / 118 tok/s; 6,577 / 7,296 / 3,703 tok/s | | the same tools with `--kv q8` |
+| One RX 7900 XT (20 GB: the engine alone, no server: the context the server needs does not fit) | decode 213 / 201 / 179 / 163 tok/s at 8 / 1,024 / 4,096 / 8,192; prefill 5,074 / 5,932 tok/s at 512 / 4,096; `--kv q8` 203 / 193 / 172 / 157 and 4,999 / 5,797 | | the same tools, XT (11-24 / 25) |
 | `--kv q8`: mean KLD, 128 tokens; the last 64 of 16,384 / 40,896 | 1.14e-03, 127 / 128; 2.30e-03, 62 / 64; 1.24e-03, 64 / 64 | q8_0 KV: 2.65e-03, 127 / 128 | detail: [Q8 KV](q8-kv.md) |
 
 ### Qwen3-30B-A3B on two cards
@@ -704,7 +705,11 @@ read from empty (0 cached tokens on every request), then 128 greedy tokens. Medi
 - Engine level (no server), for reference: decode 226 / 189 / 162 / 133 / 127 tok/s at 8 / 4,096 / 16,384 / 32,768 /
   40,900 against one XTX's 257 / 216 / 163 / 124 / 110 (0.4.0, `benchmarks/q3moe_depth.py --cards 2`); prefill
   from empty 7,149 against 7,275 tok/s at 4,096 and 4,261 against 3,811 at 32,768 (0.4.0;
-  `benchmarks/q3moe_prefill.py --cards 2`, medians of three).
+  `benchmarks/q3moe_prefill.py --cards 2`, medians of three). With `--kv q8`: decode 216 / 193 / 159 / 135 / 123 tok/s,
+  prefill 7,153 / 4,160 tok/s at 4,096 / 32,768.
+- The served smoke on two cards (`tools/serve_smoke1.py --cards 2 --max-ctx 40960 --needle 38000`, 0.4.0): greedy 210 tok/s;
+  a 6,587-token prompt at 6,203 tok/s, then 182; a 37,659-token prompt at 3,846 tok/s (first token 9.8 s), then 145. With
+  `--kv q8`: 207; 180 and 142 after the same prompts.
 
 ## Two-card yardstick: stock llama.cpp, tensor and layer split
 
@@ -726,7 +731,7 @@ each card whole layers.
 - Files larger than the host's page cache (Qwen3-Coder-Next, the Coder on a 29 GiB host) need `-lm dio`: with the
   default memory-mapped loading llama-bench stalls after loading the weights, both cards idle.
 - Qwen3-Coder-Next with `-sm tensor -ts 53/47` stops on `GGML_ASSERT(split_state.ne[j] % div == 0)`; the even split runs.
-- The ignite-llama fork (77b7e9083) gives the same dense-model numbers within noise (`-sm tensor -ts 53/47`: 42.6 / 906
+- The ignite-llama fork gives the same dense-model numbers within noise (`-sm tensor -ts 53/47`: 42.6 / 906
   and 45.2 / 968); `-sm row` does not run on it.
 
 ## Not measured

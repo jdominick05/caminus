@@ -118,7 +118,7 @@ factor given. AMD's kernels were measured on an RX 7900 XT and not rerun for 0.4
 
 | Model | Prefill GEMMs (FlyDSL fp16) | Decode attention (rocKE split-KV) | Prefill attention (rocKE WMMA) | Decode against the read floor |
 |---|---|---|---|---|
-| Qwen3-30B-A3B | [behind, 1.51x (XT)](docs/dev/yardsticks.md#prefill-gemms-qwen3-30b-a3b-and-qwen36-35b-a3b-grouped-experts) | not measured | [beat, 1.07x at 30K (XT)](docs/dev/yardsticks.md#prefill-attention-at-depth-qwen36-35b-a3b-and-qwen3-30b-a3b-geometry) | [behind, 52 % of the floor (XTX)](docs/dev/yardsticks.md#decode-matvec-against-the-read-floor) |
+| Qwen3-30B-A3B | [behind, 1.51x (XT)](docs/dev/yardsticks.md#prefill-gemms-qwen3-30b-a3b-and-qwen36-35b-a3b-grouped-experts) | not measured | [matched, 1.07x ahead at 30K (XT)](docs/dev/yardsticks.md#prefill-attention-at-depth-qwen36-35b-a3b-and-qwen3-30b-a3b-geometry) | [behind, 52 % of the floor (XTX)](docs/dev/yardsticks.md#decode-matvec-against-the-read-floor) |
 | Qwen3.6-35B-A3B | [behind, 1.38x (XT)](docs/dev/yardsticks.md#prefill-gemms-qwen3-30b-a3b-and-qwen36-35b-a3b-grouped-experts) | [behind, 1.32x at 32K; matched at 128K (XT)](docs/dev/yardsticks.md#decode-attention-as-its-own-kernel-qwen35moe-geometry) | [matched, 1.07x behind at 30K (XT)](docs/dev/yardsticks.md#prefill-attention-at-depth-qwen36-35b-a3b-and-qwen3-30b-a3b-geometry) | not measured |
 | Qwen3.8-Flash-Next Coder | not measured | not measured | not measured | not measured |
 
