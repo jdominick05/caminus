@@ -218,6 +218,19 @@ class KvObjects(unittest.TestCase):
         self.assertFalse(self.ok(self.F16_1 + ['pf_q3m_kvq8'], 'q8'))               # (no Q8 decode module)
         self.assertFalse(self.ok(self.F16_1 + ['pf_q3m_kvq8'], 'f16'))              # (f16: no *_kvq8 object at all)
 
+    def test_a_cards_own_build_counts_as_its_module(self):
+        # (one XTX loads the _w4 builds: the lists a 0.4.0 release smoke recorded)
+        q8 = ['dec_q3m_kvq8_w4', 'pf_q3m', 'pf_q3m_mm', 'pf_q3m_kvq8', 'samp_topk']
+        f16 = ['dec_q3m_w4', 'pf_q3m', 'pf_q3m_mm', 'samp_topk']
+        self.assertTrue(self.ok(q8, 'q8'))
+        self.assertFalse(self.ok(q8, 'f16'))
+        self.assertTrue(self.ok(f16, 'f16'))
+        self.assertFalse(self.ok(f16, 'q8'))
+        self.assertFalse(self.ok(['dec_q3m_w4'] + q8, 'q8'))                        # (its F16 base, card build)
+        self.assertFalse(self.ok(['dec_q3m'] + q8, 'q8'))
+        q35 = ['dec_q35m_kvq8_w4', 'dec_q35m_attn', 'pf_q35m', 'pf_q35m_kvq8', 'pf_q35m_mm', 'samp_topk']
+        self.assertTrue(self.ok(q35, 'q8'))
+
     def test_an_empty_or_missing_list_passes_neither(self):
         for objs in ([], None):
             self.assertFalse(self.ok(objs, 'q8'))
