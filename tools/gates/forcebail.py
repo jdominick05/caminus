@@ -55,7 +55,7 @@ elif ENGINE == 'dense35ver':
     from caminus.engine.q35_dense import Dense35Own
     from caminus.engine.q35_dense_verify import Dense35Verify
     if not 1 <= T <= 4 or START or MODES != ['tiny']: print('--engine dense35ver: T 1 .. 4, no --start, modes tiny'); sys.exit(2)
-    m = Dense35Own(PATH, max_ctx=CTX, spec_T=T, vram_extra_mib=Dense35Verify.need_mib(T))
+    m = Dense35Own(PATH, max_ctx=CTX, spec_T=T, vram_extra_mib=Dense35Verify.need_mib(T, max_ctx=CTX))
     VER = Dense35Verify(m, T)
     m.engines = [VER.E]; m._tapes = {'one': m.engines}   # (the hooks below set the verify tape's bound)
 elif ENGINE == 'dense35':
