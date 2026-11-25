@@ -1120,7 +1120,7 @@
   },
   {
    "id": "q36-acc-prefill-q8-xt",
-   "doc_line": 133,
+   "doc_line": 134,
    "section": "Qwen3.6-35B-A3B GSQ-hybrid",
    "what": "Accuracy, prefill then decode, Q8 KV (against the Q8 decode-only engine), RX 7900 XT",
    "model": "qwen3.6",
@@ -1324,7 +1324,7 @@
   },
   {
    "id": "q36-acc-prefill-q8-xtx",
-   "doc_line": 133,
+   "doc_line": 134,
    "section": "Qwen3.6-35B-A3B GSQ-hybrid",
    "what": "Accuracy, prefill then decode, Q8 KV (against the Q8 decode-only engine), RX 7900 XTX",
    "model": "qwen3.6",

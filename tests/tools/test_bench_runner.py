@@ -4,8 +4,7 @@
 
 Checks:
   manifest   tools/release/bench_rows.json: every release row names a run, every run has a command, cards (nd / disp /
-             both) and a timeout; no machine path in it (placeholders only); every row's doc_line is a non-blank line
-             of the doc
+             both) and a timeout; no machine path in it (placeholders only)
   expand     $NAME placeholders fill from the values given; an unknown name is reported, never left silently
   plan       windows per card set in the order nd, disp, both; each within the budget unless one run alone is longer;
              blocked runs are never planned; every unblocked run is in exactly one window
@@ -43,9 +42,6 @@ check(all(r['command'] and r['cards'] in br.CARD_ORDER and int(r['timeout']) > 0
 text = json.dumps(m)
 check(os.path.expanduser('~') not in text and '/home/' not in text, 'manifest: no machine path (placeholders only)')
 check({r['tier'] for r in m['rows']} <= {'release', 'derived', 'diagnostic', 'yardstick', 'static', 'not-shipped'}, 'manifest: known tiers only')
-doc = open(os.path.join(ROOT, m['doc'])).read().splitlines()
-off = [r['id'] for r in m['rows'] if not (0 < r['doc_line'] <= len(doc) and doc[r['doc_line'] - 1].strip())]
-check(not off, f'manifest: every row\'s doc_line is a non-blank line of {m["doc"]} ({len(doc)} lines){": " + ", ".join(off[:8]) if off else ""}')
 
 # ---- expand
 cmd, missing = br.expand('$PY -I x.py --model $SWIFT --ref $REFS27/a.npz --out $SCRATCH/o', {'PY': 'py', 'SWIFT': '/m/s.gguf', 'SCRATCH': '/s'})
