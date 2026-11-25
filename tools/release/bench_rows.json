@@ -2964,7 +2964,7 @@
    "blocked": "reads inputs no run produces yet (accept_ids.json): a prep step (llama.cpp logits, prompt id sets) comes first"
   },
   "tcap-mtp-served-depth-agent40k": {
-   "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/AGENT40K.json --scratch $SCRATCH/sab-tcap-agent --card 1 --draft mtp --max-ctx 40960",
+   "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/AGENT40K.json --scratch $SCRATCH/sab-tcap-agent --card 1 --draft mtp --max-ctx 40960 --auto-cache-slots 3",
    "cards": "nd",
    "timeout": 3600,
    "est": 1500,
@@ -3084,7 +3084,7 @@
    "est": 1200
   },
   "tcap-dflash-served-xt": {
-   "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids48.json --scratch $SCRATCH/tcap-dflash-ab --card 1 --max-ctx 12288",
+   "command": "$PY -I benchmarks/q35_served_ab.py --model $TCAP --ids $SCRATCH/ids48.json --scratch $SCRATCH/tcap-dflash-ab --card 1 --max-ctx 12288 --auto-cache-slots 3",
    "cards": "nd",
    "timeout": 3600,
    "est": 420,

@@ -270,7 +270,7 @@ LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft
 
 Served at depth on rendered real sessions (a 40,885-token agent session and a 22,700-token code session, rendered to
 ChatML ids from saved Qwen Code chats, 11-13; `benchmarks/q35_served_ab.py`, median of 3 rounds, 128 greedy tokens,
-one card, testing's objects; not rerun for 0.3.0: inputs lost):
+one card, testing's objects; not rerun for 0.3.0: inputs lost; ThinkingCap's agent 40K row on one XT now needs `--auto-cache-slots 3` to place: with four checkpoint slots placement projects 18,890 MiB against 18,800 MiB of room on an idle card, with three 18,717, projected, not rerun):
 
 | model, card | prompt | max-ctx | off | mtp | x |
 |---|---|---|---|---|---|
@@ -391,9 +391,9 @@ and the rest acceptance.
 
 The same drafter on ThinkingCap's module (`kernels/objects.tsv dec_q35_tcap_dflash`: its IQ2_S embedding, its Q8_0 head) and its
 verify module (`kernels/objects.tsv dec_q35_tcap_ver`, the T-token tiles of `kernels/quant_tcap_ver.h`). `tools/guard.sh LOG
-3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --max-ctx 12288`, measured
+3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 1 --max-ctx 12288 --auto-cache-slots 3`, measured
 2026-11-12 with nothing else on the cards; the prompts are the 48-token inputs llama.cpp's own drafter was measured on;
-llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time). The Caminus columns are not rerun for 0.3.0 (inputs lost).
+llama-server with `--spec-type draft-dflash --spec-draft-n-max 3 -c 1024 -ctk q8_0 -ctv q8_0`, plain 33.2 tok/s. Re-measured on testing `db7b6d9` (the 27B docs' release check, one window, the four A/Bs one card at a time). The Caminus columns are not rerun for 0.3.0 (inputs lost). One XT places the drafter at 12,288 positions only with `--auto-cache-slots 3` (since the placement and auto-context room became one calculation): with four checkpoint slots it projects 18,803 MiB against 18,800 MiB of room on an idle card (the guard's 19,850 MiB line less the allocator margin, the cache's reserve and work and the projection's slack); four slots place 8,192. The server still sizes its cache from the card's real headroom: at 12,288, 5 slots (1,425 MiB), a 19,337 MiB peak through a 9,661-token prompt (11-25, 0.4.0's release commit).
 
 | prompt | RX 7900 XT: `--draft off` | `--draft dflash` | llama-server + DFlash 2 (n-max 3), same prompts |
 |---|---|---|---|

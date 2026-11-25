@@ -9,7 +9,9 @@ missing: one more prompt token than llama.cpp reads), temperature 0, --n tokens,
 alone on --card; the cards' other work stops first (a GPU window). Prints the table, PASS / FAIL for the token identity and
 RESULT PASS | FAIL.
   tools/guard.sh LOG 3600 python -I benchmarks/q35_served_ab.py --model GGUF --ids IDS.json --scratch DIR --card 0 \
-      [--draft dflash] [--n 128] [--rounds 3] [--max-ctx 4096]"""
+      [--draft dflash] [--n 128] [--rounds 3] [--max-ctx 4096] [--auto-cache-slots N]
+--auto-cache-slots N goes to both arms' servers: the checkpoint slots their placement leaves room for (caminus serve's
+default 4). The server still sizes its prompt cache from the card's real headroom: the flag only changes which contexts place."""
 import argparse, json, os, statistics, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -21,6 +23,7 @@ ap.add_argument('--model', required=True); ap.add_argument('--ids', required=Tru
 ap.add_argument('--card', default='0'); ap.add_argument('--draft', default='dflash')
 ap.add_argument('--cards', type=int, choices=(1, 2), default=1, help='number of trunk cards (two: --card 0,1)')
 ap.add_argument('--no-warmup', action='store_true', help='skip the 8-token warm-up request before each prompt (its prefix stays in the prompt cache)'); ap.add_argument('--n', type=int, default=128); ap.add_argument('--rounds', type=int, default=3); ap.add_argument('--max-ctx', default='4096')
+ap.add_argument('--auto-cache-slots', type=int, default=None, help='caminus serve --auto-cache-slots for both arms (default: the server\'s)')
 A = ap.parse_args()
 prompts = json.load(open(A.ids))['prompts']
 os.makedirs(A.scratch, exist_ok=True)
@@ -32,7 +35,8 @@ class Arm(argparse.Namespace):
 
 def server(draft):
     a = Arm(model=A.model, max_ctx=A.max_ctx, scratch=os.path.join(A.scratch, draft), alias=None, cards=A.cards, draft=draft,
-            block_imports='gguf,tokenizers', card=A.card)
+            block_imports='gguf,tokenizers', card=A.card,
+            extra=['--auto-cache-slots', str(A.auto_cache_slots)] if A.auto_cache_slots is not None else [])
     os.makedirs(a.scratch, exist_ok=True)
     s = Server1(f'serve[{draft}]', a)
     if not s.wait_ready(): raise SystemExit(f'q35_served_ab: the {draft} server did not come up')
