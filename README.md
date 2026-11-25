@@ -15,7 +15,7 @@
 
 <p align="center">
   <b>Fast local coding models on your AMD Radeon RX 7900 cards.</b><br>
-  Caminus is an inference engine written from the GPU kernels up for Radeon RDNA3 cards; on the same cards it writes 1.1
+  Caminus is an inference engine written from the GPU kernels up for Radeon RDNA3 cards; on the same cards it writes 1.2
   to 2.4 times as fast as llama.cpp at short context. It serves Qwen Code, and any OpenAI- or Anthropic-compatible tool,
   from your own machine.
 </p>
@@ -75,20 +75,21 @@ are welcome too.
 
 | Model | Cards | Decode | llama.cpp, same cards |
 |---|---|---|---|
-| Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 123-203 with its drafter | 44 tok/s; 65-92 with the drafter |
-| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 248 tok/s; served, 213 on two cards against 245 on one (two cards are faster from about 32K) | 148 tok/s; 112 on two cards (`-sm tensor`) |
-| Swift 1.5 27B Q4_K_M (19.5 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
-| ThinkingCap 27B RCO 4.2 bpw (16.4 GB) | 1; or 2 | 47 tok/s; 69 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
-| Qwen3.8-27B GSQ-RCO IQ3_S (14.2 GB) | 1 | 55 tok/s | not measured yet |
-| Qwen3.6-35B-A3B GSQ-hybrid 2-bit (12.2 GB, 262K context) | 1 | 210 tok/s (measured on an XT; XTX: pending the release window) | not measured yet |
+| Qwen3.8-Flash-Next Coder (59 GB, 262K context) | 2 (XTX + XT or XTX + XTX) | 104 tok/s; 122-201 with its drafter | 44 tok/s; 64-92 with the drafter |
+| Qwen3-30B-A3B Q4_K_M (19 GB) | 1 (24 GB); or 2 | 257 tok/s; served, 221 on two cards against 253 on one (two cards are faster from about 32K) | 149 tok/s; 113 on two cards (`-sm tensor`) |
+| Swift 1.5 27B Q4_K_M (19.5 GB) | 1 (24 GB); or 2 | 44 tok/s; 63 on two cards | 37 tok/s; 43 on two cards (`-sm tensor`) |
+| ThinkingCap 27B RCO 4.2 bpw (16.4 GB) | 1; or 2 | 50 tok/s; 71 on two cards | 41 tok/s; 45 on two cards (`-sm tensor`) |
+| Qwen3.8-27B GSQ-RCO IQ3_S (14.2 GB) | 1 | 56 tok/s | 44 tok/s |
+| Qwen3.6-35B-A3B GSQ-hybrid 2-bit (12.2 GB, 262K context) | 1 | 237 tok/s (211 on an XT) | 113 tok/s (94 on an XT) |
 
 **Paused for this release:** Qwen3.6-35B-A3B's HauhauCS file, Qwen3-Coder-Next and AREX-2 ([models](docs/models.md#the-models)).
 
-Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:
+Decode is how fast a model writes, at short context, on one RX 7900 XTX (two cards: an XTX + XT), measured on the
+0.4.0 release commit. Prompt reading, context sizes and which model to pick:
 [models](docs/models.md). Where every number comes from: [benchmarks](docs/dev/benchmarks.md).
 
-Qwen3-30B-A3B runs on Caminus's own code at every step, from reading the GGUF file to the output token, with no
-llama.cpp code on its path: [how, how fast and how accurate](docs/dev/qwen3-30b-a3b.md).
+Qwen3-30B-A3B and Qwen3.6-35B-A3B run on Caminus's own code at every step, from reading the GGUF file to the output token, with no
+llama.cpp code on their path: [how, how fast and how accurate](docs/dev/qwen3-30b-a3b.md) (the 30B).
 
 ## Experiments
 
@@ -107,6 +108,19 @@ with systemd: read [its known limits](docs/ember.md#known-limits) before you set
 The [Ember quickstart](docs/ember-quickstart.md) walks through the setup and [the guide](docs/ember.md) explains how it works.
 After you upgrade Caminus (`pip install -U caminus`), run `caminus ember agent install` again: a running agent takes the
 new runtime between goals ([every command](docs/resident-agent.md)).
+
+### Scoreboard: our kernels against AMD's
+
+For each model, Caminus's own kernels against the fastest open-source RDNA3 kernels from AMD measured at that model's
+real shapes (FlyDSL's fp16 WMMA GEMM, rocKE's WMMA attention), and decode against the memory-read floor (the bytes a
+token reads at the card's measured read peak). **beat**: faster; **matched**: within 10 %; **behind**: slower, by the
+factor given. AMD's kernels were measured on an RX 7900 XT and not rerun for 0.4.0; each cell links to its measurement.
+
+| Model | Prefill GEMMs (FlyDSL fp16) | Decode attention (rocKE split-KV) | Prefill attention (rocKE WMMA) | Decode against the read floor |
+|---|---|---|---|---|
+| Qwen3-30B-A3B | [behind, 1.51x (XT)](docs/dev/yardsticks.md#prefill-gemms-qwen3-30b-a3b-and-qwen36-35b-a3b-grouped-experts) | not measured | [beat, 1.07x at 30K (XT)](docs/dev/yardsticks.md#prefill-attention-at-depth-qwen36-35b-a3b-and-qwen3-30b-a3b-geometry) | [behind, 52 % of the floor (XTX)](docs/dev/yardsticks.md#decode-matvec-against-the-read-floor) |
+| Qwen3.6-35B-A3B | [behind, 1.38x (XT)](docs/dev/yardsticks.md#prefill-gemms-qwen3-30b-a3b-and-qwen36-35b-a3b-grouped-experts) | [behind, 1.32x at 32K; matched at 128K (XT)](docs/dev/yardsticks.md#decode-attention-as-its-own-kernel-qwen35moe-geometry) | [matched, 1.07x behind at 30K (XT)](docs/dev/yardsticks.md#prefill-attention-at-depth-qwen36-35b-a3b-and-qwen3-30b-a3b-geometry) | not measured |
+| Qwen3.8-Flash-Next Coder | not measured | not measured | not measured | not measured |
 
 ## Documentation
 
