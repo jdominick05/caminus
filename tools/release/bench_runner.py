@@ -54,7 +54,7 @@ def defaults():
         from caminus import models
         from caminus.cmd import manage
         for key, name in (('CODER', 'coder'), ('SWIFT', 'swift-1.5'), ('TCAP', 'thinkingcap'), ('Q38', 'qwen3.8-27b'),
-                          ('Q3M', 'qwen3-30b-a3b')):
+                          ('Q3M', 'qwen3-30b-a3b'), ('Q36', 'qwen3.6')):
             e = manage.model_entry(models.BY_NAME[name])
             if e.get('path'): out[key] = e['path']
             for item, p in (e.get('paths') or {}).items():
