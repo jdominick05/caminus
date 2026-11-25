@@ -4,6 +4,105 @@ Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (t
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md). Patch releases (0.x.y)
 do not rerun the benchmarks; a number in a patch release's entry cites the pull request that measured it.
 
+## 0.4.0 (2026-11-25)
+
+Two MoE models on one gfx1100 card, writing and reading prompts on Caminus's own kernels: Qwen3-30B-A3B, and
+Qwen3.6-35B-A3B, which is back in the catalog. On one RX 7900 XTX the 35B decodes at 237 tok/s and the 30B at 257
+(llama.cpp on the same file and card: 113 and 149). Every published number was measured again for this release. Nothing
+to do after upgrading: `caminus pull qwen3.6` fetches the 35B if you want it (the same 12.2 GB file as before it was
+paused, so a copy you already have is used as it is).
+
+### New
+
+- **Qwen3.6-35B-A3B is back, on Caminus's own code.** `caminus pull qwen3.6` (the GSQ-hybrid file: 2-bit experts, an
+  8-bit trunk, 12.2 GB) runs on one card of either size, with no llama.cpp code on its path, from the GGUF file to the
+  output token. Decode at short context, F16 cache, engine level (`tools/gates/q35_gmodel.py`): 237 tok/s on an XTX and
+  211 on an XT; llama.cpp (`llama-bench -fa 1`, tg128, the same file and card): 113 and 94. Reading a 2,048-token prompt:
+  8,632 and 6,613 tok/s; llama.cpp (pp2048): 4,215 and 3,094. Through `caminus serve` at 32,768 tokens of context:
+  235 tok/s greedy on an XTX, 198 on an XT. Its full 262,144-token context fits on either card: served, a 249,005-token
+  prompt was read in 128 s on an XTX (167 s on an XT) and the needle in it found, then decode ran at 89-90 tok/s at that
+  depth. `--kv q8` stores the cache in 8-bit rows at half the memory (229 tok/s on an XTX), and `--long-context`
+  stretches the window with YaRN x2 (in the release runs the server picked 479,232 tokens on an XTX and 524,288 on an
+  XT). Against an exact (float64) reference of the model, decode's mean KL divergence is 3.4e-4 with the top token right
+  at 128 of 128 positions; a prompt read then decoded scores 3.4e-4 where llama.cpp's own scores 9.3e-4. It uses the
+  model card's sampling for agent work (thinking: temperature 1.0, top_p 0.95, top_k 20, no presence penalty;
+  non-thinking: 0.7 / 0.8 / 20 / presence 1.5) and stops on both of Qwen's stop ids. There is no two-card form yet,
+  and no claim about how many agent tasks it finishes. The HauhauCS file (`qwen3.6-hauhau`) stays paused. See
+  [models](docs/models.md) and [benchmarks](docs/dev/benchmarks.md#qwen36-35b-a3b-gsq-hybrid-own-code-one-card)
+  (#364, #371, #406, #407, #408, #409, #418, #422, #423, #425, #426, #427, #430, #432, #435).
+- **A scoreboard in the README: Caminus's kernels against AMD's.** For each model, the prefill GEMMs against FlyDSL's
+  fp16 WMMA GEMM, the attention against rocKE's, and decode against the memory-read floor, each cell linked to its
+  measurement. Where it stands: the prefill GEMMs are behind FlyDSL's, 1.51x on the 30B and 1.38x on the 35B; prefill
+  attention matches rocKE's (within 10 %) on both; the 35B's decode attention is 1.32x behind rocKE's at 32K and matches
+  it at 128K; the 30B's whole decode token on an XTX is at 52 % of the read floor at short context (69 % at 40,900).
+  AMD's kernels were measured on an RX 7900 XT and not rerun for 0.4.0 (#442).
+- **SECURITY.md** says how to report a vulnerability privately and what is in scope (#372).
+
+### Changed
+
+- **Qwen3-30B-A3B reads prompts on new kernels.** Its prefill GEMMs run on wide tiles with gate and up fused into one
+  launch (#421), and its prefill attention on the same rocKE-style pipeline as the 35B's (#419); every output keeps its
+  bits. Its decode attention at short context is faster with the F16 cache (#429), and each card's decode modules now
+  get the registers its grid allows (#424). On the release commit, one XTX, F16 cache, engine level
+  (`benchmarks/q3moe_depth.py` and `benchmarks/q3moe_prefill.py`) against llama.cpp (`llama-bench -fa 1`) on the same
+  file and card: decode 257 / 216 / 110 tok/s at depth 8 / 4,096 / 40,900 (llama.cpp tg64: 149 at depth 0, 135 at
+  4,096); prompts of 4,096 and 32,768 tokens at 7,275 and 3,811 tok/s (llama.cpp: 3,878 and 1,804). Served: 240 tok/s
+  greedy, and a 37,659-token prompt read at 3,448 tok/s. These are the first published numbers on the catalog's file
+  (unsloth's Q4_K_M); 0.3.x's were measured on Qwen's official file, with the same tensors in the same formats.
+- **Qwen3-30B-A3B on two cards, measured again:** two cards decode faster from about 32K tokens on (1.07x at 32,768,
+  1.15x at 40,768) and read prompts faster from 16K tokens on (1.11x). At 4K one card now reads faster (0.96x), because
+  its prefill gained more than the two cards'; 0.3.0's "faster from 4K on" no longer holds. One card stays the default
+  ([benchmarks](docs/dev/benchmarks.md#qwen3-30b-a3b-on-two-cards)).
+- **Every other published number, measured again on the release commit.** On one XTX: Swift 1.5 44 tok/s (llama.cpp
+  37), ThinkingCap 50 (41), the plain Qwen3.8-27B 56 (44, llama.cpp's column now measured); on an XTX + XT: Swift 1.5 63,
+  ThinkingCap 71. Claims the runs contradicted were corrected, among them: after a 27.7K-token prompt on an XTX, Swift 1.5
+  writes at about 40 tok/s and ThinkingCap at about 44 (the docs said 15-16 at 28K), and the two dense 27B models read
+  prompts more slowly on two cards than on one XTX (#442).
+
+### Fixed
+
+- The two-card check no longer refuses a card whose PCIe link is caught mid-way through a power-saving step (it read
+  "PCIe 1.0 x16" for a card in its x16 slot): a link read between two of the driver's levels is judged at the driver's
+  full speed, or read again for up to 100 ms (#441).
+- The GPU guard stops all GPU work when the kernel logs a GPU fault just after the guarded run has ended; such a fault
+  used to pass as an ordinary failed step (#415).
+
+### For contributors
+
+- **One naming scheme for kernels/ files and code objects,** `<stage>_<arch>[_<model>][_<variant>...]` (AGENTS.md's
+  Layout), with one build table (`kernels/objects.tsv`) in place of the define-and-include wrapper files: `k3_q3m_lean`
+  is now `dec_q3m`, `q3m_prefill_kvq8` is `pf_q3m_kvq8`, `own_topk` is `samp_topk`, and so on. Every object's code is
+  byte for byte as before. Run `./build.sh` again in a source checkout (#428).
+- Each own decode module is built a second time as a `_w4` twin with the XTX's register cap (#424); the 35B's decode
+  attention is its own kernel, `dec_q35m_attn` (#425, #426).
+- Float64 references: the qwen35moe MoE line (`caminus.ref_q35`, #364) and the Coder (`caminus.ref_coder`, with own
+  IQ4_NL decoding, #374); the Coder's per-op accuracy test on recorded activations against llama.cpp's matvec for its ten
+  formats (#366); own Q2_0 matvec tiles (#371).
+- The release benchmark manifest covers the 35B and reads the 30B's references from the catalog's file (#436); the
+  tools gained what its rows needed: `--yarn` for the depth and prefill benchmarks, `--last` references for
+  `tools/reference/q35_ref.py`, `--server-args` for the llama.cpp A/B, a MoE-aware hand-off bound in the 35B prefill
+  test (#433), and `--auto-cache-slots` in `benchmarks/q35_served_ab.py` (#438). Fixed on the way: the serve smoke's
+  `--kv` check with the XTX's `_w4` modules (#439) and forcebail's verify-tape bound (#437). The 30B depth gate allows
+  top-1 one position below llama.cpp's (#440).
+- CI posts the Ember agent's pull requests, issues and comments to a Discord channel (#373); AGENTS.md lets test
+  helpers be shared where results are compared or a fixture is common (#379); the panel's Go modules and
+  actions/setup-go were updated (#403, #404).
+
+### Known issues
+
+- **Two-card MTP drafting is slower than in 0.3.0** at the same plain speed (`--draft mtp`, served, XTX + XT):
+  ThinkingCap at 10K tokens 68.1 tok/s against 83.7 (1.04x over plain decoding, 65.7), Swift 1.5 83.1 against 88.9 at
+  10K and 59.8 against 65.8 at 34K. DFlash, the two-card default, held (ThinkingCap at 10K: 74.0 tok/s). The cause is
+  not measured yet; a fix is planned for 0.4.2 (#443).
+- **ThinkingCap with `--draft dflash --max-ctx 12288` on one idle RX 7900 XT is 0.1 GB short** and refuses ("fits
+  8,192 now"): four checkpoint slots no longer fit beside the drafter. `caminus serve ... --auto-cache-slots 3` places it
+  (#438).
+
+Benchmarks: the rows of [docs/dev/benchmarks.md](docs/dev/benchmarks.md) were rerun on testing at 57943f3 (some steps on
+the two commits before it, with the same kernel objects); the commits after it change docs, the catalog's speed lines and
+release files only, no engine or kernel code. Rows that could not be rerun say so there, with the reason. The FlyDSL and
+rocKE yardsticks were not rerun.
+
 ## 0.3.3 (2026-11-19)
 
 A first-run guide, `caminus wizard`, takes an installed package to a served model and Qwen Code; the rest are
