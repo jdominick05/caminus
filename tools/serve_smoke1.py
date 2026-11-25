@@ -128,12 +128,16 @@ def kv_objects(objs, kv):
     """(ok, detail): whether the code objects a server loaded (/props caminus.code_objects) are the asked KV cache's.
     q8: a dec_*_kvq8 decode module none of whose F16 bases (the name without _kvq8) was loaded, and a pf_*_kvq8 object
     (the prefill's Q8 rows and attention; the F16 prefill object beside it is expected: its other kernels stay there).
-    f16: a dec_* decode module and no *_kvq8 object at all (an empty list passes neither)"""
+    f16: a dec_* decode module and no *_kvq8 object at all (an empty list passes neither). A card's build of a module
+    (the _w4 suffix: kernels.CARD_W4) counts as that module"""
     objs = list(objs or ())
-    q8 = [o for o in objs if o.endswith('_kvq8')]
+    def mod(o):
+        return o[:-len('_w4')] if o.endswith('_w4') else o
+    mods = {mod(o) for o in objs}
+    q8 = [o for o in objs if mod(o).endswith('_kvq8')]
     dec = [o for o in q8 if o.startswith('dec_')]
     pre = [o for o in q8 if o.startswith('pf_')]
-    base = [o for o in dec if o[:-len('_kvq8')] in objs]
+    base = [o for o in dec if mod(o)[:-len('_kvq8')] in mods]
     ok = bool(dec and pre and not base) if kv == 'q8' else bool(any(o.startswith('dec_') for o in objs) and not q8)
     return ok, (f'loaded objects {objs} (Q8 decode {dec or "none"}, with their F16 base {base or "none"}; Q8 prefill '
                 f'{pre or "none"})')
