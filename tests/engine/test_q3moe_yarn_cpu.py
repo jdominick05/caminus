@@ -19,7 +19,8 @@ synthetic files (tests/engine/tiny_q3m.py), the registry's mode, caps, KV choice
     note naming it; every other entry refuses --long-context; the Coder's needs an explicit max_ctx past 262,144
   - the mode's file check: a qwen3moe file that is not the recipe's model (context_length / rope.freq_base) or has codebook
     or row-scale tensors is refused by long_mode (flag and explicit max_ctx), and stays native within its own context
-  - the gates' YaRN bounds (tools/gates/yarn_bound.py, synthetic rows) and q3moe_ref32's atomic resume state
+  - the gates' YaRN bounds (tools/gates/yarn_bound.py, synthetic rows), the depth gate's rule (q3moe_depth_gmodel) and
+    q3moe_ref32's atomic resume state
   - the CLI: caminus serve --long-context (and in options_json), caminus start passes it and refuses a model without a mode
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q3moe_yarn_cpu.py --scratch DIR"""
@@ -357,6 +358,12 @@ check(q.LONG_OFF_FORMATS == frozenset(k3.OWN_IQ_FMT) | frozenset(RS_CONT),
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gates')); sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'reference'))
 import yarn_bound
 from q3moe_gmodel import score as g_score
+import q3moe_depth_gmodel as depth_gate
+d_l = dict(mean=7.9e-03, top1=63, n=64)
+check(depth_gate.TOP1_SLACK == 1 and depth_gate.rule(dict(mean=9.7e-04, top1=62, n=64), d_l) == (True, True)
+      and depth_gate.rule(dict(mean=9.7e-04, top1=61, n=64), d_l) == (True, False)
+      and depth_gate.rule(dict(mean=8.0e-03, top1=64, n=64), d_l) == (False, True),
+      'q3moe_depth_gmodel rule: mean KLD at most llama.cpp\'s; top-1 at most one position of the 64 below it (two fail)')
 rng = np.random.default_rng(3)
 ry = rng.standard_normal((16, 64)) * 3; rn = ry + rng.standard_normal((16, 64)) * 1.0      # the YaRN and native references
 ours_ = ry + rng.standard_normal((16, 64)) * 0.02; good = ry + rng.standard_normal((16, 64)) * 0.05
