@@ -376,9 +376,18 @@ class RuntimeKernels(unittest.TestCase):
         self.assertEqual(sorted(set(names[False, 4.0]) - set(base)), ['pf_gg_attn_q35m_yarn'])
         self.assertNotIn('pf_gg_attn_q35m', names[False, 4.0])   # (the YaRN object replaces the native one)
         self.assertEqual(sorted(set(names[True, 4.0]) - set(base)), ['pf_gg_attn_q35m_yarn', 'pf_q35m_kvq8'])
-        want = [f16, q8] + [n for v in names.values() for n in v]
+        # the sliced pass's decode attention kernel (engine/dec_q35m_attn.py): every Moe35Own on a card loads it when it builds
+        from caminus.engine import dec_q35m_attn
+        rec = lambda name: (self.loads.append(name), NS(dec_q35m_attn_f16=None, dec_q35m_attn_q8=None))[1]
+        err = NS(dtype=torch.int32, is_cuda=True, numel=lambda: 1)
+        start = len(self.loads)
+        with patch.dict(dec_q35m_attn._mods, {}, clear=True), patch.object(dec_q35m_attn, 'Module', side_effect=rec), \
+                patch.object(dec_q35m_attn.capacity, 'check'):
+            dec_q35m_attn.DecQ35mAttn(False, err=err); dec_q35m_attn.DecQ35mAttn(True, err=err)
+        self.assertEqual(self.loads[start:], ['dec_q35m_attn'])
+        want = [f16, q8, 'dec_q35m_attn'] + [n for v in names.values() for n in v]
         self.require_runtime(want)
-        for name in (f16, q8, 'pf_q35m', 'pf_q35m_mm', 'pf_q35m_kvq8', 'pf_gg_attn_q35m_yarn'):
+        for name in (f16, q8, 'dec_q35m_attn', 'pf_q35m', 'pf_q35m_mm', 'pf_q35m_kvq8', 'pf_gg_attn_q35m_yarn'):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime(want)
@@ -434,8 +443,9 @@ class CardObjects(unittest.TestCase):
     """one register cap per card (kernels/dec_core.hip K3_PER_WGP): the XTX's <name>_w4 objects ship and load by card"""
 
     def test_every_own_decode_module_ships_its_xtx_object(self):
-        own = [n for n in kernels.RUNTIME_SET if n.startswith('dec_q3m') and not n.endswith('_w4')]
-        self.assertTrue(own)
+        # (build.sh's rule: the 30B's own decode modules, and the 35B's dec_q35m and dec_q35m_kvq8, not its attention kernel)
+        own = [n for n in kernels.RUNTIME_SET if (n.startswith('dec_q3m') or n in ('dec_q35m', 'dec_q35m_kvq8')) and not n.endswith('_w4')]
+        self.assertTrue(own); self.assertIn('dec_q35m_w4', kernels.CARD_W4); self.assertIn('dec_q35m_kvq8_w4', kernels.CARD_W4)
         self.assertEqual(sorted(n + '_w4' for n in own), sorted(kernels.CARD_W4))
 
     def test_card_object_follows_the_grid_and_the_files(self):

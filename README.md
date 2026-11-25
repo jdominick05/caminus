@@ -47,8 +47,8 @@ the install, the wizard, and the same steps in the panel (`caminus panel`).
 
 | Your cards | What runs | Start with |
 |---|---|---|
-| One XT | ThinkingCap, the plain Qwen3.8 27B | ThinkingCap |
-| One XTX | Those two, plus Qwen3-30B-A3B and Swift 1.5 | Swift 1.5 |
+| One XT | ThinkingCap, the plain Qwen3.8 27B, Qwen3.6-35B-A3B | ThinkingCap |
+| One XTX | Those three, plus Qwen3-30B-A3B and Swift 1.5 | Swift 1.5 |
 | XTX + XT | Everything, including the Coder and the two-card forms | the Coder (both cards) |
 | Two XTX | The same as XTX + XT. Untested: reports are welcome. | the Coder (both cards) |
 | Two XT | Two-card Swift 1.5, ThinkingCap or Qwen3-30B-A3B, or two one-card models side by side; no Coder. Untested: reports are welcome. | ThinkingCap |
@@ -80,8 +80,9 @@ are welcome too.
 | Swift 1.5 27B Q4_K_M (19.5 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
 | ThinkingCap 27B RCO 4.2 bpw (16.4 GB) | 1; or 2 | 47 tok/s; 69 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
 | Qwen3.8-27B GSQ-RCO IQ3_S (14.2 GB) | 1 | 55 tok/s | not measured yet |
+| Qwen3.6-35B-A3B GSQ-hybrid 2-bit (12.2 GB, 262K context) | 1 | 210 tok/s (measured on an XT; XTX: pending the release window) | not measured yet |
 
-**Paused for this release:** Qwen3.6-35B-A3B, Qwen3-Coder-Next and AREX-2 ([models](docs/models.md#the-models)).
+**Paused for this release:** Qwen3.6-35B-A3B's HauhauCS file, Qwen3-Coder-Next and AREX-2 ([models](docs/models.md#the-models)).
 
 Decode is how fast a model writes, at short context. Prompt reading, context sizes and which model to pick:
 [models](docs/models.md). Where every number comes from: [benchmarks](docs/dev/benchmarks.md).

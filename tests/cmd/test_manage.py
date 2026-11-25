@@ -661,7 +661,7 @@ sys.path.insert(0, sys.argv[1])
 from caminus import arch, models
 from caminus.cmd import download, manage
 out = dict(catalog=[m.name for m in models.CATALOG], all=[m.name for m in models.ALL])
-out['pull'] = manage.cmd_pull(['qwen3.6', '--dry-run'])
+out['pull'] = manage.cmd_pull(['qwen3.6-hauhau', '--dry-run'])
 out['download'] = download.main(['--model', 'qwen3-coder-next', '--dry-run'])
 try:
     manage.start_one('qwen3.6-hauhau', wait=False); out['start'] = 'started'
@@ -830,8 +830,8 @@ def paused_checks(S):
         o = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         check(False, f'paused: the child printed no JSON (rc {r.returncode}): {r.stderr[-400:]}'); return
-    check(o['catalog'] == ['coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b'] and len(o['all']) == 9,
-          f'paused: the catalog offers the five shipped models ({o["catalog"]}), the tree keeps all nine')
+    check(o['catalog'] == ['coder', 'qwen3.6', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b'] and len(o['all']) == 9,
+          f'paused: the catalog offers the six shipped models ({o["catalog"]}), the tree keeps all nine')
     check(o['pull'] == 2 and o['download'] == 2 and 'paused' in r.stderr and 'Qwen3-Coder-Next is paused' in r.stderr,
           f'paused: caminus pull / caminus download refuse a paused model with the reason (pull {o["pull"]}, download {o["download"]})')
     check('paused' in o['start'], f'paused: caminus start refuses a paused model ({o["start"]})')

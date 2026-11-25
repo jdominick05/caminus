@@ -529,15 +529,15 @@ def stage_doctor(S):
     # what one card runs, by its size (a fake sysfs: nothing reads a real card)
     from caminus.cmd import doctor as D
     A = '0x1002'
-    for name, total, want in (('one XTX', 24560, 'one card (One XTX): swift-1.5, thinkingcap, qwen3.8-27b, qwen3-30b-a3b run'),
-                              ('one XT', 20464, 'one card (One XT): thinkingcap, qwen3.8-27b run')):
+    for name, total, want in (('one XTX', 24560, 'one card (One XTX): swift-1.5, thinkingcap, qwen3.8-27b, qwen3.6, qwen3-30b-a3b run'),
+                              ('one XT', 20464, 'one card (One XT): thinkingcap, qwen3.8-27b, qwen3.6 run')):
         root = os.path.join(S, 'sysfs-' + name.replace(' ', '-'))
         fixture(root, [('card0', total, '0x744c', 128, 0, {}, A, '0000:03:00.0')], [(128, 110000)])
         R = D.Report()
         D.check_gpus(R, root)
         msgs = [m for lv, area, m in R.rows if area == 'gpu']
         check(f'doctor: {name}: says what runs on it', any(want in m for m in msgs), str(msgs)[-300:])
-        check(f'doctor: {name}: names no paused model', not any(x in m for m in msgs for x in ('Qwen3.6', 'AREX', 'Coder-Next')), str(msgs)[-300:])
+        check(f'doctor: {name}: names no paused model', not any(x in m for m in msgs for x in ('HauhauCS', 'AREX', 'Coder-Next')), str(msgs)[-300:])
     # the Coder's 24 GB card 0 rule on a pair: caminus.models.card_class's line (22 GiB), the one copy
     from caminus import models as M
     for card0 in (22 * 1024 - 1, 22 * 1024):

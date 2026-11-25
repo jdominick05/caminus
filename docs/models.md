@@ -11,6 +11,7 @@ from its Hugging Face repository and checks every file before using it.
 | `qwen3-30b-a3b` | Qwen3-30B-A3B, Q4_K_M (unsloth's, made with an importance matrix) | 1, 24 GB; or 2 | 18.6 GB | 248 tok/s | 6,432 tok/s |
 | `swift-1.5` | Swift 1.5 (Qwen3.8 27B, a dense model), Q4_K_M | 1, 24 GB; or 2 | 19.5 GB (2.1 GB of it the DFlash2 drafter, shared with `thinkingcap`) | 42 tok/s; 64 on two cards | 771 tok/s (measured on an XT) |
 | `qwen3.8-27b` | The plain Qwen3.8 27B (a dense model), GSQ-RCO IQ3_S | 1, any | 14.2 GB (2.1 GB of it the DFlash2 drafter, shared with the other 27B models) | 55 tok/s | 800 tok/s (measured on an XT) |
+| `qwen3.6` | Qwen3.6-35B-A3B (a MoE model, 3B active), GSQ-hybrid: 2-bit experts, 8-bit trunk | 1, any | 12.2 GB | 210 tok/s (measured on an XT; XTX: pending the release window) | 6,571 tok/s (measured on an XT) |
 | `thinkingcap` | ThinkingCap (Qwen3.8 27B, a dense model), RCO 4.2 bpw | 1, any; or 2 | 16.4 GB (2.1 GB of it the DFlash2 drafter, shared with `swift-1.5`) | 47 tok/s; 69 on two cards | 942 tok/s |
 
 "Decode" is how fast a model writes. "Prompt reading" is how fast it reads what you send it. The one-card numbers were
@@ -19,7 +20,7 @@ where each number comes from and how llama.cpp does on the same cards. The `qwen
 Qwen's official Q4_K_M file, which has the same weight formats (see
 [switching from the official file](#switching-from-the-official-qwen3-30b-a3b-file)).
 
-**Paused for this release:** Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
+**Paused for this release:** Qwen3.6-35B-A3B's HauhauCS file (`qwen3.6-hauhau`), Qwen3-Coder-Next and AREX-2. They aren't measured on the current
 code, so `caminus pull`, `caminus start` and `caminus serve` refuse them for now; `CAMINUS_ALLOW_PAUSED=1` still serves them, unmeasured. They come back once they are measured
 again.
 
@@ -35,6 +36,10 @@ again.
   path). Its context is 40,960 tokens by default, so it suits shorter work: 213 tok/s with 4K tokens of context, 111
   tok/s when full. For longer work, its opt-in long-context mode (`--long-context`, below) reaches about 80K tokens on
   one XTX and 131,072 on two cards. [The details](dev/qwen3-30b-a3b.md).
+- **`qwen3.6`** is the fastest writer on one XT (210 tok/s there) and fits either card at its full 262K context (served on an
+  XT: a 249K-token prompt read in 166 s, then 89 tok/s at that depth). It runs
+  on Caminus's own code end to end, like `qwen3-30b-a3b`: 2-bit experts, so it is the least exact of the one-card models.
+  `--kv q8` halves the cache, `--long-context` stretches the window with YaRN. [The details](dev/q8-kv.md#qwen36-35b-a3b-one-card).
 - **`swift-1.5`** is a dense 27B model on Caminus's own code end to end, like `qwen3-30b-a3b` (no llama.cpp code on its
   path). `caminus serve --model ... --draft mtp` drafts with the model's
   own prediction block and verifies 4 tokens a pass (about 2.1-2.2x on code and prose, 1.7x on shell, served on an
@@ -181,7 +186,7 @@ Caminus doesn't include any model weights. Each model has its own licence; read 
 
 | Model | Licence |
 |---|---|
-| Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO, and the paused AREX-2, Qwen3.6-35B-A3B and Qwen3-Coder-Next | Apache-2.0 |
+| Qwen3-30B-A3B, Qwen3.8-27B GSQ-RCO, Qwen3.6-35B-A3B, and the paused AREX-2 and Qwen3-Coder-Next | Apache-2.0 |
 | Swift 1.5 | the Swift Open License 1.0 |
 | ThinkingCap | PolyForm Small Business 1.0.0 (read its terms before any commercial use) |
 | The DFlash2 drafters (the Coder's, and the 27B models' shared one) | Apache-2.0 |
