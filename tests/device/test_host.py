@@ -152,6 +152,61 @@ def main():
     g = H.gpus(r)
     check(H.link_text(g[0]['link']) == 'PCIe 4.0 x4' and g[0]['link']['at'] == '0000:00:01.1' and H.link_lowered(g[0]['link'])
           and g[0]['link_ok'], f'a lowered card behind an x4 link the driver does not set: judged at that x4 ({H.link_text(g[0]["link"])} at {g[0]["link"]["at"]})')
+    # -- a link mid-way through a power-saving step: the speed and the width change apart (a two-card serve once refused
+    #    "XTX card1 (0000:03:00.0) is on a PCIe 1.0 x16 link", 2.5 GT/s x16 being no level of the table), and the table's
+    #    star (the driver's own reading) and the hops' readings are taken apart. The bounded re-reads wait through
+    #    _sleep, recorded here instead of slept; on_wait lets a fixture change between two reads --------------------------
+    waits, on_wait = [], []
+
+    def fake_sleep(s):
+        waits.append(s)
+        while on_wait: on_wait.pop(0)()
+    H._sleep = fake_sleep
+
+    def hops_read(r, gts, width, top=None):
+        """the XTX's slot link (its root port and its card's upstream port) reads gts x width; top: the root port's own"""
+        rp = os.path.join(r, 'sys', 'devices', 'pci0000:00', '0000:00:01.1')
+        for d, (g, wd) in ((rp, top or (gts, width)), (os.path.join(rp, '0000:01:00.0'), (gts, width))):
+            w(os.path.join(d, 'current_link_speed'), f'{g:.1f} GT/s PCIe\n'); w(os.path.join(d, 'current_link_width'), f'{wd}\n')
+
+    for tag, star in (('step0', 0), ('step1', 1)):
+        g = idle(tag, (2.5, 16), star)
+        lk = g[0]['link']
+        check(H.link_text(lk) == 'PCIe 4.0 x16' and g[0]['link_ok'] and H.link_lowered(lk) and (lk['now_gts'], lk['now_width']) == (2.5, 16)
+              and labels(H.pair(g)) == ['XTX', 'XT'],
+              f'the table marks level {star} and the slot link reads 2.5 GT/s x16 (the speed lowered, the width not yet): the '
+              f'card\'s lowered link, judged at the fastest level ({H.link_text(lk)}, now {lk["now_gts"]:g} GT/s x{lk["now_width"]})')
+    for tag, star, what in (('step-top', 2, 'the table says the fastest level'), ('step-nostar', None, 'no level is marked current')):
+        del waits[:]
+        g = idle(tag, (2.5, 16), star)
+        ok, msg = refuses(lambda: H.pair(g), 'XTX', 'PCIe 1.0 x16', 'PCIe 4.0 x4')
+        check(ok and not g[0]['link_ok'] and 2 <= len(waits) and sum(waits) <= 0.1 + 1e-9,
+              f'{what} and the slot link reads 2.5 GT/s x16 on every re-read: still refused, after {len(waits)} waits of '
+              f'{sum(waits) * 1000:.0f} ms in all, no more than 100 ms ({msg})')
+        r = os.path.join(S, tag)
+        dpm(r, 'card1', T16, star)
+        on_wait.append(lambda: (hops_read(r, 16.0, 16), dpm(r, 'card1', T16, 2)))
+        g = H.gpus(r)
+        lk = g[0]['link']
+        check(H.link_text(lk) == 'PCIe 4.0 x16' and g[0]['link_ok'] and not H.link_lowered(lk) and labels(H.pair(g)) == ['XTX', 'XT'],
+              f'{what}, the slot link reads 2.5 GT/s x16 once and 16 GT/s x16 after a wait: the card at full speed ({H.link_text(lk)})')
+        del on_wait[:]
+    # still refused: a link that is slow at full speed, and slow hops that are not the card's lowered link
+    g = idle('gen3-x4', (8.0, 4), 2)
+    check(not g[0]['link_ok'] and H.link_text(g[0]['link']) == 'PCIe 3.0 x4' and refuses(lambda: H.pair(g), 'PCIe 3.0 x4')[0],
+          'a gen-3 x4 slot at the table\'s fastest level: refused after the re-reads')
+    g = idle('gen2-x4', (5.0, 4), 0)
+    check(not g[0]['link_ok'] and H.link_text(g[0]['link']) == 'PCIe 2.0 x4' and refuses(lambda: H.pair(g), 'PCIe 2.0 x4')[0],
+          'the table at level 0 (2.5 GT/s) and the slot link at 5.0 GT/s x4: faster than the lowered speed, so not the card\'s '
+          'lowered link; it caps the card, refused')
+    r = os.path.join(S, 'gen3-uplink')
+    idle('gen3-uplink', (2.5, 16), 0)
+    hops_read(r, 2.5, 16, top=(8.0, 4))
+    g = H.gpus(r)
+    check(not g[0]['link_ok'] and H.link_text(g[0]['link']) == 'PCIe 3.0 x4' and g[0]['link']['at'] == '0000:00:01.1'
+          and refuses(lambda: H.pair(g), 'PCIe 3.0 x4')[0],
+          f'a lowered card (2.5 GT/s x16, the table at level 0) behind a gen-3 x4 link the driver does not set: that link caps '
+          f'it ({H.link_text(g[0]["link"])} at {g[0]["link"]["at"]})')
     r = tree(os.path.join(S, 'apu-table'), [card('card1', '0000:03:00.0', XTX, 128, link=(8.0, 4))])
     w(os.path.join(r, 'sys', 'class', 'drm', 'card1', 'device', 'pp_dpm_pcie'), '\n')
     g = H.gpus(r)
