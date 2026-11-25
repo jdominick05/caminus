@@ -8,9 +8,10 @@ do not rerun the benchmarks; a number in a patch release's entry cites the pull 
 
 Two MoE models on one gfx1100 card, writing and reading prompts on Caminus's own kernels: Qwen3-30B-A3B, and
 Qwen3.6-35B-A3B, which is back in the catalog. On one RX 7900 XTX the 35B decodes at 237 tok/s and the 30B at 257
-(llama.cpp on the same file and card: 113 and 149). Every published number was measured again for this release. Nothing
-to do after upgrading: `caminus pull qwen3.6` fetches the 35B if you want it (the same 12.2 GB file as before it was
-paused, so a copy you already have is used as it is).
+(llama.cpp on the same file and card: 113 and 149). The published numbers were measured again on the release commit
+([benchmarks](docs/dev/benchmarks.md) marks the rows that could not be). Nothing to do after upgrading: `caminus pull
+qwen3.6` fetches the 35B if you want it (the same 12.2 GB file 0.2.1 served, so a copy you already have is used as it
+is).
 
 ### New
 
@@ -25,9 +26,9 @@ paused, so a copy you already have is used as it is).
   stretches the window with YaRN x2 (in the release runs the server picked 479,232 tokens on an XTX and 524,288 on an
   XT). Against an exact (float64) reference of the model, decode's mean KL divergence is 3.4e-4 with the top token right
   at 128 of 128 positions; a prompt read then decoded scores 3.4e-4 where llama.cpp's own scores 9.3e-4. It uses the
-  model card's sampling for agent work (thinking: temperature 1.0, top_p 0.95, top_k 20, no presence penalty;
-  non-thinking: 0.7 / 0.8 / 20 / presence 1.5) and stops on both of Qwen's stop ids. There is no two-card form yet,
-  and no claim about how many agent tasks it finishes. The HauhauCS file (`qwen3.6-hauhau`) stays paused. See
+  sampling its model card's agent evaluations ran at (thinking: temperature 1.0, top_p 0.95, top_k 20, no presence
+  penalty; non-thinking: 0.7 / 0.8 / 20 / presence 1.5) and stops on both of Qwen's stop ids. There is no two-card
+  form yet, and no claim about how many agent tasks it finishes. The HauhauCS file (`qwen3.6-hauhau`) stays paused. See
   [models](docs/models.md) and [benchmarks](docs/dev/benchmarks.md#qwen36-35b-a3b-gsq-hybrid-own-code-one-card)
   (#364, #371, #406, #407, #408, #409, #418, #422, #423, #425, #426, #427, #430, #432, #435).
 - **A scoreboard in the README: Caminus's kernels against AMD's.** For each model, the prefill GEMMs against FlyDSL's
@@ -41,11 +42,11 @@ paused, so a copy you already have is used as it is).
 ### Changed
 
 - **Qwen3-30B-A3B reads prompts on new kernels.** Its prefill GEMMs run on wide tiles with gate and up fused into one
-  launch (#421), and its prefill attention on the same rocKE-style pipeline as the 35B's (#419); every output keeps its
-  bits. Its decode attention at short context is faster with the F16 cache (#429), and each card's decode modules now
-  get the registers its grid allows (#424). On the release commit, one XTX, F16 cache, engine level
-  (`benchmarks/q3moe_depth.py` and `benchmarks/q3moe_prefill.py`) against llama.cpp (`llama-bench -fa 1`) on the same
-  file and card: decode 257 / 216 / 110 tok/s at depth 8 / 4,096 / 40,900 (llama.cpp tg64: 149 at depth 0, 135 at
+  launch, every output bitwise the old tiles' (#421), and its prefill attention on the same rocKE-style pipeline as the
+  35B's, passing the same accuracy gates (#419). Its decode attention at short context is faster with the F16 cache
+  (#429), and each card's decode modules now get the registers its grid allows (#424). On the release commit, one
+  XTX, F16 cache, engine level (`benchmarks/q3moe_depth.py` and `benchmarks/q3moe_prefill.py`) against llama.cpp
+  (`llama-bench -fa 1`) on the same file and card: decode 257 / 216 / 110 tok/s at depth 8 / 4,096 / 40,900 (llama.cpp tg64: 149 at depth 0, 135 at
   4,096); prompts of 4,096 and 32,768 tokens at 7,275 and 3,811 tok/s (llama.cpp: 3,878 and 1,804). Served: 240 tok/s
   greedy, and a 37,659-token prompt read at 3,448 tok/s. These are the first published numbers on the catalog's file
   (unsloth's Q4_K_M); 0.3.x's were measured on Qwen's official file, with the same tensors in the same formats.
@@ -53,7 +54,7 @@ paused, so a copy you already have is used as it is).
   1.15x at 40,768) and read prompts faster from 16K tokens on (1.11x). At 4K one card now reads faster (0.96x), because
   its prefill gained more than the two cards'; 0.3.0's "faster from 4K on" no longer holds. One card stays the default
   ([benchmarks](docs/dev/benchmarks.md#qwen3-30b-a3b-on-two-cards)).
-- **Every other published number, measured again on the release commit.** On one XTX: Swift 1.5 44 tok/s (llama.cpp
+- **The other published numbers, measured again on the release commit.** On one XTX: Swift 1.5 44 tok/s (llama.cpp
   37), ThinkingCap 50 (41), the plain Qwen3.8-27B 56 (44, llama.cpp's column now measured); on an XTX + XT: Swift 1.5 63,
   ThinkingCap 71. Claims the runs contradicted were corrected, among them: after a 27.7K-token prompt on an XTX, Swift 1.5
   writes at about 40 tok/s and ThinkingCap at about 44 (the docs said 15-16 at 28K), and the two dense 27B models read
