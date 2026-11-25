@@ -141,7 +141,8 @@ Gates (RX 7900 XT): `tests/prefill/test_q35m_prefill_ops.py` (the append bitwise
 prefill of positions 0 .. 63 then decode of 64 .. 127 against the float64 reference (`tests/prefill/test_q35_prefill.py
 --kv q8`): mean KLD 2.41e-4, top-1 64/64, decode-only on the same rows 2.49e-4, 64/64 (F16: 3.35e-4 / 3.45e-4); chunk
 geometry and prompt-cache stops change no logit and no cache byte; 16,384 tokens from empty in 3.37 s (4,856 tok/s; F16
-3.30 s).
+3.30 s). `--yarn 2` runs the same test in the YaRN mode against a `tools/reference/q35_ref.py --yarn 2` reference; a
+`q35_ref.py --last 64` reference of N tokens with `--from N-64` scores the hand-off at depth.
 
 ## Qwen3-30B-A3B (one card)
 

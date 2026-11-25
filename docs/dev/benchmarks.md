@@ -226,7 +226,8 @@ interleaved over 3 rounds, the same prompts as the DFlash table below, measured 
 nothing else on the cards. The replies are the plain server's token for token. The llama.cpp columns are stock llama.cpp's
 `llama-server` with its own MTP on the same card, prompts and settings (f16 KV, `-c 12288`, 128 greedy tokens, median of 3
 interleaved runs, measured 2026-11-13): `tools/guard.sh LOG 1800 python -I benchmarks/llamacpp_spec_ab.py --bin
-LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft-mtp --spec-draft-n-max 3`). The Caminus columns are not rerun for 0.3.0 (inputs lost).
+LLAMA_BIN --model GGUF --ids IDS.json --dev ROCm0 --out DIR` (`--spec-type draft-mtp --spec-draft-n-max 3`; two cards:
+`--dev ROCm0,ROCm1 --server-args '-sm layer -ts 550,450 -lm dio'`, flags both arms get; `--dry-run` prints both command lines). The Caminus columns are not rerun for 0.3.0 (inputs lost).
 
 | prompt | RX 7900 XTX: `--draft off` | `--draft mtp` | llama-server: plain | + its MTP (accepted) |
 |---|---|---|---|---|

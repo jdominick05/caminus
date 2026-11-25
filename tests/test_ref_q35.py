@@ -5,6 +5,8 @@ expert), CPU only, no model file:
   - the state carries: a text fed in one chunk, token by token, and in uneven pieces gives the same logits (the conv window,
     the delta state, the KV cache and the causal mask across feeds)
   - causality: a position's logits do not depend on later tokens; reset() returns to the start
+  - the attention in pieces of 1 or 5 query rows (ATTN_ROWS) gives the same bits as one piece; tools/reference/q35_ref.py
+    --last 4 writes the full run's last four rows, bit for bit
   - the block kinds come from attention.recurrent_layers, and from full_attention_interval without it (the same logits)
   - the declared multi-token-prediction block is not read (the file has no tensors for it), and a qwen35 file with a
     router tensor (the MoE line) is refused
@@ -72,6 +74,23 @@ m.reset(); again = m.feed(ids); check(np.array_equal(again, full), 'reset() retu
 m.reset(); other = m.feed(ids[:7] + [(t + 1) % V for t in ids[7:]])
 check(rel(other[:7], full[:7]) < 1e-12 and rel(other[7:], full[7:]) > 1e-3, 'a position does not see later tokens, and sees its own')
 m.reset(); last = m.feed(ids, last=3); check(last.shape == (3, V) and rel(last, full[-3:]) < 1e-12, 'last=3 gives the last three rows')
+rows0 = ref_q35.ATTN_ROWS
+for n in (1, 5):
+    ref_q35.ATTN_ROWS = n; m.reset(); ok_n = np.array_equal(m.feed(ids), full)
+    check(ok_n, f'the attention in pieces of {n} query rows: the same bits as one piece of {rows0}')
+ref_q35.ATTN_ROWS = rows0
+import subprocess
+TOKS = os.path.join(A.scratch, 'tiny-tokens.txt'); open(TOKS, 'w').write(' '.join(map(str, ids)))
+TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools', 'reference', 'q35_ref.py')
+outs = {}
+for tag, extra in (('full', []), ('last', ['--last', '4'])):
+    outs[tag] = os.path.join(A.scratch, f'tiny-ref-{tag}.npz')
+    r = subprocess.run([sys.executable, '-I', TOOL, P, outs[tag], str(len(ids)), '--tokens', TOKS, '--threads', '2'] + extra,
+                       capture_output=True, text=True)
+    if r.returncode: print(r.stdout[-800:], r.stderr[-800:])
+zf, zl = np.load(outs['full']), np.load(outs['last'])
+check(zl['logits'].shape == (4, V) and np.array_equal(zl['seq'], zf['seq']) and np.array_equal(zl['logits'], zf['logits'][-4:]),
+      f'q35_ref.py --last 4: seq [{len(zl["seq"])}] and the full reference\'s last four rows, bit for bit')
 
 meta2 = {k: v for k, v in META.items() if k != 'qwen35.attention.recurrent_layers'}
 P2 = os.path.join(A.scratch, 'tiny-q35-fai.gguf'); write_gguf(P2, meta2, T)

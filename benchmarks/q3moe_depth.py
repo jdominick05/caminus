@@ -21,7 +21,10 @@ runs of this script alternated in one window (F16, Q8, F16, Q8, ...), the same d
 --engine q35moe: Qwen3.6-35B-A3B (engine/q35_moe.py Moe35Own, --kv f16 or q8) instead, its arms pass-time options on one
 engine (name=:option=int ...: attn_from, attn_splits, pair=1 the split pair launched alone between the slices, the cost of
 the launch boundaries alone; default one=:attn_from=1073741824 sliced=:attn_from=0: the single launch against the sliced
-pass with the attention kernel at every depth, which sets q35_moe.ATTN_FROM)."""
+pass with the attention kernel at every depth, which sets q35_moe.ATTN_FROM).
+--yarn F: the long-context mode at YaRN factor F (the 30B: rope=caminus.rope.YarnMode(F, its native context 32,768, as
+caminus serve --long-context builds it), the YaRN builds of the arms' modules, one card or two; --engine q35moe:
+Moe35Own(yarn=F)); depths up to F x the native window. The header line names the rope each run used."""
 import argparse, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -36,9 +39,14 @@ ap.add_argument('--arms', nargs='+', default=None)
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--local-only', action='store_true')
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
 ap.add_argument('--engine', default='q3moe', choices=('q3moe', 'q35moe'))
+ap.add_argument('--yarn', type=float, default=None, help='the YaRN factor: the long-context mode (the 30B: YarnMode(F, 32,768); '
+                '--engine q35moe: Moe35Own(yarn=F))')
 A = ap.parse_args()
 depths = [int(x) for x in A.depths.split(',')]
 if A.local_only and A.cards != 2: raise SystemExit('q3moe_depth: --local-only is a two-card option (--cards 2)')
+from caminus.arch import QWEN3MOE_ROPE
+from caminus.rope import YarnMode
+rope = YarnMode(A.yarn, QWEN3MOE_ROPE.native_ctx) if A.yarn is not None and A.engine == 'q3moe' else None   # (the 30B's long-context mode)
 if A.cards == 2:
     from caminus.engine.q3moe_tp import Q3MoETP, SPLITS_CAP
     arms = A.arms or ['default=@card']
@@ -48,8 +56,8 @@ if A.cards == 2:
     if not all(1 <= c <= max(caps) <= 128 for c in caps) or min(caps) < 1:
         raise SystemExit(f'q3moe_depth: arm caps {caps}: each must be 1 .. 128 (the two-card modules\' attention merge)')
     eng = Q3MoETP(A.gguf, max_ctx=max_ctx, local_only=A.local_only, vram_extra_mib=[len(arms) * Q3MoETP.TAPE_MIB] * 2,   # (+ a tape set per arm,
-                  splits_cap=max(caps), q8=A.kv == 'q8')                                                                 #  the projection at the largest cap)
-    print(f'max_ctx {max_ctx}: {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB, KV {A.kv}; expert rows {eng.exp_rows}, kv heads {eng.kvc}, '
+                  splits_cap=max(caps), q8=A.kv == 'q8', rope=rope)                                                      #  the projection at the largest cap)
+    print(f'max_ctx {max_ctx}: {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB, KV {A.kv}, rope {rope or "native"}; expert rows {eng.exp_rows}, kv heads {eng.kvc}, '
           f'head rows {eng.vh} / {eng.vocab - eng.vh}{"; LOCAL ONLY (each card alone, not the model)" if A.local_only else ""}', flush=True)
     eng.enable_card_timing(True)
     keys = ('E', 'buf', 'dstage', 'hstage', 'tok', 'pos', 'epoch', 'splits', 'per_wgp_c', 'seg_names', 'layer_seg', 'logits_half',
@@ -101,8 +109,8 @@ if A.engine == 'q35moe':
         ARMS.append((name, o))
     print(torch.cuda.get_device_name(0), flush=True)
     max_ctx = A.max_ctx or max(depths) + A.tokens + 1
-    eng = Moe35Own(A.gguf, max_ctx=max_ctx, q8=A.kv == 'q8')
-    print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}, module {eng.module}, grid {eng.E.grid}', flush=True)
+    eng = Moe35Own(A.gguf, max_ctx=max_ctx, q8=A.kv == 'q8', yarn=A.yarn)
+    print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}, rope {eng.rope_key or "native"}, module {eng.module}, grid {eng.E.grid}', flush=True)
     forms = {n: (o.get('attn_from', eng.attn_from), o.get('attn_splits'), 'pair' if o.get('pair') else 'kernel') for n, o in ARMS}
     keys = ('attn_from', 'attn_splits', 'attn_launch')
 if A.engine == 'q3moe': A.arms, ARMS = A.arms or ['default=' + ('dec_q3m_kvq8' if A.kv == 'q8' else 'dec_q3m')], []
@@ -121,8 +129,8 @@ for a in (A.arms if A.engine == 'q3moe' else ()):
 if A.engine == 'q3moe':
     print(torch.cuda.get_device_name(0), flush=True)
     max_ctx = A.max_ctx or max(depths) + A.tokens + 1
-    eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, q8=A.kv == 'q8', **ARMS[0][1])   # (+ a tape per arm, built below)
-    print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}', flush=True)
+    eng = Q3MoEOne(A.gguf, max_ctx=max_ctx, vram_extra_mib=len(ARMS) * Q3MoEOne.TAPE_MIB, q8=A.kv == 'q8', rope=rope, **ARMS[0][1])   # (+ a tape per arm)
+    print(f'max_ctx {max_ctx}: {eng.vram_mib:.0f} MiB, KV {A.kv}, rope {rope or "native"}', flush=True)
     keys = ('E', 'S', 'dstage', 'hstage', 'tok', 'pos')
     forms = {}
     for name, opt in ARMS:
