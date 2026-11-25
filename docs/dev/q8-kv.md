@@ -135,11 +135,13 @@ append (`q35p_kv_append_q8`: the decode's `own_kv_q8_encode`, one thread per blo
 at 30K: docs/dev/yardsticks.md). A
 refused block sets error bit 2 and marks the engine broken (`k3.InvalidKVEncoding`). `caminus serve --kv q8` takes the
 batched prefill in either rope mode (YaRN: `pf_gg_attn_q35m_yarn`, `PF_QK_YARN`: the decode op's table and magnitude
-scale; prefill-then-decode against the float64 YaRN x2 reference 3.61e-4 / 64 of 64, decode-only 4.45e-4).
+scale; prefill-then-decode against the float64 YaRN x2 reference 3.37e-4 / 64 of 64, decode-only 4.76e-4 on the 0.4.0
+release commit, both cards).
 
 Gates (RX 7900 XT): `tests/prefill/test_q35m_prefill_ops.py` (the append bitwise the decode module's, the refusals);
 prefill of positions 0 .. 63 then decode of 64 .. 127 against the float64 reference (`tests/prefill/test_q35_prefill.py
---kv q8`): mean KLD 2.41e-4, top-1 64/64, decode-only on the same rows 2.49e-4, 64/64 (F16: 3.35e-4 / 3.45e-4); chunk
+--kv q8`): mean KLD 3.41e-4, top-1 64/64, decode-only on the same rows 2.69e-4, 64/64 (F16: 3.43e-4; 0.4.0, both cards;
+the speeds: [benchmarks](benchmarks.md#qwen36-35b-a3b-gsq-hybrid-own-code-one-card)); chunk
 geometry and prompt-cache stops change no logit and no cache byte; 16,384 tokens from empty in 3.37 s (4,856 tok/s; F16
 3.30 s). `--yarn 2` runs the same test in the YaRN mode against a `tools/reference/q35_ref.py --yarn 2` reference; a
 `q35_ref.py --last 64` reference of N tokens with `--from N-64` scores the hand-off at depth.

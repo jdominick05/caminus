@@ -3,7 +3,8 @@
 Caminus's math is its own. Outside projects that ship gfx1100 kernels are measured here as yardsticks, at the shapes
 Caminus actually runs, and read as sources of ideas or code to borrow (with their notices, THIRD_PARTY.md). None of
 them is a dependency of the package. Rows here are not release rows: docs/dev/benchmarks.md holds what every release
-reruns; a yardstick needs outside installs, so it is rerun when the kernel it measures changes.
+reruns; a yardstick needs outside installs, so it is rerun when the kernel it measures changes. None of the FlyDSL or
+rocKE rows was rerun for 0.4.0: the README's scoreboard reads them as dated here, measured on the RX 7900 XT.
 
 The projects, with the versions measured:
 
@@ -252,9 +253,11 @@ keys up to 3 workgroups per WGP over the 4 groups (at most 64).
   launch overlaps. At first it paid about 0.7 ms a token (~35 us per k3_run boundary): each attention block's prefetch
   segment (OP_PREFETCH, 16 tasks streaming weights into the Infinity Cache) ran in front of the cut, so the trunk's
   launch could not end before it had, and the attention waited (the gap after a trunk launch 19 us, after a no-op one 5).
-  With that segment behind the block's pair (the same bits) the sliced pass pays 0.26 ms at depth 0 and wins from
+  With that segment behind the block's pair (the same bits) the sliced pass paid 0.26 ms at depth 0 and won from
   24,576 (F16) / 20,480 (Q8) on: 131,072 8.83 against 10.83 F16, 7.74 against 10.76 Q8. The switch and its numbers:
-  `q35_moe.ATTN_FROM`.
+  `q35_moe.ATTN_FROM`. On the 0.4.0 release commit (not interleaved, [benchmarks](benchmarks.md#qwen36-35b-a3b-gsq-hybrid-own-code-one-card)):
+  0.35 ms at depth 8 on the XT (0.06 ms on the XTX), 131,072 8.80 against 10.82 F16 and 7.71 against 10.74 Q8 (XT),
+  7.96 against 10.08 F16 and 6.35 against 9.00 Q8 (XTX).
 
 ## Prefill GEMMs (Qwen3-30B-A3B and Qwen3.6-35B-A3B, grouped experts)
 
@@ -467,6 +470,28 @@ run):
   took 256 VGPRs and spilled (2 and 18); a 4 x 4 wave tile with the scale step's P and four row tiles' B operands is
   estimated past 256 VGPRs (not built).
 
+## Decode matvec against the read floor
+
+AMD ships no GGUF quantized matvec, so the bar for decode is the memory itself: the bytes a token must read divided by
+the card's measured read peak (952 GB/s on the RX 7900 XTX). A token that reads every byte once cannot be faster. The
+share below is the whole decode token's time against that floor (attention, norms, the router and the hand-offs
+between stages included), so the matvecs alone sit closer to the floor than the share says; per stage:
+[the 30B's trace](qwen3-30b-a3b.md#where-the-remaining-time-is).
+
+| Model, card | Bytes a token (weights + KV) | Floor at 952 GB/s | Measured (0.4.0, `benchmarks/q3moe_depth.py`) | Share of the floor |
+|---|---|---|---|---|
+| Qwen3-30B-A3B, XTX, depth 8 | 1.92 GB | 2.02 ms | 3.89 ms | 52 % |
+| the same, depth 4,096 | 2.32 GB | 2.44 ms | 4.64 ms | 53 % |
+| the same, depth 16,384 | 3.53 GB | 3.71 ms | 6.14 ms | 60 % |
+| the same, depth 32,768 | 5.14 GB | 5.40 ms | 8.07 ms | 67 % |
+| the same, depth 40,900 | 5.94 GB | 6.24 ms | 9.06 ms | 69 % |
+
+- The 30B's bytes: every dense matrix, 8 of the 128 experts per layer, the output head, and 98,304 bytes of F16 KV per
+  position ([its page](qwen3-30b-a3b.md#decode-how-fast-it-writes); that page divides by the 858 GB/s its decode-floor
+  study sustained, which gives 57 % at depth 8).
+- Qwen3.6-35B-A3B and the Coder: their bytes a token are not counted yet, so no share is given.
+- The XT's read peak is not measured (its memory is about 20 % slower), so no XT share either.
+
 ## Summary: where the outside kernels say we stand (XT)
 
 | Op | ours | best yardstick measured | gap |
@@ -481,3 +506,4 @@ run):
 | Prefill attention, chunk at 30K | 79.7 ms (964 ms before the tiles) | rocKE WMMA prefill: 28.5 ms (torch SDPA tiled: 40.6 ms) | 2.8x (34x before) |
 | Prefill attention, 35B chunk at 30K | 20.95 ms (`q35mp_attn`; 41.3 ms before) | rocKE WMMA prefill: 19.60 ms | 1.07x (2.1x before) |
 | Prefill attention, 30B chunk at 30K | 17.38 ms (`q3mp_attn`; 30.0 ms before) | rocKE d128: 18.62 ms | 0.93x (1.6x before) |
+| Decode, Qwen3-30B-A3B, a whole token at depth 8 (XTX, 0.4.0) | 3.89 ms | the read floor: 2.02 ms (1.92 GB at 952 GB/s) | 52 % of the floor |

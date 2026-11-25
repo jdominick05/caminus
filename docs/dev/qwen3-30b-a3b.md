@@ -57,8 +57,9 @@ which every number on this page was measured on unless it says otherwise.
   start never use it, and `caminus restart` re-points a server recorded with its path at the catalog file.
 - **Its own folder.** The new file's local path is `Qwen3-30B-A3B-GGUF-unsloth/Qwen3-30B-A3B-Q4_K_M.gguf` (`Item.local`):
   the repository name and the file name are the official file's, so without it the two would share a path.
-- **Gated on this file** (2026-11-18, the engine gates below against this file's own references: float64 at 128
-  tokens, fp32 for the last 64 of 16,384 / 40,896; llama.cpp, the ignite-llama fork, on the same file as the bound):
+- **Gated on this file** (2026-11-18, rerun on the 0.4.0 release commit on 11-25: the table holds the 0.4.0 values; the
+  engine gates below against this file's own references: float64 at 128 tokens, fp32 for the last 64 of 16,384 / 40,896;
+  llama.cpp, the ignite-llama fork, on the same file as the bound):
 
   | Gate | Cards, KV | caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 |
   |---|---|---|---|
@@ -66,10 +67,18 @@ which every number on this page was measured on unless it says otherwise.
   | 128 tokens | XT, Q8 | 1.14e-03, 127 / 128 | 2.65e-03 (q8_0 KV), 127 / 128 |
   | 128 tokens | XTX + XT, F16 | 2.42e-04, 128 / 128 | 2.40e-03, 128 / 128 |
   | 128 tokens | XTX + XT, Q8 | 1.34e-03, 127 / 128 | 2.65e-03 (q8_0 KV), 127 / 128 |
-  | Last 64 of 16,384 | XTX, F16 | 1.96e-03, 63 / 64 | 7.94e-03, 63 / 64 |
-  | Last 64 of 40,896 | XTX, F16 | 8.56e-04, 64 / 64 | 3.85e-03, 61 / 64 |
-  | Last 64 of 16,384 | XTX + XT, F16 | 1.34e-03, 63 / 64 | 7.94e-03, 63 / 64 |
-  | Last 64 of 40,896 | XTX + XT, F16 | 1.07e-03, 63 / 64 | 3.85e-03, 61 / 64 |
+  | Last 64 of 16,384 | XTX, F16 | 9.69e-04, 62 / 64 | 7.94e-03, 63 / 64 |
+  | Last 64 of 40,896 | XTX, F16 | 8.98e-04, 64 / 64 | 3.85e-03, 61 / 64 |
+  | Last 64 of 16,384 | XTX, Q8 | 2.30e-03, 62 / 64 | |
+  | Last 64 of 40,896 | XTX, Q8 | 1.24e-03, 64 / 64 | |
+  | Last 64 of 16,384 | XTX + XT, F16 | 1.46e-03, 63 / 64 | 7.94e-03, 63 / 64 |
+  | Last 64 of 40,896 | XTX + XT, F16 | 1.05e-03, 63 / 64 | 3.85e-03, 61 / 64 |
+  | Last 64 of 16,384 | XTX + XT, Q8 | 3.24e-03, 62 / 64 | |
+  | Last 64 of 40,896 | XTX + XT, Q8 | 1.14e-03, 64 / 64 | |
+
+  On 11-18 the one-card 16,384 row read 1.96e-03, 63 / 64 and the depth rows within 10 % of the table otherwise. The
+  depth gate passes a top-1 one position below llama.cpp's (the one-point rule of the KLD floor gate), which the
+  one-card 16,384 row uses: 62 against 63.
 
   The Q8 rows also pass against the F16 cache (mean KLD 1.16e-03 one card, 1.28e-03 two, top-1 99.2 %; llama.cpp's own
   F16 to q8_0 cost 2.46e-03, 98.2 %); the two-card rows' replicas are equal after every token. These gates measure the
@@ -84,28 +93,31 @@ which every number on this page was measured on unless it says otherwise.
 
 ## Results
 
-All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, 2026-11-10, on the official Q4_K_M
-file ([which file](#which-file)). llama.cpp is the
-[ignite-llama](https://github.com/jdominick05/ignite-llama) fork at e4e3f8eda, a HIP build with the same toolchain,
-on the same file and card (`llama-bench -ngl 99 -fa 1`).
+All on one RX 7900 XTX (24 GB, driving the monitors), clocks held at DPM `high`, on the 0.4.0 release commit
+(2026-11-25), on the catalog's file, unsloth's Q4_K_M ([which file](#which-file); up to 0.3.0 these rows were the
+official file's). llama.cpp is the
+[ignite-llama](https://github.com/jdominick05/ignite-llama) fork (77b7e9083: the gates' e4e3f8eda plus drafter commits),
+a HIP build with the same toolchain, on the same file and card (`llama-bench -ngl 99 -fa 1`).
 
 ### Decode (how fast it writes)
 
 | Context depth | Caminus | llama.cpp | Bandwidth bound | Share of the bound |
 |---|---|---|---|---|
-| 8 | **248 tok/s** (4.03 ms) | 148 tok/s | 447 tok/s | 55 % |
-| 1,024 | **235 tok/s** (4.26 ms) | | 425 tok/s | 55 % |
-| 4,096 | **213 tok/s** (4.69 ms) | 134 tok/s | 369 tok/s | 58 % |
-| 16,384 | **161 tok/s** (6.20 ms) | 110 tok/s | 243 tok/s | 66 % |
-| 32,768 | **124 tok/s** (8.04 ms) | 90 tok/s | 167 tok/s | 74 % |
-| 40,900 | **111 tok/s** (9.03 ms) | | 144 tok/s | 77 % |
+| 8 | **257 tok/s** (3.89 ms) | 149 tok/s | 447 tok/s | 57 % |
+| 1,024 | **241 tok/s** (4.15 ms) | | 425 tok/s | 57 % |
+| 4,096 | **216 tok/s** (4.64 ms) | 135 tok/s | 369 tok/s | 58 % |
+| 16,384 | **163 tok/s** (6.14 ms) | 111 tok/s | 243 tok/s | 67 % |
+| 32,768 | **124 tok/s** (8.07 ms) | 91 tok/s | 167 tok/s | 74 % |
+| 40,900 | **110 tok/s** (9.06 ms) | | 144 tok/s | 77 % |
 
 - **Caminus:** `benchmarks/q3moe_depth.py --depths 8,1024,4096,16384,32768,40900 --tokens 32 --rounds 5`. One token per
   pass, the median of 5 rounds of 32 tokens at each depth; the rounds differ by at most 0.03 ms.
 - **llama.cpp:** `tg64` at depths 0, 4,096, 16,384 and 32,768 (`-d`), 2 repetitions.
 - **Bandwidth bound:** the bytes one token must read, divided by the 858 GB/s this card sustained in the decode-floor
   study. A token reads 1.92 GB of weights (every dense matrix, 8 of the 128 experts per layer, the output head) plus
-  98,304 bytes of KV cache per position of context. Nothing that reads every byte once per token can beat it.
+  98,304 bytes of KV cache per position of context. Nothing that reads every byte once per token can beat it. Against
+  the card's measured read peak (952 GB/s) instead, the shares are 52 % to 69 %
+  ([yardsticks](yardsticks.md#decode-matvec-against-the-read-floor)).
 
 Through the HTTP server (`tools/serve_smoke1.py`, one request each): the current figures are in
 [benchmarks](benchmarks.md) (the Qwen3-30B-A3B Q4_K_M section).
@@ -114,20 +126,20 @@ Through the HTTP server (`tools/serve_smoke1.py`, one request each): the current
 
 | Prompt length | Caminus | llama.cpp |
 |---|---|---|
-| 512 | **5,166 tok/s** | 4,330 tok/s |
-| 4,096 | **6,432 tok/s** | 3,853 tok/s |
-| 32,768 | **2,791 tok/s** (before the overflow guard) | 1,794 tok/s |
+| 512 | **6,577 tok/s** | 4,442 tok/s |
+| 4,096 | **7,275 tok/s** | 3,878 tok/s |
+| 32,768 | **3,811 tok/s** | 1,804 tok/s |
 
 `benchmarks/q3moe_prefill.py --lengths 512,4096,32768 --chunk 2048 --rounds 3` from an empty context; llama.cpp:
-`llama-bench` `pp512`, `pp4096`, `pp32768`. 512 and 4,096 are the medians of three processes on 2026-11-11, with the
-Q4_K kernel's overflow guard (below); without it the same runs read 5,214 and 6,490 tok/s, so the guard costs 0.9 %.
-32,768 was measured on 2026-11-10 without the guard and not since; an earlier form of the guard cost 0.7 % there.
+`llama-bench` `pp512`, `pp4096`, `pp32768`. With the Q4_K kernel's overflow guard (below), which cost 0.9 % when it
+came in (2026-11-11).
 
 ### Accuracy
 
 The reference is the same model computed in floating point with exactly decoded weights: float64 on the CPU at short
 context (`tools/reference/q3moe_ref.py`), fp32 on a card at depth (`tools/reference/q3moe_ref32.py`). Both engines are
-compared with it on the same tokens.
+compared with it on the same tokens. The table is the official file's (2026-11-10 / 16, not rerun for 0.4.0); the
+catalog file's rows, rerun on the 0.4.0 release commit, are under [which file](#which-file).
 
 | Where | Caminus: mean KLD, top-1 | llama.cpp: mean KLD, top-1 | Tool |
 |---|---|---|---|
@@ -217,8 +229,9 @@ Two checks hold this, and both run without trusting a list written by hand:
 
 ## Where the remaining time is
 
-At short context a token takes 4.03 ms against a 2.24 ms bound. One traced token on the RX 7900 XTX
-(`benchmarks/q3moe_trace.py`; the trace build takes 4.22 ms), each stage's time on the critical path against the time
+At short context a token takes 3.89 ms on the 0.4.0 release commit (4.03 ms when this trace was taken) against a
+2.24 ms bound. One traced token on the RX 7900 XTX (`benchmarks/q3moe_trace.py`; the trace build took 4.22 ms; not rerun
+for 0.4.0), each stage's time on the critical path against the time
 its weights take at the card's 858 GB/s:
 
 | Stage, per layer | Weights read | At bus speed | Measured | Over, per token |
@@ -446,23 +459,33 @@ shape as the Coder's NTK mode past 262,144; `caminus start --long-context` passe
   made in float64); `tests/engine/test_q3moe_yarn_cpu.py` checks the recipe against ggml's formula, written from its
   source (every pair's frequency to 1e-12, the correction dims, mscale), since the kernels and the YaRN reference share
   `caminus.rope`.
-- **Results** (2026-11-16, Q4_K_M; mean KLD against the float64 / fp32 YaRN references, last 64 rows at depth):
+- **Results** (2026-11-16, rerun on the 0.4.0 release commit on 11-24 / 25, the table holding the 0.4.0 values; the
+  official Q4_K_M, whose YaRN references these are (the served smoke and the speed below ran on the catalog's file); mean KLD against the float64 / fp32 YaRN references, last 64 rows at depth):
 
   | Gate | Cards, KV | caminus | llama.cpp (YaRN, F16 KV) | top-1 caminus / llama.cpp |
   |---|---|---|---|---|
   | 128 tokens | XT, F16 | 2.12e-04 | 2.77e-03 | 128 / 127 of 128 |
   | 128 tokens | XT, Q8 | 1.38e-03 | 2.77e-03 (q8_0 KV: 3.96e-03) | 127 / 127 |
   | 128 tokens | XTX + XT, F16 | 7.87e-04 | 2.77e-03 | 128 / 127 |
-  | 65,536 | XTX + XT, F16 | 1.64e-03 | 1.08e-02 | 64 / 60 of 64 |
-  | 81,920 | XTX, Q8 | 3.64e-03 | 1.62e-02 | 64 / 63 |
-  | 131,000 | XTX + XT, F16 | 3.46e-03 | 2.57e-02 | 61 / 61 |
+  | 65,536 | XTX + XT, F16 | 1.85e-03 | 1.08e-02 | 63 / 60 of 64 |
+  | 81,920 | XTX, Q8 | 3.17e-03 | 1.62e-02 | 64 / 63 |
+  | 131,000 | XTX + XT, F16 | 4.17e-03 | 2.57e-02 | 63 / 61 |
+
+  (11-16: 1.64e-03, 64 / 64; 3.64e-03; 3.46e-03, 61 / 64 at the three depths; at depth the fp32 reference's own spread
+  is of that order, so read these rows to one digit.)
 
   Both engines sit closer to the YaRN reference than to the native one at 128 tokens (caminus 7.9e-04 against 3.5e-02).
   `test_q3m_yarn_rope.py`: the decode row bit for bit the prefill's at positions 0 to 131,071 for all four YaRN decode
-  builds (one card and two, F16 and Q8), XT. Served smoke (`tools/serve_smoke1.py`, own code only, restart included):
-  two cards at `--max-ctx 131072`, a needle at about 44K of a 119,343-token prompt found (prefill 1,082 tok/s, decode
-  76 tok/s at that depth, 180 tok/s short); one XTX at `--max-ctx 77824` (the mode picked Q8_0 rows: F16 rows hold
-  40,960 there), a needle in a 69,548-token prompt found (prefill 1,399 tok/s, decode 91 tok/s, 198 short).
+  builds (one card and two, F16 and Q8), XT. Served smoke (`tools/serve_smoke1.py --long-context`, own code only, restart
+  included; 0.4.0): two cards, the context picked 131,072, a needle at about 44K of a 119,343-token prompt found (prefill
+  1,697 tok/s, first token in 70 s, decode 85 tok/s at that depth, 220 tok/s short); one XTX, the context picked 81,920
+  (the mode picked Q8_0 rows: F16 rows hold 40,960 there), a needle in a 69,548-token prompt found (prefill 2,263 tok/s,
+  first token in 31 s, decode 98 tok/s, 236 short).
+- **Speed** (0.4.0, `benchmarks/q3moe_depth.py --yarn 4` / `benchmarks/q3moe_prefill.py --yarn 4`, the catalog's file):
+  one XTX, F16, decode 260 / 218 / 163 / 124 / 110 tok/s at depth 8 / 4,096 / 16,384 / 32,768 / 40,900, prefill 7,645 /
+  3,871 tok/s at 4,096 / 32,768; Q8, decode 246 / 215 / 168 / 134 / 93 / 81 tok/s at 8 / 4,096 / 16,384 / 32,768 /
+  65,536 / 81,920, prefill 7,472 / 3,741 / 2,402 at 4,096 / 32,768 / 65,536; two cards, F16, decode 229 / 190 / 133 /
+  102 / 70 tok/s at 8 / 4,096 / 32,768 / 65,536 / 131,072, prefill 7,152 / 4,259 / 2,715 at 4,096 / 32,768 / 65,536.
 
 ## Limits
 
