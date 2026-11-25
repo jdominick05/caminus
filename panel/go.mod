@@ -6,11 +6,11 @@ toolchain go1.26.8
 
 require (
 	charm.land/bubbles/v2 v2.2.1
-	charm.land/bubbletea/v2 v2.1.1
+	charm.land/bubbletea/v2 v2.1.2
 	charm.land/glamour/v2 v2.0.1
-	charm.land/lipgloss/v2 v2.1.0
-	github.com/alecthomas/chroma/v2 v2.14.0
-	github.com/charmbracelet/x/ansi v0.11.9
+	charm.land/lipgloss/v2 v2.1.1
+	github.com/alecthomas/chroma/v2 v2.27.0
+	github.com/charmbracelet/x/ansi v0.11.10
 )
 
 require (
@@ -24,7 +24,7 @@ require (
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/dlclark/regexp2 v1.11.0 // indirect
+	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-runewidth v0.0.30 // indirect
