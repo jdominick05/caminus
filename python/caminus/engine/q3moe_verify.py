@@ -1,5 +1,5 @@
 """Qwen3-30B-A3B (qwen3moe): T-token verify passes for speculative decoding, on the verify module
-(kernels/k3_q3m_ver.hip: the decode module's ops in their T-token forms).
+(kernels/dec_q3m_ver.hip: the decode module's ops in their T-token forms).
 
 A pass runs T tokens at positions pos0 .. pos0 + T - 1 in one launch: token t's logits, its KV cache row and (optionally)
 the residual entering the tap layers are bit for bit what T decode steps of Q3MoEOne give for the same tokens, because
@@ -12,7 +12,7 @@ right (causal); the rows from r on are overwritten by the next pass at those pos
 
 What the tape shares between the tokens of a pass and what it cannot (measured: docs/dev/qwen3-30b-a3b.md):
   dense matvecs   one segment per matrix for all tokens: a row pair's weight words are loaded once and every token's sums
-                  run on them (own_quant_mt.h);
+                  run on them (quant_ver.h);
   experts         8 slots per token in one grouped segment; slots that hold the same expert are computed by the first
                   of them (OWN_UNION), each on its own input;
   attention       a row-only segment per token writes the pass's cache rows first, then the T attentions run side by
@@ -24,7 +24,7 @@ import torch
 from . import k3
 from ..device import capacity
 
-MAX_T = 4                        # own_quant_mt.h's OWN_MT, and 8 expert slots per token in one 32-lane compare
+MAX_T = 4                        # quant_ver.h's OWN_MT, and 8 expert slots per token in one 32-lane compare
 DFLASH_TAPS = (1, 12, 23, 34, 45)   # the residual entering these layers: the DFlash speculator's target features
 WIDE_T, WIDE_WGP = 3, 7          # a pass of WIDE_T or more tokens runs on WIDE_WGP workgroups per WGP, a shorter one on
                                  # the decode engine's grid (4 on the RX 7900 XTX, 5 on the XT). Each pass at 4 .. 8 per
@@ -68,9 +68,9 @@ class Q3MoEVerify:
         sz = {torch.float32: 4, torch.float16: 2, torch.int32: 4}
         return sum(n * sz[dt] for n, dt in Q3MoEVerify._spec(eng, T, taps).values()) / 2 ** 20 + 2.0   # (+ the tape and its sync words)
 
-    def __init__(self, eng, T, module='k3_q3m_ver', per_wgp=None, taps=DFLASH_TAPS, vram_check=True):
-        """eng: a Q3MoEOne (its weights, cache and position bounds); T: tokens per pass, 1 .. 4; module: k3_q3m_ver or
-        k3_q3m_ver_trace; per_wgp: workgroups per WGP of this tape's grid (None: WIDE_WGP from WIDE_T tokens on, else
+    def __init__(self, eng, T, module='dec_q3m_ver', per_wgp=None, taps=DFLASH_TAPS, vram_check=True):
+        """eng: a Q3MoEOne (its weights, cache and position bounds); T: tokens per pass, 1 .. 4; module: dec_q3m_ver or
+        dec_q3m_ver_trace; per_wgp: workgroups per WGP of this tape's grid (None: WIDE_WGP from WIDE_T tokens on, else
         the decode engine's; the logits are the same bits at every grid); taps: layers whose entering residual each
         pass keeps per token (feats)"""
         if not isinstance(T, int) or not 1 <= T <= MAX_T: raise ValueError(f'Q3MoEVerify: T {T!r}: 1 .. {MAX_T}')

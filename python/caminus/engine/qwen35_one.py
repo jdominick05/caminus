@@ -12,7 +12,7 @@ The tape is Qwen3NextTP's op sequence with qwen35moe's choices (tests/engine/tes
 llama.cpp's intermediates): GDN value head h reads key head h % 16 (tiled: the module's default mapping), ssm_alpha and
 ssm_beta are separate matrices (GG formats, or F32 through OP_F32_MV), the gated RMSNorm's gate is SiLU (K3_GDN_SILU),
 attention q rows are [q | gate] per head, IMRoPE with equal text positions is NEOX on the first 64 dims, softmax top-8
-renormalized, the shared expert gated by sigmoid of an F32 row. Module: k3_gguf_q35h (HauhauCS Q3_K_P's formats);
+renormalized, the shared expert gated by sigmoid of an F32 row. Module: dec_q35m_hh (HauhauCS Q3_K_P's formats);
 another model's formats need their own module (k3.MODULE_CAPS refuses the tape otherwise)."""
 import ctypes
 import os
@@ -22,10 +22,11 @@ import numpy as np
 import torch
 from . import k3
 from .flashnext import EPS, DirectReader
+from .flashnext_tp import GACC_SITE_HOOKS, GACC_SITES
 from gguf import quants                                # (gguf-py on the path through caminus.engine.flashnext)
 
-MODULE = 'k3_gguf_q35h'
-DENSE_MODULE = 'k3_gguf_q35d'   # the dense line (llama.cpp arch qwen35: AREX-2, a Qwen3.8-27B finetune)
+MODULE = 'dec_q35m_hh'
+DENSE_MODULE = 'dec_q35_arex'   # the dense line (llama.cpp arch qwen35: AREX-2, a Qwen3.8-27B finetune)
 
 
 class Qwen35One:
@@ -33,7 +34,7 @@ class Qwen35One:
                  tape_only=False, debug_layers=None, vram_check=True, vram_extra_mib=0.0, shape_only=False):
         """path: a qwen35moe GGUF. device: the torch / HIP device index (with HIP_VISIBLE_DEVICES=1 the XT is device 0).
         max_ctx: KV cache positions (no measured capacity entry yet: callers keep it small until one exists). ntok: tokens
-        per pass (T > 1 runs module_for's _mt module). tape_only: build even if the module lacks an (op, format) pair
+        per pass (T > 1 runs module_for's _ver module). tape_only: build even if the module lacks an (op, format) pair
         (k3.Engine.build(strict=False); runs refuse). debug_layers: TEST-ONLY, build only the first n layers, then the output
         norm and head; after a pass res[0] is llama.cpp's l_out of layer n - 1 (tests/engine/test_q3n_e2e.py layers)."""
         from gguf import GGUFReader
@@ -131,12 +132,12 @@ class Qwen35One:
 
     def pick_module(self):
         """the code object for this checkpoint's formats, from its routed experts' format: Q2_0 (the 2-bit GSQ checkpoint)
-        -> k3_gguf_q35g, Q3_K / Q5_K (HauhauCS Q3_K_P) -> k3_gguf_q35h; anything else: refused (no module lists it)"""
+        -> dec_q35m_gg, Q3_K / Q5_K (HauhauCS Q3_K_P) -> dec_q35m_hh; anything else: refused (no module lists it)"""
         if self.dense: return DENSE_MODULE
         f = {self.T[f'blk.{i}.ffn_gate_exps.weight'].tensor_type.name for i in range(self.nl)}
-        if f == {'Q2_0'}: return 'k3_gguf_q35g'
+        if f == {'Q2_0'}: return 'dec_q35m_gg'
         if f <= {'Q3_K', 'Q5_K'}: return MODULE
-        raise ValueError(f'Qwen35One: no module for routed-expert formats {sorted(f)} (k3_gguf_q35h: Q3_K / Q5_K, k3_gguf_q35g: Q2_0)')
+        raise ValueError(f'Qwen35One: no module for routed-expert formats {sorted(f)} (dec_q35m_hh: Q3_K / Q5_K, dec_q35m_gg: Q2_0)')
 
     # -- weights, read straight onto the card --------------------------------------------------------------------------
     def _devs(self):
@@ -194,6 +195,24 @@ class Qwen35One:
                  h=B(Tn * max(1, self.k_used) * ffn), hq=q8b(Tn * max(1, self.k_used) * ffn), moe=B(Tn * D), shh=B(Tn * ffn), shu=B(Tn * ffn),
                  shq=q8b(Tn * ffn), shx=B(Tn * D), sgl=B(Tn), ffp=B(Tn * D))
         self.E, self.S, self.res, self.pos = E, s, [res], pos
+        # TEST-ONLY (K3_TEST_HOOKS=gacc-sites, FlashNextTP's hook: the recorded activations of docs/specs/spec-own-quant.md's
+        # G-acc, benchmarks/q36_gacc.py --record): every layer's attention half, FFN half and the head read and write the
+        # buffers of GACC_SITES through copies of their own (site_bufs[(layer, 'attn' | 'ffn') or ('head',)][name]), so
+        # every layer's rows stay readable after a pass. Only those pointers differ, every op, operand and order is the
+        # default tape's. Off by default
+        self.gacc_sites = os.environ.get('K3_TEST_HOOKS') == GACC_SITE_HOOKS
+        self.site_bufs = {}
+        if self.gacc_sites:
+            from ..device import capacity
+            per = sum(k * sum(s[n].numel() * s[n].element_size() for n in GACC_SITES[part])
+                      for part, k in (('attn', self.nl_build), ('ffn', self.nl_build), ('head', 1)))
+            capacity.check([self.dev], [per / 2 ** 20], f'Qwen35One K3_TEST_HOOKS={GACC_SITE_HOOKS} (every layer its own site rows)')
+
+        def site(key, part):
+            """under the gacc-sites hook: s's GACC_SITES[part] buffers become fresh copies, kept as site_bufs[key]"""
+            if not self.gacc_sites: return
+            own = {n: torch.zeros_like(s[n]) for n in GACC_SITES[part]}
+            self.site_bufs[key] = own; s.update(own)
         self.state, self.layer_seg, self.seg_names = {}, [], {}
         self.attn_cells = self.max_ctx
         self._attn_part = None
@@ -234,6 +253,7 @@ class Qwen35One:
         for il in range(self.nl_build):
             p = f'blk.{il}'
             self.layer_seg.append((il, len(E.segs)))
+            site((il, 'attn'), 'attn')
             M = norm(f'{p}.attn_norm.weight', dep)
             if il % self.fai != self.fai - 1:                  # Gated DeltaNet (value head h reads key head h % 16)
                 qkv = self._mat(f'{p}.attn_qkv.weight'); assert qkv['rows'] == CH, (qkv['rows'], CH)
@@ -284,6 +304,7 @@ class Qwen35One:
                 L = dict(kind='attn', q=aq, k=ak, v=av, qn=qn_, kn=kn_, o=ao, kv=cache)
             # res += block (llama.cpp's attn_residual; no exchange on one card), then the post-attention norm
             r_ = E.add_sum(s['blk'], s['zero'], res.reshape(-1), dep=blk_)
+            site((il, 'ffn'), 'ffn')
             M = norm(f'{p}.post_attention_norm.weight', r_)
             if self.dense:                                       # one dense FFN: gate / up matvecs, the fused swiglu q8_1, down
                 fg, fu, fd = self._mat(f'{p}.ffn_gate.weight'), self._mat(f'{p}.ffn_up.weight'), self._mat(f'{p}.ffn_down.weight')
@@ -315,6 +336,7 @@ class Qwen35One:
                      router=rw, sgate=sw, sg=sg, su=su, sd=sd, g=g, u=u, d=d)
             self.pw.append(L)
         self.layer_seg.append(('head', len(E.segs)))
+        site(('head',), 'head')
         M = norm('output_norm.weight', dep)
         out = self._mat('output.weight')
         self.vocab = out['rows']

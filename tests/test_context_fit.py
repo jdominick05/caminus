@@ -41,6 +41,33 @@ class ContextFit(unittest.TestCase):
                 A.auto_max_ctx(opt, log=lambda *a, **kw: None)
             self.assertFalse(A.fits(opt, [card]))
 
+    def test_idle_xt_room_places_dense_dflash_at_12288_with_three_slots(self):
+        # docs/dev/benchmarks.md, ThinkingCap's DFlash 2 table: at 12,288 positions its engine, prefill, drafter and verify
+        # tape project 17,528.1 MiB and one checkpoint slot 212.5. An idle RX 7900 XT (guard line 19,850, no display, 26 MiB
+        # in use) has 18,800 MiB of room, the same for placement and the runtime: the line less the allocator margin, the
+        # cache's reserve (MARGIN_MIB without a display) and work, the slack and the use. Four slots (18,803.1) refuse,
+        # three (18,590.6) place.
+        dev = SCRATCH / 'xt-card'
+        dev.mkdir(parents=True)
+        (dev / 'mem_info_vram_used').write_text(str(26 * 2 ** 20))
+        line = 19850
+
+        class Dense(arch.Arch):
+            cards = 1
+
+            def auto_need(self, opt, slots, cards=None):
+                return 262144, [0], 212.5, lambda c: [17528.1 + (slots + 2) * 212.5]
+
+        A, card = Dense('test', 'test'), dict(dev=str(dev), line_mib=line, display=False)
+        for slots, fits in ((4, False), (3, True)):
+            with self.subTest(slots=slots):
+                opt = dict(max_ctx=12288, auto_cache_slots=slots)
+                self.assertAlmostEqual(A.context_fit(opt, [card]).room_mib[0], 18800.0)
+                self.assertEqual(A.fits(opt, [card]), fits)
+                with patch.object(capacity, 'caps_mib', return_value=[(line - capacity.MARGIN_MIB, 26.0)]), \
+                     patch.object(capacity, 'cache_reserve_mib', return_value=[capacity.MARGIN_MIB]):
+                    self.assertAlmostEqual(A.context_fit(opt).room_mib[0], 18800.0)
+
     def test_maximum_includes_native_endpoint_and_checks_both_cards(self):
         p = Plan(10000, [0, 1], 4, [100, 80], lambda c: [c / 100, c / 125], 4096)
         self.assertEqual(p.maximum(), 10000)

@@ -1,5 +1,5 @@
-"""K3 engine cost model, part 2 (kernels/bw_bench.hip): read bandwidth vs working-set size with b128 loads, normal and
-nontemporal, across grid sizes; plus the decode matvec (kernels/k3_mv.hip) streaming a full-size weight set to see the
+"""K3 engine cost model, part 2 (kernels/bench_bw.hip): read bandwidth vs working-set size with b128 loads, normal and
+nontemporal, across grid sizes; plus the decode matvec (kernels/dec_core_mv.hip) streaming a full-size weight set to see the
 bandwidth the real compute pattern reaches.
   HIP_VISIBLE_DEVICES=0 python benchmarks/bench_bw.py"""
 import ctypes, os, sys
@@ -8,7 +8,7 @@ import torch
 from caminus.device.hip import Module
 from caminus.engine import k3
 
-m = Module('bw_bench')
+m = Module('bench_bw')
 sink = torch.zeros(1, dtype=torch.int32, device='cuda')
 wgps = torch.cuda.get_device_properties(0).multi_processor_count
 print(torch.cuda.get_device_name(), f'{wgps} WGPs')

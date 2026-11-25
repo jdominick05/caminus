@@ -8,6 +8,8 @@
   (caminus.__main__.COMMANDS, read from the file, not imported);
 - the README's setup table ("Your cards | What runs | Start with") holds exactly the rows of caminus.models.SETUPS, the
   one source caminus wizard and Ember's default read (python/caminus/models.py, parsed, not imported);
+- every cell of the README's scoreboard ("Model | Prefill GEMMs ...") is "not measured" or a link to its row's section in
+  docs/dev/yardsticks.md;
 - (the paths a doc names, AGENTS.md's command lines among them, are checked by tools/entropy.py, `refs`);
 - docs/panel.svg, the README's picture of the control panel, shows the version python/caminus/__init__.py holds (a
   release sets the version and redraws it: python -I tools/release/panel_shot.py; a nightly's .dev version is skipped).
@@ -77,6 +79,18 @@ got = readme[head + 2:head + 2 + len(want) + 1] if head is not None else []
 check(got[:len(want)] == want and (len(got) == len(want) or not got[-1].startswith('|')),
       'README setup table: the rows of caminus.models.SETUPS' + ('' if got[:len(want)] == want else
       ': write these rows under its header:\n' + '\n'.join(want)))
+
+# the README's scoreboard: each cell is "not measured" or a link to its measurement in docs/dev/yardsticks.md (the
+# anchors are checked with the other links above), so the README holds verdicts only and the numbers one file
+head = next((i for i, l in enumerate(readme) if l.startswith('| Model | Prefill GEMMs')), None)
+rows = []
+if head is not None:
+    for l in readme[head + 2:]:
+        if not l.startswith('|'): break
+        rows.append([c.strip() for c in l.strip('|').split('|')[1:]])
+loose = [c for r in rows for c in r if c != 'not measured' and not re.fullmatch(r'\[[^\]]+\]\(docs/dev/yardsticks\.md#[\w-]+\)', c)]
+check(bool(rows) and not loose, f'README scoreboard: {len(rows)} rows, every cell a yardsticks.md link or "not measured"'
+      + ('' if rows else ': no table under "| Model | Prefill GEMMs"') + (f'; other cells: {loose}' if loose else ''))
 
 ver = re.search(r"^__version__ = '([^']+)'", open(os.path.join(ROOT, 'python', 'caminus', '__init__.py'), encoding='utf-8').read(), re.M).group(1)
 shot = os.path.join(ROOT, 'docs', 'panel.svg')

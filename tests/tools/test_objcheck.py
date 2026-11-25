@@ -44,17 +44,23 @@ def pack(v):
     return bytes([0x80 | len(v)]) + b''.join(pack(k) + pack(x) for k, x in v.items())
 
 
-def note(regs):
+def note(regs, lds=0):
     v, vs, ss, priv = regs
     desc = pack({'amdhsa.kernels': [{'.name': 'other', '.vgpr_count': 3},
                                     {'.name': 'k3_run', '.vgpr_count': v, '.vgpr_spill_count': vs, '.sgpr_spill_count': ss,
-                                     '.private_segment_fixed_size': priv}], 'amdhsa.version': [1, 2]})
+                                     '.private_segment_fixed_size': priv, '.group_segment_fixed_size': lds}], 'amdhsa.version': [1, 2]})
     return struct.pack('<III', 7, len(desc), 32) + b'AMDGPU\0\0' + desc + bytes(-len(desc) % 4)
 
 
-def elf(code, data=b'\x01\x02', regs=None, strings=b'\0src/k.hip\0'):
+def elf(code, data=b'\x01\x02', regs=None, strings=b'\0src/k.hip\0', per=None, lds=0):
+    """per: the k3_resident_per_wgp symbol (kernels/dec_core.hip K3_PER_WGP), an int in .rodata named by .symtab"""
+    if per is not None: data = struct.pack('<i', per) + data
     secs = [('', 0, 0, b''), ('.text', 1, 0x6, code), ('.rodata', 1, 0x2, data)]
-    if regs: secs.append(('.note', 7, 0x2, note(regs)))
+    if regs: secs.append(('.note', 7, 0x2, note(regs, lds)))
+    if per is not None:
+        strtab = b'\0k3_resident_per_wgp\0'
+        sym = bytes(24) + struct.pack('<IBBHQQ', 1, 0x11, 0, 2, 0, 4)   # (the null symbol, then the int at .rodata + 0)
+        secs += [('.strtab', 3, 0, strtab), ('.symtab', 2, 0, sym, len(secs), 24)]
     secs += [('.dynstr', 3, 0x2, strings), ('.shstrtab', 3, 0, b'')]
     names, offs = b'\0', []
     for n, *_ in secs:
@@ -62,8 +68,9 @@ def elf(code, data=b'\x01\x02', regs=None, strings=b'\0src/k.hip\0'):
         if n: names += n.encode() + b'\0'
     secs[-1] = ('.shstrtab', 3, 0, names)
     body, hdrs = b'', b''
-    for (_, typ, flags, b), no in zip(secs, offs):
-        hdrs += struct.pack('<IIQQQQIIQQ', no, typ, flags, 0, 64 + len(body), len(b), 0, 0, 1, 0)
+    for (_, typ, flags, b, *le), no in zip(secs, offs):
+        link, ent = le if le else (0, 0)
+        hdrs += struct.pack('<IIQQQQIIQQ', no, typ, flags, 0, 64 + len(body), len(b), link, 0, 1, ent)
         body += b
     head = b'\x7fELF' + bytes([2, 1, 1, 0]) + bytes(8) + struct.pack('<HHIQQQIHHHHHH', 3, 224, 1, 0, 0, 64 + len(body), 0, 64, 0, 0, 64, len(secs), len(secs) - 1)
     return head + body + hdrs
@@ -149,23 +156,38 @@ check(rc == 1 and 'new: k3_new' in out and 'FAIL k3_new: 100 VGPRs' in out, 'che
 rc, out = run('check', base, build('new2', dict(BASE, k3_new=elf(b'N' * 40, regs=(60, 0, 0, 0)))), '--expect', 'k3_new')
 check(rc == 0 and 'PASS k3_new: 60 VGPRs' in out and '(new)' in out, 'check: a new object inside the budget passes, named or not')
 
+# ---- a module that declares its grid (kernels/dec_core.hip K3_PER_WGP): the budget is the cap that count allows
+pw = lambda per, v, lds=0: build(f'pw{per}_{v}_{lds}', dict(BASE, k3_b=elf(b'p%d%d' % (per, v) * 11, regs=(v, 0, 86, 0), per=per, lds=lds)))
+rc, out = run('check', base, pw(5, 140), '--expect', 'k3_b')
+check(rc == 0 and 'PASS k3_b: 140 VGPRs' in out and '[5 per WGP: cap 144]' in out, 'check: 5 per WGP -> a 144-VGPR budget, read from the object')
+rc, out = run('check', base, pw(5, 150), '--expect', 'k3_b')
+check(rc == 1 and '150 VGPRs > 144' in out, 'check: past its declared cap fails')
+rc, out = run('check', base, pw(4, 190), '--expect', 'k3_b')
+check(rc == 0 and '[4 per WGP: cap 192]' in out, 'check: 4 per WGP -> 192')
+rc, out = run('check', base, pw(5, 100, 27000), '--expect', 'k3_b')
+check(rc == 1 and '5 workgroups per WGP x 27000 B of LDS > 131072 B' in out, 'check: LDS for the declared count is checked too')
+snap2 = os.path.join(S, 'pw.txt'); run('snap', pw(5, 140, 20000), '-o', snap2)
+rc, out = run('check', snap2, pw(5, 141, 20000), '--expect', 'k3_b')
+check(rc == 0 and 'vgpr=140 vspill=0 sspill=86 priv=0 lds=20000 per=5' in open(snap2).read() and '(was 140 / 0 / 86)' in out,
+      'snap: the LDS and the declared count round-trip through a snapshot file')
+
 # ---- the recorded exemptions (EXEMPT, AGENTS.md): at or under the recorded counts passes, past them fails
-ex = build('ex0', dict(BASE, k3_u16=elf(b'U' * 40, regs=(173, 0, 0, 0))))
-rc, out = run('check', ex, build('ex1', dict(BASE, k3_u16=elf(b'V' * 40, regs=(173, 0, 0, 0)))), '--expect', 'k3_u16')
-check(rc == 0 and 'PASS changed (code): k3_u16' in out, 'check: a changed exempt object at its recorded VGPRs passes')
-rc, out = run('check', ex, build('ex2', dict(BASE, k3_u16=elf(b'W' * 40, regs=(174, 0, 0, 0)))), '--expect', 'k3_u16')
+ex = build('ex0', dict(BASE, dec_core_u16=elf(b'U' * 40, regs=(173, 0, 0, 0))))
+rc, out = run('check', ex, build('ex1', dict(BASE, dec_core_u16=elf(b'V' * 40, regs=(173, 0, 0, 0)))), '--expect', 'dec_core_u16')
+check(rc == 0 and 'PASS changed (code): dec_core_u16' in out, 'check: a changed exempt object at its recorded VGPRs passes')
+rc, out = run('check', ex, build('ex2', dict(BASE, dec_core_u16=elf(b'W' * 40, regs=(174, 0, 0, 0)))), '--expect', 'dec_core_u16')
 check(rc == 1 and '174 VGPRs > 173 (its exemption)' in out, 'check: an exempt object past its recorded VGPRs fails')
-rc, out = run('check', ex, build('ex3', dict(BASE, k3_gguf_gsq_mt=elf(b'G' * 40, regs=(96, 2, 0, 0)))), '--expect', 'k3_gguf_gsq_mt')
+rc, out = run('check', ex, build('ex3', dict(BASE, dec_q4x_gsq_ver=elf(b'G' * 40, regs=(96, 2, 0, 0)))), '--expect', 'dec_q4x_gsq_ver')
 check(rc == 1 and '2 spilled VGPRs > 1 (its exemption)' in out, 'check: an exempt object past its recorded spills fails')
 rc, out = run('check', ex, ex)
-check(rc == 0 and 'k3_u16' not in out.split('not judged here)')[-1] and 'k3_old (109 VGPRs, 0 spilled, not exempt)' in out,
+check(rc == 0 and 'dec_core_u16' not in out.split('not judged here)')[-1] and 'k3_old (109 VGPRs, 0 spilled, not exempt)' in out,
       'check: an unchanged exempt object inside its exemption is not listed; an unexempt one is listed as not exempt')
 
-rc, out = run('check', ex, build('ex4', dict(BASE, k3_u16=elf(b'U' * 40, regs=(180, 0, 0, 0)))), '--allow-missing')
-check('k3_u16 (180 VGPRs, 0 spilled, past its exemption 173 / 0)' in out,
+rc, out = run('check', ex, build('ex4', dict(BASE, dec_core_u16=elf(b'U' * 40, regs=(180, 0, 0, 0)))), '--allow-missing')
+check('dec_core_u16 (180 VGPRs, 0 spilled, past its exemption 173 / 0)' in out,
       'check: an unchanged object past its exemption is listed as past it, not as not exempt')
-rc, out = run('check', base, build('ex5', dict(BASE, k3_trace=elf(b'T' * 40, regs=(110, 0, 0, 0)))))
-check(rc == 0 and 'new: k3_trace' in out and 'PASS k3_trace: 110 VGPRs' in out, 'check: a new exempt object at its recorded counts passes')
+rc, out = run('check', base, build('ex5', dict(BASE, dec_core_trace=elf(b'T' * 40, regs=(110, 0, 0, 0)))))
+check(rc == 0 and 'new: dec_core_trace' in out and 'PASS dec_core_trace: 110 VGPRs' in out, 'check: a new exempt object at its recorded counts passes')
 
 # ---- not a code object
 junk = build('junk', {'k3_a': b'not an object file'})

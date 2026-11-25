@@ -1,19 +1,29 @@
-"""caminus.ref_q35 (the float64 reference of the dense qwen35 line) on a tiny synthetic qwen35 GGUF written here (random F32
+"""caminus.ref_q35 (the float64 reference of the qwen35 line) on a tiny synthetic qwen35 GGUF written here (random F32
 weights; 4 trunk blocks: 3 Gated DeltaNet + 1 attention, and a declared multi-token-prediction block whose tensors are not
-in the file), CPU only, no model file:
+in the file), and on its qwen35moe twin (the same trunk, each FFN 6 routed experts with 2 used plus a gated shared
+expert), CPU only, no model file:
   - the state carries: a text fed in one chunk, token by token, and in uneven pieces gives the same logits (the conv window,
     the delta state, the KV cache and the causal mask across feeds)
   - causality: a position's logits do not depend on later tokens; reset() returns to the start
+  - the attention in pieces of 1 or 5 query rows (ATTN_ROWS) gives the same bits as one piece; tools/reference/q35_ref.py
+    --last 4 writes the full run's last four rows, bit for bit
   - the block kinds come from attention.recurrent_layers, and from full_attention_interval without it (the same logits)
   - the declared multi-token-prediction block is not read (the file has no tensors for it), and a qwen35 file with a
     router tensor (the MoE line) is refused
   - one Gated DeltaNet step and one attention step against the block's definition written out per head and per value here
+  - qwen35moe: the state carries as above (one chunk == token by token == uneven pieces), the MoE FFN over 5 tokens
+    against its definition written out per token and per expert here (softmax router, top 2, renormalized weights, the
+    shared expert gated by a sigmoid), the routes feed() reports are those; a multi-token-prediction block's router is
+    not counted; a file with a block missing its router, a scale tensor, fused gate|up experts or an array-valued
+    expert width is refused
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/test_ref_q35.py --scratch DIR"""
-import argparse, os, struct, sys
+import argparse, os, re, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # tests/tiny_gguf.py
 import numpy as np
 from caminus import ref_q35
+from tiny_gguf import gdn_definition, write_gguf
 
 ap = argparse.ArgumentParser(); ap.add_argument('--scratch', required=True); A = ap.parse_args()
 os.makedirs(A.scratch, exist_ok=True)
@@ -23,36 +33,6 @@ ok = True
 def check(c, msg):
     global ok
     ok &= bool(c); print('PASS' if c else 'FAIL', msg, flush=True)
-
-
-# ---- a minimal GGUF v3 writer (F32 tensors; the value types this file needs) -------------------------------------------
-U32, I32, F32, BOOL, STR, ARR = 4, 5, 6, 7, 8, 9
-
-
-def _s(x):
-    b = x.encode(); return struct.pack('<Q', len(b)) + b
-
-
-def _val(v):
-    if isinstance(v, bool): return struct.pack('<I?', BOOL, v)
-    if isinstance(v, int): return struct.pack('<II', U32, v)
-    if isinstance(v, float): return struct.pack('<If', F32, v)
-    if isinstance(v, str): return struct.pack('<I', STR) + _s(v)
-    et = BOOL if isinstance(v[0], bool) else I32
-    return struct.pack('<IIQ', ARR, et, len(v)) + b''.join(struct.pack('<?' if et == BOOL else '<i', e) for e in v)
-
-
-def write_gguf(path, meta, tensors):
-    """tensors: name -> float32 array [rows, K] (written with dims innermost first) or [n]"""
-    head = struct.pack('<4sIQQ', b'GGUF', 3, len(tensors), len(meta)) + b''.join(_s(k) + _val(v) for k, v in meta.items())
-    info, data = b'', b''
-    for name, a in tensors.items():
-        a = np.ascontiguousarray(a, np.float32); dims = a.shape[::-1]
-        info += _s(name) + struct.pack('<I', len(dims)) + b''.join(struct.pack('<Q', d) for d in dims) + struct.pack('<IQ', 0, len(data))
-        data += a.tobytes(); data += b'\0' * (-len(data) % 32)
-    blob = head + info
-    with open(path, 'wb') as f:
-        f.write(blob + b'\0' * (-len(blob) % 32) + data)
 
 
 D, FF, V, S, NK, NV, H, HKV, HD, NROT, DC = 32, 40, 50, 4, 2, 4, 4, 2, 8, 4, 4
@@ -94,6 +74,23 @@ m.reset(); again = m.feed(ids); check(np.array_equal(again, full), 'reset() retu
 m.reset(); other = m.feed(ids[:7] + [(t + 1) % V for t in ids[7:]])
 check(rel(other[:7], full[:7]) < 1e-12 and rel(other[7:], full[7:]) > 1e-3, 'a position does not see later tokens, and sees its own')
 m.reset(); last = m.feed(ids, last=3); check(last.shape == (3, V) and rel(last, full[-3:]) < 1e-12, 'last=3 gives the last three rows')
+rows0 = ref_q35.ATTN_ROWS
+for n in (1, 5):
+    ref_q35.ATTN_ROWS = n; m.reset(); ok_n = np.array_equal(m.feed(ids), full)
+    check(ok_n, f'the attention in pieces of {n} query rows: the same bits as one piece of {rows0}')
+ref_q35.ATTN_ROWS = rows0
+import subprocess
+TOKS = os.path.join(A.scratch, 'tiny-tokens.txt'); open(TOKS, 'w').write(' '.join(map(str, ids)))
+TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools', 'reference', 'q35_ref.py')
+outs = {}
+for tag, extra in (('full', []), ('last', ['--last', '4'])):
+    outs[tag] = os.path.join(A.scratch, f'tiny-ref-{tag}.npz')
+    r = subprocess.run([sys.executable, '-I', TOOL, P, outs[tag], str(len(ids)), '--tokens', TOKS, '--threads', '2'] + extra,
+                       capture_output=True, text=True)
+    if r.returncode: print(r.stdout[-800:], r.stderr[-800:])
+zf, zl = np.load(outs['full']), np.load(outs['last'])
+check(zl['logits'].shape == (4, V) and np.array_equal(zl['seq'], zf['seq']) and np.array_equal(zl['logits'], zf['logits'][-4:]),
+      f'q35_ref.py --last 4: seq [{len(zl["seq"])}] and the full reference\'s last four rows, bit for bit')
 
 meta2 = {k: v for k, v in META.items() if k != 'qwen35.attention.recurrent_layers'}
 P2 = os.path.join(A.scratch, 'tiny-q35-fai.gguf'); write_gguf(P2, meta2, T)
@@ -110,22 +107,7 @@ silu = lambda y: y / (1 + np.exp(-y)); sig = lambda y: 1 / (1 + np.exp(-y))
 rms = lambda y, g: y / np.sqrt(np.mean(y * y) + eps) * g
 Wd = lambda n: T[n].astype(np.float64)
 m.reset(); hs = rng.standard_normal((5, D))
-got = m._gdn(0, hs)
-want = np.empty_like(got); hist = [np.zeros(CH)] * (DC - 1); St = np.zeros((NV, S, S))
-for n in range(5):
-    h = hs[n]; mix = Wd('blk.0.attn_qkv.weight') @ h; win = hist + [mix]; hist = win[1:]
-    c = silu(np.array([sum(win[j][ch] * Wd('blk.0.ssm_conv1d.weight')[ch, j] for j in range(DC)) for ch in range(CH)]))
-    beta = sig(Wd('blk.0.ssm_beta.weight') @ h)
-    g = np.log1p(np.exp(Wd('blk.0.ssm_alpha.weight') @ h + Wd('blk.0.ssm_dt.bias'))) * Wd('blk.0.ssm_a')
-    z = Wd('blk.0.attn_gate.weight') @ h; fin = np.empty(NV * S)
-    for j in range(NV):
-        kh = j % NK
-        q = c[kh * S:(kh + 1) * S]; k = c[NK * S + kh * S:NK * S + (kh + 1) * S]; v = c[2 * NK * S + j * S:2 * NK * S + (j + 1) * S]
-        q = q / np.sqrt(np.sum(q * q) + eps) / np.sqrt(S); k = k / np.sqrt(np.sum(k * k) + eps)
-        St[j] = St[j] * np.exp(g[j])
-        St[j] = St[j] + np.outer((v - St[j] @ k) * beta[j], k)
-        fin[j * S:(j + 1) * S] = rms(St[j] @ q, Wd('blk.0.ssm_norm.weight')) * silu(z[j * S:(j + 1) * S])
-    want[n] = Wd('blk.0.ssm_out.weight') @ fin
+got = m._gdn(0, hs); want = gdn_definition(Wd, 'blk.0.', hs, NK, NV, S, DC, eps, silu)
 check(rel(got, want) < 1e-12, f'a Gated DeltaNet block over 5 tokens == its definition per value head (rel {rel(got, want):.1e})')
 
 m.reset(); pos = np.arange(5, dtype=np.float64)
@@ -152,5 +134,56 @@ for n in range(5):
         out[hh] = sum(pr[t] * Vs[t][kv] for t in range(n + 1)) * sig(qf[hh, HD:])
     want[n] = Wd('blk.2.attn_output.weight') @ out.reshape(-1)
 check(rel(got, want) < 1e-12, f'an attention block over 5 tokens == its definition per head (rel {rel(got, want):.1e})')
+
+# ---- qwen35moe: the same trunk, routed experts + a gated shared expert in every block -----------------------------------
+E, KU, FFE, FFS = 6, 2, 12, 10
+TM = {k: v for k, v in T.items() if not re.search(r'\.ffn_(gate|up|down)\.weight$', k)}
+for il in range(len(KINDS)):
+    p = f'blk.{il}.'
+    TM.update({p + 'ffn_gate_inp.weight': w(E, D, sc=1.0), p + 'ffn_gate_exps.weight': w(E, FFE, D), p + 'ffn_up_exps.weight': w(E, FFE, D),
+               p + 'ffn_down_exps.weight': w(E, D, FFE), p + 'ffn_gate_shexp.weight': w(FFS, D), p + 'ffn_up_shexp.weight': w(FFS, D),
+               p + 'ffn_down_shexp.weight': w(D, FFS), p + 'ffn_gate_inp_shexp.weight': w(1, D)})
+META_M = {k.replace('qwen35.', 'qwen35moe.', 1): v for k, v in META.items()}
+META_M.update({'general.architecture': 'qwen35moe', 'qwen35moe.expert_count': E, 'qwen35moe.expert_used_count': KU,
+               'qwen35moe.expert_feed_forward_length': FFE, 'qwen35moe.expert_shared_feed_forward_length': FFS})
+PM = os.path.join(A.scratch, 'tiny-q35moe.gguf'); write_gguf(PM, META_M, TM)
+mm = ref_q35.Q35Ref(PM, threads=2)
+check(mm.moe and mm.L == len(KINDS) and mm.gdn == KINDS and (mm.E, mm.KU, mm.FF, mm.FFS) == (E, KU, FFE, FFS),
+      f'qwen35moe: {mm.L} trunk blocks, kinds {mm.gdn}, {mm.KU} of {mm.E} experts ({mm.FF} wide), shared {mm.FFS}')
+routes = []; fm = mm.feed(ids, routes=routes)
+mm.reset(); om = np.concatenate([mm.feed([t]) for t in ids])
+mm.reset(); pm = np.concatenate([mm.feed(ids[a:b]) for a, b in zip(cuts, cuts[1:])])
+check(fm.shape == (len(ids), V) and np.isfinite(fm).all() and rel(om, fm) < 1e-9 and rel(pm, fm) < 1e-9,
+      f'qwen35moe: one chunk == token by token == uneven pieces (rel {rel(om, fm):.1e}, {rel(pm, fm):.1e})')
+used = np.unique(np.concatenate([r[0].reshape(-1) for r in routes]))
+check(len(routes) == mm.L and all(r[0].shape == (len(ids), KU) for r in routes) and len(used) > KU,
+      f'qwen35moe: feed reports one route per block; {len(used)} of {E} experts used over the text')
+Wd = lambda n: TM[n].astype(np.float64)
+hs = rng.standard_normal((5, D)); got, gtop, gw = mm._moe(1, hs)
+want = np.empty_like(got); ok_routes = True
+for n in range(5):
+    h = hs[n]; lg = Wd('blk.1.ffn_gate_inp.weight') @ h
+    pr = np.exp(lg - lg.max()); pr /= pr.sum()
+    top = sorted(range(E), key=lambda e: -pr[e])[:KU]; ws = [pr[e] / sum(pr[j] for j in top) for e in top]
+    ok_routes &= list(gtop[n]) == top and np.allclose(gw[n], ws, rtol=1e-14, atol=0)
+    y = np.zeros(D)
+    for e, we in zip(top, ws):
+        g = Wd('blk.1.ffn_gate_exps.weight')[e] @ h; u = Wd('blk.1.ffn_up_exps.weight')[e] @ h
+        y += we * (Wd('blk.1.ffn_down_exps.weight')[e] @ (silu(g) * u))
+    s_ = silu(Wd('blk.1.ffn_gate_shexp.weight') @ h) * (Wd('blk.1.ffn_up_shexp.weight') @ h)
+    want[n] = y + sig(Wd('blk.1.ffn_gate_inp_shexp.weight')[0] @ h) * (Wd('blk.1.ffn_down_shexp.weight') @ s_)
+check(ok_routes and rel(got, want) < 1e-12, f'qwen35moe: the MoE FFN over 5 tokens == its definition per token and per expert, routes too (rel {rel(got, want):.1e})')
+PM1 = os.path.join(A.scratch, 'tiny-q35moe-mtp.gguf')
+write_gguf(PM1, META_M, dict(TM, **{f'blk.{len(KINDS)}.ffn_gate_inp.weight': w(E, D), f'blk.{len(KINDS)}.attn_norm.weight': 1 + w(D, sc=0.1)}))
+m1 = ref_q35.Q35Ref(PM1, threads=2)
+check(m1.L == len(KINDS) and np.array_equal(m1.feed(ids), fm), 'qwen35moe: a multi-token-prediction block with its own router is accepted and not read (the same logits)')
+for what, meta, tens in (('a block missing its router', META_M, {k: v for k, v in TM.items() if k != 'blk.2.ffn_gate_inp.weight'}),
+                         ('a scale tensor (ffn_down_exps_s)', META_M, dict(TM, **{'blk.0.ffn_down_exps_s.weight': w(E, D)})),
+                         ('a fused ffn_gate_up_exps', META_M, dict(TM, **{'blk.0.ffn_gate_up_exps.weight': w(E, 2 * FFE, D)})),
+                         ('an array-valued expert_feed_forward_length', dict(META_M, **{'qwen35moe.expert_feed_forward_length': [FFE] * len(KINDS)}), TM)):
+    PM2 = os.path.join(A.scratch, 'tiny-q35moe-bad.gguf'); write_gguf(PM2, meta, tens)
+    try: ref_q35.Q35Ref(PM2); refused = False
+    except ValueError: refused = True
+    check(refused, f'a qwen35moe file with {what} is refused')
 print('RESULT', 'PASS' if ok else 'FAIL')
 sys.exit(0 if ok else 1)

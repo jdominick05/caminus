@@ -1,5 +1,5 @@
 """The batched prefill's GDN (gated delta net) ops (docs/specs/spec-prefill-cache.md M5 S4). Device code:
-kernels/prefill_gdn.hip (build/prefill_gdn.hsaco).
+kernels/pf_gg_gdn.hip (build/pf_gg_gdn.hsaco).
 
 Every op is its K3 decode op's expressions in its order over a chunk of T tokens, so it is BITWISE that op on the same
 inputs (gate G1, tests/prefill/test_prefill_gdn.py, against the K3 op itself run per token and in T = 4 passes):
@@ -33,11 +33,11 @@ from ..device.bufcheck import LaunchCheck
 
 S = 128                  # the state's head size (op_gdn_step's specialisation)
 CPW = 4                  # state columns per wave
-MAX_SNAP = 8             # snapshot positions per launch (kernels/prefill_gdn.hip GDN_MAX_SNAP)
+MAX_SNAP = 8             # snapshot positions per launch (kernels/pf_gg_gdn.hip GDN_MAX_SNAP)
 # the step's kernels: name -> (function, waves of 4 state columns per workgroup). Every one gives the same bits (G2a).
 # g8 / g8b8 / g8w4: 8 lanes per state column, the inputs staged through LDS in blocks of 16 / 8 / 16 tokens, 8 / 8 / 4
 # waves; w8b16: OP_GDN_STEP's own 32-lane map, LDS blocks of 16; direct: the first version (32 lanes, no LDS, one token of
-# register prefetch). kernels/prefill_gdn.hip says why g8 is the fastest
+# register prefetch). kernels/pf_gg_gdn.hip says why g8 is the fastest
 STEP_KERNELS = {'g8': ('pf_gdn_step_g8', 8), 'g8b8': ('pf_gdn_step_g8b8', 8), 'g8w4': ('pf_gdn_step_g8w4', 4),
                 'w8b16': ('pf_gdn_step_w8b16', 8), 'direct': ('pf_gdn_step_direct', 2)}
 STEP_KERNEL = 'g8'       # the default: fastest on both cards' shapes (tests/prefill/test_prefill_gdn.py speed)
@@ -53,15 +53,15 @@ def rec_floats(H, nk):
 
 
 F32 = torch.float32
-_check = LaunchCheck('prefill_gdn', align=4, short_dtype=True)   # every launch: each fp32 buffer stated once (its view, its pointer aligned)
+_check = LaunchCheck('pf_gg_gdn', align=4, short_dtype=True)   # every launch: each fp32 buffer stated once (its view, its pointer aligned)
 
 
 class Gdn:
     """the prefill GDN kernels on one device (every launch with that device current, on its current stream)"""
 
-    def __init__(self, device, module='prefill_gdn'):
-        """module: prefill_gdn (the output gate sigmoid(z)) or prefill_gdn_q35 (silu(z): qwen35moe / qwen3next, K3_GDN_SILU)"""
-        if module not in ('prefill_gdn', 'prefill_gdn_q35'): raise ValueError(f'Gdn: module {module!r}')
+    def __init__(self, device, module='pf_gg_gdn'):
+        """module: pf_gg_gdn (the output gate sigmoid(z)) or pf_gg_gdn_q35 (silu(z): qwen35moe / qwen3next, K3_GDN_SILU)"""
+        if module not in ('pf_gg_gdn', 'pf_gg_gdn_q35'): raise ValueError(f'Gdn: module {module!r}')
         self.dev = torch.device(device); self.module = module
         with torch.cuda.device(self.dev): self.m = Module(module)
 

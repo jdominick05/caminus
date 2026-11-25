@@ -46,7 +46,7 @@ jobs:
           git -C "$ig" fetch -q --depth 1 https://github.com/jdominick05/ignite-llama.git e4e3f8edac36544e7c06139eb03e35288797e73e
           git -C "$ig" checkout -q FETCH_HEAD
 
-      - name: ./build.sh (every kernels/*.hip, then the C++ runtime tests)
+      - name: ./build.sh (every kernels/*.hip and kernels/objects.tsv row, then the C++ runtime tests)
         env:
           ROCM_PATH: /opt/rocm
           TORCHLIB: /opt/rocm/lib

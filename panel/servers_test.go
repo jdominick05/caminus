@@ -221,7 +221,7 @@ func TestALastStartFailureSaysWhenAndGoesWhenNotDownloaded(t *testing.T) {
 	yesterday := float64(time.Now().AddDate(0, 0, -1).Unix()) // (a calendar day: 24 h is "today" or two days back on DST days)
 	m.models = []camModel{{Name: "coder", Title: "Coder", Cards: 2, Present: true, SizeGB: 59}}
 	m.ps = psInfo{Servers: []serverInfo{{Name: "coder", Model: "coder", State: "failed", FailedAt: yesterday,
-		Error: "FileNotFoundError: code object k3_gguf_gsq.hsaco not found"}}}
+		Error: "FileNotFoundError: code object dec_q4x_gsq.hsaco not found"}}}
 	d := ansi.Strip(strings.Join(m.detailRows(100, 0), "\n"))
 	if !strings.Contains(d, "last start failed ") || !strings.Contains(d, " yesterday: FileNotFoundError") {
 		t.Fatalf("the failure says when it ended:\n%s", d)

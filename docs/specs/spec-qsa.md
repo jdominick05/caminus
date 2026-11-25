@@ -76,7 +76,7 @@ Buffers per card (TP replicates the indexer, so no exchange is needed):
 
 New ops. The q/k projections use #55's BF16 matvec (**a dependency**); OP_QK_NR is reused with D=128 and n_rot=64.
 
-1. **OP_IDX_APPEND** (T tasks, then pooling): quantize the raw key to q8_0 (the same code as op_kv_append, k3_gguf_ops.h:1001-1025). Then for each row whose `(pos+1)%4 == 0`, pool exactly as in §1.2 and write IDXPOOL[pos/4].
+1. **OP_IDX_APPEND** (T tasks, then pooling): quantize the raw key to q8_0 (the same code as op_kv_append, ops_gg.h:1001-1025). Then for each row whose `(pos+1)%4 == 0`, pool exactly as in §1.2 and write IDXPOOL[pos/4].
    - It **always runs, from token 0, in prefill passes too**. Otherwise the early pools would not exist when the context crosses 2051.
    - It is off the critical path: a sibling of the q/k/v chain.
 2. **OP_QSA_SCORE**:

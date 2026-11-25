@@ -9,7 +9,7 @@ attention up to max_ctx (qsa_limit None).
 The split, as FlashNextTP's but grouped where qwen3next groups:
 - GDN: card c takes key heads ks .. ks + kc - 1 and their value heads 2 ks .. 2 (ks + kc) - 1 (qwen3next repeats q / k
   INTERLEAVED: value head h reads key head h / 2, llama.cpp qwen3next.cpp's repeat_4d of [hd, 1, nk] -> [hd, 2, nk]; the
-  module k3_gguf_q3n's OP_GDN_STEP maps kh = h / (H / nk), Flash-Next's tiles kh = h % nk). Its slices of attn_qkv / conv
+  module dec_q3n's OP_GDN_STEP maps kh = h / (H / nk), Flash-Next's tiles kh = h % nk). Its slices of attn_qkv / conv
   (q, k rows of its key heads, v rows of its value heads), attn_gate (z), ssm_ba (de-interleaved: per key head k the rows
   [b(2) | a(2)] = 4k + g for beta, 4k + 2 + g for alpha, value head 2k + g), dt / a, its heads' state, and ssm_out's
   columns of its value heads (contiguous: a partial sum).
@@ -29,7 +29,7 @@ from .flashnext import EPS, DirectReader
 from .flashnext_tp import FlashNextTP, Slots, _hip
 from gguf.constants import GGML_QUANT_SIZES          # noqa: E402  (gguf-py is on the path through caminus.engine.flashnext)
 
-MODULE = 'k3_gguf_q3n'
+MODULE = 'dec_q3n'
 # the header keys the host projection reads (under the qwen3next. prefix; caminus.arch.meta keeps the same ones)
 PROJECTION_KEYS = ('context_length', 'block_count', 'full_attention_interval', 'attention.key_length', 'ssm.time_step_rank',
                    'ssm.state_size')
@@ -193,7 +193,7 @@ class Qwen3NextTP(FlashNextTP):
         self.state = {}; self.layer_seg = [[], []]; self.seg_names = [{}, {}]
         ON = lambda c: torch.cuda.device(self.devs[c])
         self.qsa_score, self.qsa_sel = [], [[], []]
-        # split attention (kernels/k3_attn_split.h, ATTN_G 8 in this module): every position up to max_ctx is a cell
+        # split attention (kernels/ops_attn_split.h, ATTN_G 8 in this module): every position up to max_ctx is a cell
         self.attn_cells = self.max_ctx
         self._attn_part = [None, None]
         def akw(c):

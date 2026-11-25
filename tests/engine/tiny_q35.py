@@ -24,7 +24,7 @@ FORMATS = [
     dict(ffn_gate='Q6_K', ffn_up='Q6_K', ffn_down='Q6_K', attn_qkv='Q6_K', attn_gate='Q4_K', ssm_out='Q5_K'),
     dict(ffn_gate='Q8_0', ffn_up='Q8_0', ffn_down='Q8_0', attn_q='Q4_K', attn_k='Q8_0', attn_v='Q6_K', attn_output='Q8_0'),
 ]
-# variant 'tcap': ThinkingCap's formats (the ThinkingCap module, kernels/k3_q35t_ops.h): every one-round-trip format it
+# variant 'tcap': ThinkingCap's formats (the ThinkingCap module, kernels/ops_q35_tcap.h): every one-round-trip format it
 # reads in some block, Q8_0 on the rows tile, an IQ2_S embedding, a Q8_0 head, BF16 alpha / beta
 FORMATS_TCAP = [
     dict(ffn_gate='IQ4_XS', ffn_up='IQ3_XXS', ffn_down='IQ3_S', attn_qkv='IQ2_S', attn_gate='Q5_K', ssm_out='Q6_K'),
@@ -32,7 +32,7 @@ FORMATS_TCAP = [
     dict(ffn_gate='Q6_K', ffn_up='Q5_K', ffn_down='IQ2_S', attn_qkv='Q8_0', attn_gate='IQ4_XS', ssm_out='IQ3_XXS'),
     dict(ffn_gate='IQ3_S', ffn_up='IQ3_S', ffn_down='IQ4_XS', attn_q='IQ4_XS', attn_k='IQ2_S', attn_v='Q8_0', attn_output='IQ3_S'),
 ]
-# variant 'gsq': the Qwen3.8-27B GSQ-RCO files' formats (the GSQ module, kernels/k3_q35t_ops.h under K3_Q35_GSQ): its five
+# variant 'gsq': the Qwen3.8-27B GSQ-RCO files' formats (the GSQ module, kernels/ops_q35_tcap.h under K3_Q35_GSQ): its five
 # formats ThinkingCap's files do not use (IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K) beside IQ3_XXS / IQ3_S / IQ2_S / IQ4_XS, an IQ2_S
 # embedding, a Q4_K head, BF16 alpha / beta; IQ1_M only as an ffn_gate, as in the files (the verify pass runs that matrix in its
 # own launch: engine/q35_dense_verify.py)
@@ -107,7 +107,7 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False, n_ctx=4096):
     """variant 'swift': Swift's formats (Q4_K / Q6_K / Q8_0 / Q5_K, F32 alpha / beta); 'tcap': ThinkingCap's. tp: shapes the
     two-card split cuts on block boundaries (engine/q35_dense_tp.py): 4 key heads / 8 value heads (half a card's value
     heads' columns = 512), 12 query heads / 2 kv heads, a 256-token vocabulary (128 head rows per card). mtp (the 'tcap'
-    variant): its multi-token-prediction block blk.<blocks> in Q6_K (ThinkingCap's: engine/q35_mtp.py, k3_q35_tcap_mtp).
+    variant): its multi-token-prediction block blk.<blocks> in Q6_K (ThinkingCap's: engine/q35_mtp.py, dec_q35_tcap_mtp).
     n_ctx: the file's context_length (the most max_ctx an engine on it takes)"""
     rng = np.random.default_rng(seed)
     NK, NV, H, HKV, V = (4, 8, 12, 2, 256) if tp else (globals()['NK'], globals()['NV'], globals()['H'], globals()['HKV'], globals()['V'])
@@ -155,7 +155,7 @@ def write(path, seed=5, variant='swift', tp=False, mtp=False, n_ctx=4096):
             'qwen35.context_length': int(n_ctx), 'qwen35.embedding_length': D, 'qwen35.feed_forward_length': FF,
             'qwen35.attention.head_count': H, 'qwen35.attention.head_count_kv': HKV, 'qwen35.attention.key_length': HD,
             'qwen35.attention.value_length': HD, 'qwen35.attention.layer_norm_rms_epsilon': 1e-6, 'qwen35.rope.freq_base': 1e7,
-            'qwen35.rope.dimension_count': NROT, 'qwen35.rope.dimension_sections': [16, 16, 0, 0],
+            'qwen35.rope.dimension_count': NROT, 'qwen35.rope.dimension_sections': [11, 11, 10, 0],
             'qwen35.ssm.conv_kernel': DC, 'qwen35.ssm.group_count': NK, 'qwen35.ssm.inner_size': NV * S,
             'qwen35.ssm.state_size': S, 'qwen35.ssm.time_step_rank': NV, 'qwen35.full_attention_interval': 4,
             'qwen35.attention.recurrent_layers': KINDS + [False]}

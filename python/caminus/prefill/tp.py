@@ -1,7 +1,7 @@
 """The batched prefill on both TP cards (docs/specs/spec-prefill-cache.md M5 S5): the exchange (two all-reduces per layer
 of a chunk's [T, 2560] fp32 partials) with micro-chunk overlap, and the 48-layer chunk that runs S2's quantized GEMMs, S3's
 BF16 GEMMs and glue and S4's GDN half on K3's own weights and states (FlashNextTP.shards / .weights / .state), so the
-exchange is measured inside a whole chunk. Device code: kernels/prefill_tp.hip (build/prefill_tp.hsaco).
+exchange is measured inside a whole chunk. Device code: kernels/pf_tp.hip (build/pf_tp.hsaco).
 
 The exchange (Exchange): each card's partial rows go to the other card by hipMemcpyPeerAsync on that card's own copy stream
 (a push: the source card's copy engine), into an ordinary receive buffer on the peer; then on each card's compute stream
@@ -51,7 +51,7 @@ the slot-order combine and the gated shared-expert add are this module's kernels
 for the replicas and G2b here). The dense Q6_K GEMMs (ChunkStack(q6k=), Q6K_PATHS; impl:q6k-dense): 'own' (default):
 caminus.prefill.dense on the same quantized activation, bitwise MMQ (the 48 layers' dense Q6_K 112.4 -> 79.5 ms per 2K chunk at card 0's
 shapes on the XTX, 2 x 1024); 'wmma': each Q6_K matrix dequantized to bf16 right before its GEMM, the activation's bf16 copy,
-gemm.hip's WMMA (a measured tolerance; dense.Bf16Workspace); 'mmq' for A/Bs. The S5 stack at overlap m 2 (11-04): mmq 616.7,
+pf_gemm.hip's WMMA (a measured tolerance; dense.Bf16Workspace); 'mmq' for A/Bs. The S5 stack at overlap m 2 (11-04): mmq 616.7,
 own 583.4, wmma 578.1 ms per 2K chunk. The DFlash features (the hc mean of the residual entering each
 of FlashNextTP.feature_layers, OP_HC_AVG) go into the attention workspace's export on the feature card: the positions
 [feat_base, feat_base + feat_rows) (the driver sets feat_base per prompt: 0 for a prompt within the export, else its last
@@ -90,7 +90,7 @@ MOE_PATH = 'own'   # verify:moe-gemm (11-04) cleared the own path: XT-alone cana
                    # amdgpu kernel-log line in any run. The 09:24 SDMA page fault's cause is still undetermined (it did not recur).
                    # 'mmq' stays for A/Bs
 # ChunkStack's dense Q6_K GEMMs (ChunkStack(q6k=), impl:q6k-dense): 'own' caminus.prefill.dense (bitwise MMQ, the same quantized
-# activation), 'wmma' Q6_K dequantized to bf16 + gemm.hip's bf16 WMMA (a measured tolerance; its buffers: dense.Bf16Workspace,
+# activation), 'wmma' Q6_K dequantized to bf16 + pf_gemm.hip's bf16 WMMA (a measured tolerance; its buffers: dense.Bf16Workspace,
 # counted by capacity when it is the default), 'mmq' the vendored MMQ (A/Bs)
 Q6K_PATHS = ('own', 'wmma', 'mmq')
 Q6K_PATH = 'own'

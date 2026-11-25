@@ -66,11 +66,11 @@ working engine; a wrong reading of a block would not land there. The reference i
 
 ## The decode module
 
-`kernels/k3_q35_swift.hip` is the persistent decode kernel with the 16 ops Swift's tape runs and no llama.cpp header:
+`kernels/dec_q35_swift.hip` is the persistent decode kernel with the 16 ops Swift's tape runs and no llama.cpp header:
 the matvec tiles of the Qwen3-30B-A3B line for Q4_K and Q6_K, a plain rows tile for Q8_0 and Q5_K (9 % of the bytes),
 the embedding row, the add-and-norm for a 5,120-wide residual, and the K3 engine's own Gated DeltaNet and
 gated-attention ops with fp16 outputs. `engine/q35_dense.py` (`Dense35Own`) builds the tape: one token per pass, an f16
-KV cache, the multi-token-prediction block left unread. Decode attention is the split pair of `kernels/k3_attn_split.h`
+KV cache, the multi-token-prediction block left unread. Decode attention is the split pair of `kernels/ops_attn_split.h`
 (flash decoding, the AREX-2 module's settings: 32-cell splits, one read of a split's K / V rows for its kv head's 6 query
 heads); until that change it ran one workgroup per query head over every position, 26-31x the bandwidth floor at every
 depth (docs/dev/yardsticks.md). A feed-forward whose gate and up matrices share Q4_K or Q6_K
@@ -79,7 +79,7 @@ runs them as one segment (47 of 64 blocks); the others run two matvecs and a Swi
 | Check | Result |
 |---|---|
 | Register budget of `k3_run` (`llvm-readelf`) | 88 of 96 VGPRs, 0 spills |
-| The Qwen3-30B-A3B modules after the shared-header edit | machine code byte-identical (`k3_q3m_lean`, `k3_q3m_ver`, `k3_q3m_iq`, `k3_q3m_rs4`, `k3_q3m_rs2`, `k3_gguf_q3m_own`) |
+| The Qwen3-30B-A3B modules after the shared-header edit | machine code byte-identical (`dec_q3m`, `dec_q3m_ver`, `dec_q3m_iq`, `dec_q3m_rs4`, `dec_q3m_rs2`, `dec_q3m_gg`) |
 | The tape on a tiny synthetic quantized model, without a card (`tests/engine/test_q35_tape_cpu.py`, in CI) | every tile present, only ops the module dispatches, the host's op list equal to the header's |
 | Tiny synthetic model on a card (`tests/engine/test_q35_dense.py`; the same figures on the RX 7900 XT and the RX 7900 XTX) | 26 matvecs within 4e-08 of float64 (relative to sum \|w x\|); residuals per block within 5e-03; logits mean KLD 6.5e-06; a second run bitwise; grids 3, 6, 7 bitwise the default |
 | Swift 1.5 on a card, 128 positions against the float64 reference (same test; the same figures on both cards) | mean KLD 2.2e-07 (max 2.1e-06); the same top token at 128 of 128; residuals after blocks 0 and 3 within 2.2e-04; embedding rows bitwise the host decoder; no wait gave up; grids 3, 6, 7 bitwise the default |

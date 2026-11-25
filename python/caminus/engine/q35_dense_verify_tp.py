@@ -1,5 +1,5 @@
 """The dense qwen35 line's T-token verify passes on TWO cards (speculative decoding with tensor parallelism), on the
-two-card verify modules (kernels/k3_q35_{swift,tcap}_tp_ver.hip: the two-card module k3_q35_*_tp's ops with the verify
+two-card verify modules (kernels/dec_q35_{swift,tcap}_tp_ver.hip: the two-card module dec_q35_*_tp's ops with the verify
 T-token forms and OP_XCHG; a T-token partial of T * D floats exchanges as-is: OP_XCHG's Seg.N is the payload's floats,
 so the engine's exchange slots at spec_T * D cover it). engine/q35_dense_verify.py's one-card class, per card, with the
 engine's tape structure (engine/q35_dense_tp.py: the layer's attention / Gated DeltaNet output and feed-forward output as

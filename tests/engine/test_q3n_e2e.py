@@ -7,7 +7,7 @@
           engine) over the full vocabulary and top-1 agreement, a replica check after every position; llama.cpp's own
           batch-vs-decode floor from the _batch dumps. D-281 bar: mean KLD <= the floor's, top-1 >= the floor's - 1 point
   bitwise the repo's K3 invariants on the whole tape, teacher-forced over the code text's first NPOS positions (--npos,
-          default 96): a one-token reference at the default grid; T = 4 verify passes (--ntok T: another width; k3_gguf_q3n_mt) == it, bitwise
+          default 96): a one-token reference at the default grid; T = 4 verify passes (--ntok T: another width; dec_q3n_ver) == it, bitwise
           per logits row (tools/gates/tp_multi.py's rule); K3_PER_WGP = 3 / 6 / 7 one-token runs == it (the race check);
           replicas equal after every run
 usage: tools/guard.sh LOG SECS python -I tests/engine/test_q3n_e2e.py REFS [layers|e2e|bitwise|all] [--model GGUF] [--max-ctx N] [--npos N] [--ntok T]

@@ -1,4 +1,4 @@
-"""OP_OWN_ATTS (the decode attention split over positions, kernels/k3_own_atts.h) against OP_OWN_ATTN (one task per query
+"""OP_OWN_ATTS (the decode attention split over positions, kernels/ops_own_atts.h) against OP_OWN_ATTN (one task per query
 head: the oracle) and a float64 host reference, on random inputs at chosen positions (cache rows below the position
 pre-filled, the same bytes in every form's cache). Needs no model.
 
@@ -11,10 +11,10 @@ Positions cover the split layout's edges (npos at multiples of 32 and of lmin, o
 holding a single position, the chunk edges 128 / 129) and depth (default up to 8,192; --deep adds 16K / 40K). Every form
 keeps its own cache (f16 rows, 2 KiB per position): the peak is projected from the arguments and checked against the
 card's guard line before the first transfer (defaults: about 360 MiB, --deep: about 745 MiB).
-  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py [--module k3_q3m_lean] [--deep]
+  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py [--module dec_q3m] [--deep]
 The two-card module's merge takes up to 128 splits (its second m | l load round from 65 active splits on: with lmin 64,
 positions past 4096; --deep reaches 128 active at 40,959):
-  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py --module k3_q3m_lean_tp --splits 128 --lmin 64 --deep
+  tools/guard.sh LOG 600 python -I tests/engine/test_own_atts.py --module dec_q3m_tp --splits 128 --lmin 64 --deep
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -22,7 +22,7 @@ import numpy as np, torch
 from caminus.device import capacity
 from caminus.engine import k3
 ap = argparse.ArgumentParser()
-ap.add_argument('--module', default='k3_q3m_lean'); ap.add_argument('--oracle-module', default='k3_gguf_q3m_own')
+ap.add_argument('--module', default='dec_q3m'); ap.add_argument('--oracle-module', default='dec_q3m_gg')
 ap.add_argument('--splits', type=int, default=64); ap.add_argument('--lmin', type=int, default=128)
 ap.add_argument('--deep', action='store_true'); ap.add_argument('--grids', default='3,7')
 ap.add_argument('--every', type=int, default=0, help='also every position 0 .. N - 1')

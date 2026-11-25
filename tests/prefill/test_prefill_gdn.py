@@ -1,5 +1,5 @@
 """Gates of the batched prefill's GDN ops (docs/specs/spec-prefill-cache.md M5 S4; caminus.prefill.gdn,
-kernels/prefill_gdn.hip): the l2 norm, the gates, the per-token recurrence with state snapshots, and the output norm.
+kernels/pf_gg_gdn.hip): the l2 norm, the gates, the per-token recurrence with state snapshots, and the output norm.
 
   python -I tests/prefill/test_prefill_gdn.py CODER STAGE... [--small] [--json OUT]
 
@@ -9,14 +9,14 @@ Stages (GPU stages on cuda:0: HIP_VISIBLE_DEVICES picks the card; 'gpu' = g1 g2 
          / too many, a snapshot buffer too short, mprev without records or with too few, H not a multiple of nk, a bad
          stride or workgroup size), each next to the positive control on the same buffers (the K3 layer block's state and
          records side by side are accepted: they do not overlap)
-  g1     each op against K3's own decode op (caminus.engine.k3.Engine, module k3_gguf_gsq: the GDN tape of FlashNextTP,
+  g1     each op against K3's own decode op (caminus.engine.k3.Engine, module dec_q4x_gsq: the GDN tape of FlashNextTP,
          gdn_l2 -> gdn_gates -> gdn_step (+ gdn_save) -> gdn_norm, one token per pass with the lazy commit) on the same
          inputs, both TP cards' shapes (card 0: 10 key / 30 value heads; card 1: 6 / 18), real ssm_dt / ssm_a / ssm_norm
          weights of layer 0, random conv outputs, alpha / beta (with forced g ~ 1, g ~ 0 and beta ~ 1 tokens), z and a
          nonzero initial state; for T = 1, 4, 512, 777, 2048 bitwise: the q / k l2 rows, the gates, the recurrence's
          output at every token, the state after T tokens, the snapshots at positions inside the chunk (== the decode's
          committed state after that many tokens) and the norm's output. Also: the T = 4 verify-pass module
-         (k3_gguf_gsq_qsa_mt, 4 tokens per pass) over the same 2048 tokens == the prefill, and the lazy-commit replay
+         (dec_q4x_gsq_qsa_ver, 4 tokens per pass) over the same 2048 tokens == the prefill, and the lazy-commit replay
          (a prefill started on a decode block with 1 / 4 accepted tokens pending == the decode continuing)
   g2     G2a: the chain twice at T = 2048, bitwise, and every recurrence kernel (prefill_gdn.STEP_KERNELS: 8 or 32 lanes
          per state column, 2 / 4 / 8 waves per workgroup, LDS blocks of 8 / 16 tokens or none) on the same inputs.
@@ -124,7 +124,7 @@ def k3_ref(torch, dev, cs, ntok=1, keep=(), block_at=None):
     pass, one more pass commits the last tokens): per token qk, gates, att, fin; the committed state after n tokens for n
     in keep (multiples of ntok); the layer block (state + records) after the pass that ends at token block_at"""
     from caminus.engine import k3
-    e = k3.Engine(module='k3_gguf_gsq', grid=k3.resident_grid('k3_gguf_gsq'), T=ntok)
+    e = k3.Engine(module='dec_q4x_gsq', grid=k3.resident_grid('dec_q4x_gsq'), T=ntok)
     H, kc, CH, T0 = cs.H, cs.kc, cs.CH, cs.T0; z = lambda *s: torch.zeros(*s, device=dev)
     xb, alb, beb, zb = z(ntok, CH), z(ntok, H), z(ntok, H), z(ntok, H * S)
     qkb, gtb, attb, finb = z(ntok, 2 * kc * S), z(ntok, 2 * H), z(ntok, H * S), z(ntok, H * S)
@@ -202,7 +202,7 @@ def stage_g1(torch, dev, wt, small):
             # the T = 4 verify-pass module over the same tokens
             ref4, st4, blk4 = k3_ref(torch, dev, cs, 4, {T0, 1024, 604 + 200}, block_at=604)
             ok = all(same(ref4[k], ref[k]) for k in ref) and same(st4[T0], st_ref[T0])
-            check(ok, f'G1 card-{card}: K3 T = 4 passes ({"k3_gguf_gsq_qsa_mt"}) == one-token passes over {T0} tokens (outputs, '
+            check(ok, f'G1 card-{card}: K3 T = 4 passes ({"dec_q4x_gsq_qsa_ver"}) == one-token passes over {T0} tokens (outputs, '
                   'state): the reference holds for both decode modules')
             st = cs.st0.clone(); o, sn = chain(torch, G, cs, 0, T0, st, (1024, T0))
             ok = all(same(o[k], ref4[k]) for k in o) and same(st, st4[T0]) and same(sn[0], st4[1024])

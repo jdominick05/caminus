@@ -1,7 +1,7 @@
 """The qwen3moe two-card batched prefill (caminus.prefill.q3m_tp.Q3MPrefillTP on Q3MoETP) on the cards.
 
 --probe (ONE card: HIP_VISIBLE_DEVICES=<the non-display card>; run it first): the new device op alone, small inputs
-  - q3p_slot_sum (kernels/q3m_prefill_tp.hip) against a CPU emulation of its fp32 fma chain (exact: each fma emulated in
+  - q3p_slot_sum (kernels/pf_q3m_tp.hip) against a CPU emulation of its fp32 fma chain (exact: each fma emulated in
     float64 with round-to-odd, then rounded to fp32 once), bit for bit, at S 1 / 2 / 8, N 256 / 2048, 1 / 7 / 64 tokens
   - the same rows against the one-card prefill's add (q3p_add_rms16 of the slots onto a zeroed residual: the same fma
     chain, then 0 + it): equal value for value (a -0 / +0 difference excepted)
@@ -18,7 +18,7 @@ Two cards (--tiny first: tests/engine/tiny_q3m.py's file with two-card shapes; t
              and the cache's stops give the same KV rows on both cards, bit for bit
   bounds     a span past max_ctx is refused before any write (the caches unchanged); the poisoned flag refuses a prefill
   speed      (--speed L) prompt tok/s from empty at chunk 2048, overlap and serial (medians of 3; prefill, two cards)
-  --kv q8    the engine and prefill with Q8_0 KV rows (Q3MoETP(q8=True), Q3MPrefillTP's Q8 path: q3m_prefill_kvq8's row and
+  --kv q8    the engine and prefill with Q8_0 KV rows (Q3MoETP(q8=True), Q3MPrefillTP's Q8 path: pf_q3m_kvq8's row and
              attention kernels at each card's local shapes): every check above on the byte caches (the caches start as
              0xFF bytes, a NaN half scale, and "written" means every block decodes finite), plus the rows: each card's
              last-layer rows of the prefill [0, P) byte for byte caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of the halves
@@ -82,7 +82,7 @@ if A.probe:
     need = (4 * (NT * SMAX * NMAX + NT * SMAX + 2 * (NT * NMAX + CAN) + 2 * NT * NMAX) + 2 * NT * NMAX) / 2 ** 20 + 8
     capacity.check([0], [need], f'test_q3m_prefill_tp --probe buffers ({need:.0f} MiB)')
     dev = torch.device('cuda:0')
-    ssum, O = SlotSum(dev), q3m_ops.Ops(dev, 'q3m_prefill')
+    ssum, O = SlotSum(dev), q3m_ops.Ops(dev, 'pf_q3m')
     g = np.random.default_rng(11)
     SENT = np.float32(-1234.5)
     y = torch.zeros(NT * NMAX + CAN, device=dev); xz = torch.zeros(NT * NMAX + CAN, device=dev)
@@ -199,7 +199,7 @@ def q8_rows_check():
         s_ = pf.sh[c]; Mk = s_.nkv * s_.hd; ldq = s_.nh * s_.hd + 2 * Mk; lay = ref_kv.Q8KVLayout(s_.nkv, s_.hd)
         dev = pf.devs[c]
         with torch.cuda.device(dev):
-            oops = q3m_ops.Ops(dev, 'q3m_prefill')
+            oops = q3m_ops.Ops(dev, 'pf_q3m')
             oc = torch.zeros(P * 2 * Mk, dtype=torch.float16, device=dev); oq = torch.zeros(P * s_.nh * s_.hd, dtype=torch.float16, device=dev)
             oops.qk_rope(pf.B[c]['qkv'], ldq, s_.nh, s_.nkv, eng.L[-1][c]['qk_par'], 0, oq, oc, P); torch.cuda.synchronize(dev)
         hh = oc.float().cpu().numpy().reshape(P, 2, s_.nkv, s_.hd)

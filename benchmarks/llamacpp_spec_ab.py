@@ -5,13 +5,17 @@ reads the server's own decode timing (timings.predicted_per_second) and draft ac
 prompt, the speed-up, and whether the drafted tokens equal the plain ones.
 
   tools/guard.sh LOG 3600 python -I benchmarks/llamacpp_spec_ab.py --bin ~/src/llama.cpp/build-hip/bin --model GGUF \
-      --ids IDS.json --dev ROCm1 --out DIR [--spec '--spec-type draft-mtp --spec-draft-n-max 3'] [--kv f16] [--ctx 12288]
+      --ids IDS.json --dev ROCm1 --out DIR [--spec '--spec-type draft-mtp --spec-draft-n-max 3'] [--kv f16] [--ctx 12288] \
+      [--server-args '-sm layer -ts 550,450 -lm dio'] [--dry-run]
 
 IDS.json: {"prompts": {"code": [ids], "prose": [...], "shell": [...]}} (q35_served_ab.py's --ids). The ids go to
 /completion as they are; caminus serve puts 248044 first (one prompt token more). --kv f16 and --ctx 12288 match
 q35_served_ab.py's caminus serve (f16 KV, --max-ctx 12288); --kv q8_0 --ctx 1024 is the setup of the earlier engine-level
 and DFlash yardsticks. GPU: run under tools/guard.sh, on a card nothing else uses. Prints RESULT PASS when every run
-answered (token equality is reported, not gated: llama.cpp's verify need not be bitwise)."""
+answered (token equality is reported, not gated: llama.cpp's verify need not be bitwise).
+--server-args: more llama-server flags for BOTH arms (after the common ones, before --spec in the spec arm), e.g. two cards
+with --dev ROCm0,ROCm1 --server-args '-sm layer -ts 550,450 -lm dio' (a file larger than the page cache needs -lm dio).
+--dry-run: print both arms' llama-server command lines and exit (nothing is started; RESULT DONE)."""
 import argparse, json, os, shlex, statistics, subprocess, sys, time, urllib.request
 
 ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
@@ -26,10 +30,24 @@ ap.add_argument('--ctx', type=int, default=12288)
 ap.add_argument('--n', type=int, default=128)
 ap.add_argument('--rounds', type=int, default=3)
 ap.add_argument('--port', type=int, default=8097)
+ap.add_argument('--server-args', default='', help="more llama-server flags for both arms (e.g. '-sm layer -ts 550,450 -lm dio')")
+ap.add_argument('--dry-run', action='store_true', help="print both arms' llama-server command lines and exit")
 A = ap.parse_args()
-os.makedirs(A.out, exist_ok=True)
 PROMPTS = json.load(open(A.ids))['prompts']
-SPEC = shlex.split(A.spec)
+SPEC, BOTH = shlex.split(A.spec), shlex.split(A.server_args)
+
+
+def command(extra):
+    return [os.path.join(A.bin, 'llama-server'), '-m', A.model, '-dev', A.dev, '-ngl', '99', '-c', str(A.ctx), '-np', '1',
+            '-fa', 'on', '-ctk', A.kv, '-ctv', A.kv, '-b', '512', '-ub', '256', '-t', '8', '--cache-ram', '0',
+            '--port', str(A.port)] + BOTH + extra
+
+
+if A.dry_run:
+    for arm in ('plain', 'spec'): print(f'{arm}: $ ' + shlex.join(command(SPEC if arm == 'spec' else [])))
+    print('RESULT DONE (dry run: nothing started)')
+    sys.exit(0)
+os.makedirs(A.out, exist_ok=True)
 
 
 def serve(label, extra):
@@ -39,9 +57,7 @@ def serve(label, extra):
     except OSError:
         pass
     log = open(os.path.join(A.out, f'server-{label}.log'), 'w')
-    cmd = [os.path.join(A.bin, 'llama-server'), '-m', A.model, '-dev', A.dev, '-ngl', '99', '-c', str(A.ctx), '-np', '1',
-           '-fa', 'on', '-ctk', A.kv, '-ctv', A.kv, '-b', '512', '-ub', '256', '-t', '8', '--cache-ram', '0',
-           '--port', str(A.port)] + extra
+    cmd = command(extra)
     print('$ ' + ' '.join(cmd), flush=True)
     p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
     for _ in range(300):
@@ -83,7 +99,7 @@ for i, arm in enumerate(order):
         try: p.wait(timeout=60)
         except subprocess.TimeoutExpired: p.kill()
 
-print(f'\nllama-server {A.kv} KV, -c {A.ctx}, spec: {A.spec}; median of {A.rounds} runs per arm')
+print(f'\nllama-server {A.kv} KV, -c {A.ctx}, both arms: {A.server_args or "-"}, spec: {A.spec}; median of {A.rounds} runs per arm')
 print(f'{"prompt":<8}{"plain":>8}{"spec":>8}{"x":>7}  accepted   tokens == plain (every spec run vs the first plain run)')
 out = {}
 for name in PROMPTS:

@@ -24,6 +24,11 @@ same hooks and schedule. Expected (MANIFEST.md): T=1 40 and T=4 40: 40/40 passes
   --engine dense35ver: the dense own line's verify tape (caminus.engine.q35_dense_verify.Dense35Verify, T tokens per pass,
   on a Dense35Own with spec_T = T; --model the Swift GGUF, the card in HIP_VISIBLE_DEVICES): every pass a T-token verify
   pass (each row's logits compared) with the commit schedule above; modes 'tiny' only; no --ctx / --start.
+  --engine moe35: Qwen3.6-35B-A3B's one-card engine (caminus.engine.q35_moe.Moe35Own, --model its GGUF, the card in
+  HIP_VISIBLE_DEVICES; --kv f16|q8; --attn-from P: its passes from position P on run sliced, the attention as its own
+  kernel between the slices, 0: every pass); T = 1 only, every pass a verify at the next position; modes 'tiny' (every
+  launch of the pass bails) and 'mid' (only the middle trunk slice of a sliced pass: the launches after it run on its
+  garbage with their own clean sync blocks, the retry must still be the uninterrupted pass); no --start.
   SAMERUN=1 (env): a second uninterrupted run against the reference instead (determinism without any injection)."""
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,18 +38,24 @@ a = sys.argv[1:]
 PATH = C.model_path(C.opt(a, '--model', 'coder')); TOK = C.opt(a, '--tokens', C.TOKENS)
 ENGINE = C.opt(a, '--engine', 'flashnext')
 CTX = C.opt(a, '--ctx', 2048, int); START = C.opt(a, '--start', 0, int)
+KV = C.opt(a, '--kv', 'f16'); AFROM = C.opt(a, '--attn-from', None, int)
 if not 2 <= len(a) <= 3: print(__doc__); sys.exit(2)
 T = int(a[0]); NP = int(a[1]); MODES = (a[2] if len(a) > 2 else 'tiny,tiny0,tiny1,delay1').split(',')
 torch = C.setup_torch()
 toks = C.tokens(TOK)
 print(f'model {PATH}; engine {ENGINE}; tokens {TOK}; T {T}; passes {NP}; modes {MODES}; compaction_proactiveness {C.proactiveness()}', flush=True)
-DENSE = ENGINE in ('dense35tp', 'dense35', 'dense35ver')
+DENSE = ENGINE in ('dense35tp', 'dense35', 'dense35ver', 'moe35')
 VER = None
-if ENGINE == 'dense35ver':
+if ENGINE == 'moe35':
+    from caminus.engine.q35_moe import Moe35Own
+    if T != 1 or START or set(MODES) - {'tiny', 'mid'}: print('--engine moe35: T = 1, no --start, modes tiny / mid'); sys.exit(2)
+    m = Moe35Own(PATH, max_ctx=CTX, q8=KV == 'q8', attn_from=AFROM)   # (m._tapes: the single launch and the sliced pass's launches)
+    print(f'module {m.module}; sliced from position {m.attn_from}', flush=True)
+elif ENGINE == 'dense35ver':
     from caminus.engine.q35_dense import Dense35Own
     from caminus.engine.q35_dense_verify import Dense35Verify
     if not 1 <= T <= 4 or START or MODES != ['tiny']: print('--engine dense35ver: T 1 .. 4, no --start, modes tiny'); sys.exit(2)
-    m = Dense35Own(PATH, max_ctx=CTX, spec_T=T, vram_extra_mib=Dense35Verify.need_mib(T))
+    m = Dense35Own(PATH, max_ctx=CTX, spec_T=T, vram_extra_mib=Dense35Verify.need_mib(T, max_ctx=CTX))
     VER = Dense35Verify(m, T)
     m.engines = [VER.E]; m._tapes = {'one': m.engines}   # (the hooks below set the verify tape's bound)
 elif ENGINE == 'dense35':
@@ -108,15 +119,17 @@ def hooked_pass(*args):
         else: commit = last[i0]
     last[i0] = commit
     mode = inj['mode'] if inj['first'] else None
-    NC = len(m.engines); lim = [LIM] * NC
+    engs = [e for E in m._tapes.values() for e in E] if ENGINE == 'moe35' else m.engines   # (moe35: every launch of both forms)
+    NC = len(engs); lim = [LIM] * NC
     if mode == 'tiny': lim = [1] * NC
     elif mode == 'tiny0': lim = [1, LIM]
     elif mode == 'tiny1': lim = [LIM, 1]
     elif mode == 'delay1': lim = [2000, LIM]
-    for c in range(NC): m.engines[c].limit_us = lim[c]
+    elif mode == 'mid': lim = [1 if e is m.slices[len(m.slices) // 2] else LIM for e in engs]
+    for c in range(NC): engs[c].limit_us = lim[c]
     bad = orig_pass(*args) if VER else orig_pass(i0, commit) if DENSE else orig_pass(xt, ple, i0, commit)
     inj['first'] = False
-    for c in range(NC): m.engines[c].limit_us = LIM
+    for c in range(NC): engs[c].limit_us = LIM
     return bad
 
 

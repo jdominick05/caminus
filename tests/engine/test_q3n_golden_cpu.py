@@ -1,4 +1,4 @@
-"""CPU cross-check of the qwen3next reading that Qwen3NextTP / kernels/k3_gguf_q3n.hip are written for, against llama.cpp's
+"""CPU cross-check of the qwen3next reading that Qwen3NextTP / kernels/dec_q3n.hip are written for, against llama.cpp's
 own intermediates (tools/reference/q3n_refs.sh's golden_layers: layers 0 (GDN) and 3 (attention), positions 0 .. 7 of the code
 text): each check recomputes one llama.cpp step in numpy from the golden tensor(s) before it, and where the reading
 had an alternative (tiled key heads, sigmoid output gate, swapped beta / alpha, contiguous q heads) that alternative

@@ -1,4 +1,4 @@
-"""OP_QSA_PSEL (kernels/k3_qsa_ops.h: OP_QSA_SELECT's selection spread over slices of the scores; Engine.qsa_select_par)
+"""OP_QSA_PSEL (kernels/ops_qsa.h: OP_QSA_SELECT's selection spread over slices of the scores; Engine.qsa_select_par)
 on ONE card (run it on the XT alone: HIP_VISIBLE_DEVICES=1), the GSQ-RCO Coder's QSA modules (T = 1 and 4), host-given
 scores (no SCORE op):
   cases   random, indexer-like (sums of relu'd dots, many zeros), ties at the threshold, all equal, all zero, -0 / inf /
@@ -18,7 +18,7 @@ import torch
 from caminus.engine import k3, qsa
 from caminus.device import capacity
 
-MOD = 'k3_gguf_gsq'
+MOD = 'dec_q4x_gsq'
 fails = []
 MODS = set()
 

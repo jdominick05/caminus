@@ -1,6 +1,6 @@
-"""Caminus's own matvec inside the K3 module (OP_OWN_MV, build/k3_gguf_q35d_own.hsaco) against llama.cpp's (OP_GG_MV, the
+"""Caminus's own matvec inside the K3 module (OP_OWN_MV, build/dec_q35_arex_own.hsaco) against llama.cpp's (OP_GG_MV, the
 same module), on real tensors (docs/specs/spec-own-quant.md: G-speed's in-module A/B, G-self's grid check):
-  checks  OP_OWN_MV's rows are bitwise the standalone own_mv_<fmt>_<act> kernel's (build/own_mv.hsaco), and bitwise the
+  checks  OP_OWN_MV's rows are bitwise the standalone own_mv_<fmt>_<act> kernel's (build/bench_own_mv.hsaco), and bitwise the
           same at K3_PER_WGP 3 / 6 / 7 / 8 (the order depends on no grid); error vs fp64 on 256 sampled rows
   speed   tapes over a set of real matrices of one format (>= 512 MiB, past the Infinity Cache), each a segment:
           'free' = independent segments (throughput), 'chain' = each segment waits on the one before (the decode's
@@ -23,8 +23,8 @@ ap.add_argument('--rounds', type=int, default=7)
 ap.add_argument('--set-mib', type=int, default=512)
 A = ap.parse_args()
 dev = torch.device('cuda:0')
-MOD = 'k3_gguf_q35d_own'
-OWN = Module('own_mv')
+MOD = 'dec_q35_arex_own'
+OWN = Module('bench_own_mv')
 rng = np.random.default_rng(0)
 ok_all = True
 

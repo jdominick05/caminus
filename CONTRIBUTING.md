@@ -9,6 +9,7 @@ Thanks for helping. Caminus has been tested on one machine so far, so you can he
   worked. This is the most useful thing you can do right now.
 - **Report a bug.** [Open an issue](https://github.com/jdominick05/caminus/issues/new?template=bug_report.yml) with the
   output of `caminus doctor`. Please leave out private conversations and code.
+- **Report a security problem** privately, never in an issue: [SECURITY.md](SECURITY.md) says how.
 - **Ask for something.** A model, a card, a tool:
   [feature requests](https://github.com/jdominick05/caminus/issues/new?template=feature_request.yml) are welcome.
 - **Improve the docs.** If a page confused you, a fix or an issue saying where you got stuck helps the next person.

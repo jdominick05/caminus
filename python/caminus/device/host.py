@@ -9,8 +9,10 @@ caminus.device.machine reads for the guard, plus what placement needs:
   endpoint 16 GT/s x16, its upstream port 16 GT/s x4, the OCuLink). `link_ok`: at least PCIe 4.0 x4, the tested minimum.
   The link is the one the card runs at under load: amdgpu can lower a card's link (its table pp_dpm_pcie; the lowest
   level is 2.5 GT/s x1), so while the table marks a level below its fastest as current, the fastest level is the link and
-  the momentary reading goes to `now_gts` / `now_width`. Without the table, or with its fastest level current, the link
-  is what the hops report now;
+  the momentary reading goes to `now_gts` / `now_width`; a hop at that level's speed or less, at any width up to the
+  fastest level's, is the same lowered link mid-way through a step (speed and width change apart). Without the table,
+  or with its fastest level or no level current, the link is what the hops report now, read again for up to 100 ms
+  while a hop reads slower than the fastest level (the link changing level between the table's reading and the hops');
 - hip: the card's HIP device index with HIP_VISIBLE_DEVICES unset (the KFD GPU nodes by node id, an iGPU included);
 - pci: the canonical id of a card everywhere in Caminus (G8).
 
@@ -28,6 +30,7 @@ import glob
 import math
 import os
 import re
+import time
 
 from . import machine
 
@@ -38,6 +41,8 @@ VENDORS = {'0x1002': 'AMD', '0x10de': 'NVIDIA', '0x8086': 'Intel'}
 INTEGRATED_MIB = 4096       # an AMD GPU with less VRAM than this is an APU's carve-out (the desktop's), never a compute card
 TUNED_SPLIT = {('XTX', 'XT'): dict(gdn_keys=10, moe_blocks=12)}   # measured on this pair (the bitwise references' split)
 EVEN_SPLIT = dict(gdn_keys=8, moe_blocks=10)   # half of the Coder's 16 key heads and 20 blocks of 32 (640 / 32)
+REREADS, REREAD_WAIT_S = 5, 0.025   # link(): a slow hop under a full-speed table is read again 5 times, 4 waits, 100 ms at most
+_sleep = time.sleep                 # (tests replace it)
 
 
 class PlacementError(RuntimeError):
@@ -127,18 +132,30 @@ def link(dev, root='/'):
     """the slowest hop (by bandwidth) of the PCIe path from the root port down to the GPU at sysfs path dev: dict(gts, width,
     gbps, max_gts, max_width, at, now_gts, now_width), or None when no hop reports a link (a fixture without one: not
     refused, shown unknown). gts / width / gbps are the link under load (the module docstring); now_gts / now_width the
-    slowest hop's reading. While the driver's table marks a lower level than its fastest as current, the hops that read
-    that level or less are the card's lowered link and count at the fastest level; any other hop counts as it reads (a
-    link the driver does not set, a chipset uplink for one). A hop slower than the level marked current counts as it reads"""
+    slowest hop's reading.
+    While the driver's table marks a lower level than its fastest as current, a hop is the card's lowered link and counts at
+    the fastest level when it reads that level or less, or that level's speed or less at a width up to the fastest
+    level's (the link mid-way through a step: the speed and the width change apart, so 2.5 GT/s x16 is no level of the
+    table); any other hop counts as it reads (a link the driver does not set, a chipset uplink for one, or a hop faster
+    than the lowered speed). A hop slower than the level marked current counts as it reads.
+    When the table marks its fastest level or no level (the star is the driver's own reading, taken apart from the
+    hops', and it marks no level while the link is between two) and a hop reads slower than the fastest level, the table
+    and the hops are read again, up to REREADS times (the first at once, then REREAD_WAIT_S apart) until both agree; a hop still slower
+    after that counts as it reads. Reading alone cannot tell a hop at the lowered speed that is that slow under load too
+    (a 2.5 GT/s link wider than x1) from the lowered link: while the table is lowered it counts at the fastest level"""
     hops = _hops(dev, root)
     if not hops:
         return None
     fastest, current = dpm_link(dev)
     full = round(link_gbps(*fastest), 2) if fastest else None
     slow = min(hops, key=lambda h: h['gbps'])
-    if fastest and (current is None or current == fastest) and slow['gbps'] < full:
-        # (the table says full speed and a hop reads slower: that hop is slower than the driver knows, or the driver lowered
-        # the link between the two reads. A second look at both tells which)
+    for i in range(REREADS):
+        if not (fastest and (current is None or current == fastest) and slow['gbps'] < full):
+            break
+        # (the table says full speed, or no level, and a hop reads slower: that hop is slower than the driver knows, or
+        # the link is changing level between the two reads. A few looks at both tell which)
+        if i:
+            _sleep(REREAD_WAIT_S)
         hops = _hops(dev, root) or hops
         fastest, current = dpm_link(dev)
         full = round(link_gbps(*fastest), 2) if fastest else None
@@ -147,7 +164,7 @@ def link(dev, root='/'):
     if fastest and current and current != fastest:
         lowered = round(link_gbps(*current), 2)
         if slow['gbps'] >= lowered:                       # (else a hop is slower than even the lowered level: as it reads)
-            others = [h for h in hops if h['gbps'] > lowered]
+            others = [h for h in hops if h['gbps'] > lowered and not (h['gts'] <= current[0] and h['width'] <= fastest[1])]
             cap = min(others, key=lambda h: h['gbps']) if others else None
             if cap is not None and cap['gbps'] < full:
                 out.update(gts=cap['gts'], width=cap['width'], gbps=cap['gbps'], max_gts=cap['max_gts'],

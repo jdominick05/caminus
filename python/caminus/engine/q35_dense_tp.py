@@ -1,11 +1,11 @@
 """The dense qwen35 line (Swift 1.5 Q4_K_M, ThinkingCap RCO 4.2 bpw) decoding on TWO cards with tensor parallelism, on
 Caminus's own code from the GGUF file to the logits: engine/q35_dense.py's reader, weight layouts, tiles and ops (the
-one-card engine's tape, block for block), each card running the two-card build of the file's module (k3_q35_swift_tp /
-k3_q35_tcap_tp: the same ops plus OP_XCHG, kernels/k3_xchg.h). No gguf-py: the exchange's host side is engine/tp_slots.py.
+one-card engine's tape, block for block), each card running the two-card build of the file's module (dec_q35_swift_tp /
+dec_q35_tcap_tp: the same ops plus OP_XCHG, kernels/ops_xchg.h). No gguf-py: the exchange's host side is engine/tp_slots.py.
 
 The split (card c of 2; every cut on a quantization-block boundary of the matrix it cuts):
 - Gated DeltaNet: card c takes the key heads ks .. ks + kc - 1 (half of them) and the value heads that read them. The
-  value heads are TILED over the key heads (value head h reads key head h % nk, kernels/k3_q35_ops.h OP_GDN_STEP), so
+  value heads are TILED over the key heads (value head h reads key head h % nk, kernels/ops_q35.h OP_GDN_STEP), so
   card c's value heads are {r nk + k : r < nv / nk, ks <= k < ks + kc}, in that order: local value head r kc + (k - ks)
   reads local key head k - ks, the same rule with nk = kc. Its rows of attn_qkv (q, k of its key heads, v of its value
   heads), the conv channels, attn_gate, ssm_alpha / ssm_beta, dt / a, its heads' states, and ssm_out's columns of its value

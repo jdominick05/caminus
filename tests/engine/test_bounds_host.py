@@ -410,7 +410,7 @@ for R, waits, retried, raises, starts in ((3, [['b']] * 9, False, True, 4), (0, 
 # -- k3.Engine.qsa_score / qsa_select argument checks (host: the segments are only recorded) -----------------------------
 for T in (1, 4):
     rows = 4 * 1000; prow = rows // 4; nch = (prow + 31) // 32
-    e = engine(T); e.module = 'k3_gguf_gsq_qsa' if T == 1 else 'k3_gguf_gsq_qsa_mt'; e.caps = None
+    e = engine(T); e.module = 'dec_q4x_gsq_qsa' if T == 1 else 'dec_q4x_gsq_qsa_ver'; e.caps = None
     q = torch.zeros(T * 4 * 128); pool = torch.zeros(prow * 136, dtype=torch.uint8); pos = torch.zeros(1, dtype=torch.int32)
     sc = torch.zeros(T, prow); sel = torch.zeros(T * 516, dtype=torch.int32); sel2 = torch.zeros(T * 516, dtype=torch.int32)
     def bad(fn, what):

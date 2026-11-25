@@ -1,6 +1,6 @@
 """Qwen3-30B-A3B's decode-token matvecs as ONE persistent K3 launch (docs/specs/spec-own-quant.md; the decode-floor
 paper's token: 48 layers x (q, k, v, o, router, 8 x gate, 8 x up, 8 x down) + the vocab head = 1,393 matvecs), on the
-real GGUF (read with caminus.ggufio), module k3_gguf_q35d_own:
+real GGUF (read with caminus.ggufio), module dec_q35_arex_own:
   own    Caminus's one-round-trip tiles (OP_OWN_MV a16_1rt), the 8 experts of a layer grouped into one segment by device
          ids: 48 x 8 + 1 = 385 segments; fp16 activations; Q6_K in our plane layout (engine/own_layout.py); one arm per
          --rpt (rows per task). (A 16 KB touch of each workgroup's first task before the dependency wait, as the GGUF
@@ -37,8 +37,8 @@ ap.add_argument('--timing-only', action='store_true', help='skip the bitwise / e
                 '(a measurement build of the module, e.g. -DOWN_READONLY: the tiles with free arithmetic)')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
-MOD = 'k3_gguf_q35d_own'
-OWN = Module('own_mv')
+MOD = 'dec_q35_arex_own'
+OWN = Module('bench_own_mv')
 rng = np.random.default_rng(0)
 F = ggufio.GGUFFile(A.gguf)
 NL, KU, NE = int(F.hp('block_count')), int(F.hp('expert_used_count')), int(F.hp('expert_count'))

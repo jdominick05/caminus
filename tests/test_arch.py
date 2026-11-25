@@ -9,13 +9,16 @@ needs Qwen35One's shapes of a real model: tools/serve_smoke1.py covers it on the
 import argparse
 import importlib.util
 import os
-import struct
 import sys
 import time
 import types
 
+import numpy as np
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'python'))
+sys.path.insert(0, os.path.join(ROOT, 'tests'))   # tests/tiny_gguf.py
+import tiny_gguf  # noqa: E402
 os.environ['CAMINUS_ALLOW_PAUSED'] = '1'   # (the paused models' entries are fixtures here: tests/cmd/test_manage.py checks the pause)
 
 FAILS = []
@@ -27,33 +30,10 @@ def check(ok, what):
         FAILS.append(what)
 
 
-def gguf_str(s):
-    b = s.encode()
-    return struct.pack('<Q', len(b)) + b
-
-
-def gguf_value(v):
-    if isinstance(v, str): return struct.pack('<I', 8) + gguf_str(v)
-    if isinstance(v, float): return struct.pack('<If', 6, v)
-    return struct.pack('<II', 4, int(v))
-
-
 def write_gguf(path, arch, kv, tensors):
-    """a GGUF v3 file: general.architecture = arch, kv {key: int (u32) | float (f32) | str}, tensors [(name, ne0, ne1)] in
-    F32 (zeros)"""
-    kvs = [('general.architecture', arch)] + list(kv.items())
-    out = b'GGUF' + struct.pack('<IQQ', 3, len(tensors), len(kvs))
-    for k, v in kvs:
-        out += gguf_str(k) + gguf_value(v)
-    off = 0
-    for name, ne0, ne1 in tensors:
-        out += gguf_str(name) + struct.pack('<IQQIQ', 2, ne0, ne1, 0, off)
-        off += (ne0 * ne1 * 4 + 31) // 32 * 32
-    out += b'\0' * ((-len(out)) % 32)
-    for name, ne0, ne1 in tensors:
-        out += b'\0' * ((ne0 * ne1 * 4 + 31) // 32 * 32)
-    with open(path, 'wb') as f:
-        f.write(out)
+    """tests/tiny_gguf.py's file: general.architecture = arch, kv {key: int (u32) | float (f32) | str}, tensors
+    [(name, ne0, ne1)] in F32 (zeros)"""
+    tiny_gguf.write_gguf(path, dict({'general.architecture': arch}, **kv), {n: np.zeros((ne1, ne0), np.float32) for n, ne0, ne1 in tensors})
 
 
 def main():
@@ -67,8 +47,8 @@ def main():
     from caminus import arch, config, models
 
     # ---- the registry's entries
-    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen3moe', 'qwen3moe-tp', 'qwen3next', 'qwen4exp'],
-          f'archs: the six served, the dense own line\'s and Qwen3-30B-A3B\'s two-card forms ({sorted(arch.ARCHS)})')
+    check(sorted(arch.ARCHS) == ['qwen35', 'qwen35-own', 'qwen35-own-tp', 'qwen35moe', 'qwen35moe-own', 'qwen3moe', 'qwen3moe-tp', 'qwen3next', 'qwen4exp'],
+          f'archs: the served entries, the dense own line\'s, the qwen35moe own path\'s and Qwen3-30B-A3B\'s two-card forms ({sorted(arch.ARCHS)})')
     check(arch.ARCHS['qwen35-own'].variant(2) is arch.ARCHS['qwen35-own-tp'] and arch.ARCHS['qwen35-own'].variant(1) is arch.ARCHS['qwen35-own']
           and arch.ARCHS['qwen35-own'].variant(None) is arch.ARCHS['qwen35-own']
           and arch.TWO_CARD == {'qwen35-own': 'qwen35-own-tp', 'qwen3moe': 'qwen3moe-tp'},
@@ -102,7 +82,8 @@ def main():
           f'qwen3moe-tp pair: XTX + XT and equal cards pass; a smaller card 0 is refused, by placement too ({why})')
     shape = {n: (x.kind, x.cards, x.T, x.drafter) for n, x in arch.ARCHS.items()}
     check(shape == {'qwen4exp': ('coder', 2, 4, 'dflash'), 'qwen35moe': ('one-card', 1, 1, None), 'qwen35': ('one-card', 1, 1, None),
-                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen3next': ('tp', 2, 1, None),
+                    'qwen3moe': ('one-card', 1, 1, None), 'qwen35-own': ('one-card', 1, 1, 'mtp'), 'qwen35moe-own': ('one-card', 1, 1, 'off'),
+                    'qwen3next': ('tp', 2, 1, None),
                     'qwen35-own-tp': ('tp', 2, 1, 'mtp'), 'qwen3moe-tp': ('tp', 2, 1, None)},
           f'archs: kind, cards, T, drafter ({shape})')
     check(arch.ARCHS['qwen35-own'].tokenizer == 'own' and arch.ARCHS['qwen35'].tokenizer == 'hf',
@@ -208,7 +189,8 @@ def main():
           'rope keys: meta keeps every rope.scaling.* key the vendored gguf-py names')
     yarn = {'rope.scaling.type': 'yarn', 'rope.scaling.factor': 4.0, 'rope.scaling.original_context_length': 32768}
     by_header = {'qwen4exp': 'qwen4exp', 'qwen35moe': 'qwen35moe', 'qwen35': 'qwen35', 'qwen3moe': 'qwen3moe',
-                 'qwen35-own': 'qwen35', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35', 'qwen3moe-tp': 'qwen3moe'}
+                 'qwen35-own': 'qwen35', 'qwen35moe-own': 'qwen35moe', 'qwen3next': 'qwen3next', 'qwen35-own-tp': 'qwen35',
+                 'qwen3moe-tp': 'qwen3moe'}
     check(sorted(by_header) == sorted(arch.ARCHS), 'rope keys: every entry has a header architecture below')
 
     def rope_file(a, kv, tag):
@@ -311,7 +293,8 @@ def main():
     q8s = {n: (a.kv_formats, a.kv_fixed) for n, a in arch.ARCHS.items()}
     check(cli.parse([])['kv'] is None and not arch.kv_q8(cli.parse([])) and cli.parse(['--kv', 'q8'])['kv'] == 'q8'
           and q8s == {'qwen4exp': (('f16',), 'q8_0'), 'qwen35moe': (('f16',), 'q8_0'), 'qwen35': (('f16',), 'q8_0'),
-                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen3next': (('f16',), 'q8_0'),
+                      'qwen3moe': (('f16', 'q8'), None), 'qwen35-own': (('f16',), None), 'qwen35moe-own': (('f16', 'q8'), None),
+                      'qwen3next': (('f16',), 'q8_0'),
                       'qwen35-own-tp': (('f16',), None), 'qwen3moe-tp': (('f16', 'q8'), None)}
           and q8_default('flashnext_tp.py', 'FlashNextTP') is True and q8_default('qwen35_one.py', 'Qwen35One') is True
           and q8_default('qwen3next_tp.py', 'Qwen3NextTP') is True
@@ -322,7 +305,7 @@ def main():
           and arch.kv_cache_of(arch.ARCHS['qwen3moe'], types.SimpleNamespace(kv_format_id='f16-v1:x')) == {'type': 'f16', 'format': 'f16-v1:x'}
           and arch.kv_q8_built(types.SimpleNamespace(kv_format_id=arch.KV_Q8_FORMATS[1])) and not arch.kv_q8_built(object())
           and not arch.kv_q8_built(types.SimpleNamespace(kv_format_id='f16-v1:x'))
-          and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two)',
+          and arch.kv_q8_models() == 'qwen3-30b-a3b (one card or two), qwen3.6-own (one card)',
           f'cli: --kv unset by default (F16; the long-context mode may choose) / f16 / q8; kv_formats / kv_fixed per entry match the engines\' own q8 defaults ({q8s})')
 
     # every kv_format_id an engine assigns is a Q8 id listed in arch.KV_Q8_FORMATS, under `if q8` (serve's startup check
@@ -400,6 +383,7 @@ def main():
     else:
         names = {n: x.engine_class().__name__ for n, x in arch.ARCHS.items()}
         check(names == {'qwen4exp': 'FlashNextTP', 'qwen35moe': 'Qwen35One', 'qwen35': 'Qwen35One', 'qwen3moe': 'Q3MoEOne', 'qwen35-own': 'Dense35Own',
+                        'qwen35moe-own': 'Moe35Own',
                         'qwen3next': 'Qwen3NextTP', 'qwen35-own-tp': 'Dense35TP', 'qwen3moe-tp': 'Q3MoETP'},
               f'engine_class: every entry\'s engine imports ({names})')
         # the pass methods K3Session calls on every engine (the device sampler's launch / finish pair among them: Swift's
@@ -427,7 +411,7 @@ def main():
               f'{need_o(4096)[0]:.1f} (the adapter ring {ring:.4f} MiB included), no header-key error')
         # the default drafter (no --draft): the table's kind when the file has the MTP block, plain without it, on one card
         # and two (the table here: off on two cards); the Coder keeps DFlash
-        # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's k3_q35_gsq)
+        # (the table is keyed by (decode module, cards); a module it does not list serves plain: the plain 27B's dec_q35_gsq)
         from caminus import ggufio as _gio
         from caminus.engine import q35_dense as _qd
         _F = _gio.GGUFFile(q35); mod = _qd.module_of(_F); _F.close()
@@ -439,12 +423,12 @@ def main():
                        [('token_embd.weight', 64, 997), ('output.weight', 64, 997)])
             got = (own.default_draft(dict(model=q35)), own.default_draft(dict(model=q35n)),
                    own.variant(2).default_draft(dict(model=q35)), arch.ARCHS['qwen4exp'].default_draft({}))
-            _qd.module_of = lambda F: 'k3_q35_gsq'      # (a file the GSQ module decodes: not in the table)
+            _qd.module_of = lambda F: 'dec_q35_gsq'      # (a file the GSQ module decodes: not in the table)
             got_gsq = own.default_draft(dict(model=q35))
         finally:
             arch.Dense35.DRAFT_DEFAULT, _qd.module_of = keep_d, keep_mo
         check(got == ('mtp', 'off', 'off', 'dflash') and got_gsq == 'off',
-              f'default_draft: mtp file / no block / two cards / the Coder: {got}; a k3_q35_gsq file (no drafter yet): {got_gsq}')
+              f'default_draft: mtp file / no block / two cards / the Coder: {got}; a dec_q35_gsq file (no drafter yet): {got_gsq}')
         # the default drafter's file is optional: a default --draft dflash without it serves plain; an explicit one refuses
         from caminus.serve import cli as _cli
         keep_d, keep_of = arch.Dense35.DRAFT_DEFAULT, _cli._arch.of
@@ -488,9 +472,9 @@ def main():
         dd = arch.Dense35.DRAFT_DEFAULT
         from caminus.engine import k3 as _k3
         tpv = {one for one, tpm in _k3.Q35_TP_OF.items() if tpm in _k3.Q35_TPV_OF}
-        check(all(dd[(m, 1)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap', 'k3_q35_gsq'))
-              and all(dd[(m, 2)] == 'dflash' for m in ('k3_q35_swift', 'k3_q35_tcap'))
-              and {m for (m, c) in dd if c == 2} == tpv == {'k3_q35_swift', 'k3_q35_tcap'} and ('k3_q35_gsq', 2) not in dd,
+        check(all(dd[(m, 1)] == 'dflash' for m in ('dec_q35_swift', 'dec_q35_tcap', 'dec_q35_gsq'))
+              and all(dd[(m, 2)] == 'dflash' for m in ('dec_q35_swift', 'dec_q35_tcap'))
+              and {m for (m, c) in dd if c == 2} == tpv == {'dec_q35_swift', 'dec_q35_tcap'} and ('dec_q35_gsq', 2) not in dd,
               f'default_draft: DFlash2 for the three dense 27B files on one card and for the two with a two-card verify '
               f'object on two cards ({dd}; two-card verify for {sorted(tpv)})')
         tpa = arch.ARCHS['qwen35-own-tp']

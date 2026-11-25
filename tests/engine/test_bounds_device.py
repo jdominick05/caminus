@@ -1,9 +1,9 @@
 """Device bound guard (defense in depth behind the host checks): the pass's positions pos .. pos + T - 1 against the KV
 cache's rows (OP_KV_APPEND / OP_ATTN_DEC) and the lazy commit against [0, T] (the OP_GDN_CONV / OP_GDN_STEP / OP_PLE_CONV
 replays), in both forms:
-- kernel: k3_run's prologue (kernels/k3.hip, the production path): out of range, no task runs: nothing is written (cache
+- kernel: k3_run's prologue (kernels/dec_core.hip, the production path): out of range, no task runs: nothing is written (cache
   rows, outputs, states and the position / commit words keep their bytes);
-- launch: the separate guard launch (kernels/k3_guard.hip: k3_run2 tapes, tapes with several position tensors; forced
+- launch: the separate guard launch (kernels/dec_guard.hip: k3_run2 tapes, tapes with several position tensors; forced
   here with Engine.guard_launch): out of range it clamps the words to 0 in place (rows 0 .. T - 1 written, a commit-0
   replay).
 Either way the sync block reports it (k3.bounds_status), Engine.run raises k3.ContextBoundsError (never retried) and the
@@ -137,7 +137,7 @@ def commit_case(module, T, commit, tag):
     print(f'  [{MODE}] {tag}: {"refused: " + msg if msg else "in range, ran"}', flush=True)
 
 
-for MODE, module in [(m, mod) for m in (('kernel',) if BASE else ('kernel', 'launch')) for mod in ('k3_gguf_gsq', 'k3_gguf')]:
+for MODE, module in [(m, mod) for m in (('kernel',) if BASE else ('kernel', 'launch')) for mod in ('dec_q4x_gsq', 'dec_q4x_gg')]:
     for T in (1, 2, 4):
         print(f'{module} T={T} ({k3.module_for(module, T)})', flush=True)
         for q8 in (True, False):

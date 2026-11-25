@@ -1,6 +1,6 @@
 """The batched prefill of the dense qwen35 line on Caminus's own code (caminus.engine.q35_dense.Dense35Own: Swift 1.5 Q4_K_M
 first): the layer loop of a chunk over the decode engine's own weights and states (Dense35Own.L: references, nothing
-copied). One card; no ggml-cuda code: the GEMMs are kernels/q35_prefill.hip's (WMMA, the weights exact, fp16 activations,
+copied). One card; no ggml-cuda code: the GEMMs are kernels/pf_q35_swift.hip's (WMMA, the weights exact, fp16 activations,
 fp32 sums), every other op runs its decode op's statements over the chunk's rows.
 
 Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's ops in its order:
@@ -42,14 +42,17 @@ from .glue import Glue
 
 I, F = ctypes.c_int, ctypes.c_float
 NULL = ctypes.c_void_p(0)
-MODULE = 'q35_prefill'
-MODULE_TCAP = 'q35_prefill_tcap'   # (ThinkingCap's formats: kernels/q35_prefill_tcap.hip, Swift's object + the IQ GEMMs)
+MODULE = 'pf_q35_swift'
+MODULE_TCAP = 'pf_q35_tcap'   # (ThinkingCap's formats: kernels/pf_q35_tcap.hip, Swift's object + the IQ GEMMs)
 FORMATS = ('Q4_K', 'Q6_K', 'Q8_0', 'Q5_K')
 FORMATS_TCAP = FORMATS + ('IQ4_XS', 'IQ3_XXS', 'IQ3_S', 'IQ2_S')
-MODULE_GSQ = 'q35_prefill_gsq'   # (the plain Qwen3.8-27B GSQ-RCO files: kernels/q35_prefill_gsq.hip, ThinkingCap's object + 3 GEMMs)
+MODULE_GSQ = 'pf_q35_gsq'   # (the plain Qwen3.8-27B GSQ-RCO files: kernels/pf_q35_gsq.hip, ThinkingCap's object + 3 GEMMs)
 FORMATS_GSQ = FORMATS_TCAP + ('IQ2_XXS', 'IQ2_XS', 'Q2_K', 'IQ1_M')
 MM_KERNEL = {'Q8_0': 'q35p_mm_q8_0', 'Q5_K': 'q35p_mm_q5k'}
-MMW_N = 256   # (rows per workgroup of the wide Q4_K tile, kernels/q35_prefill.hip MMW_N)
+MMW_N = 256   # (rows per workgroup of the wide Q4_K tile, kernels/pf_q35_swift.hip MMW_N)
+# the objects that carry pf_q35_swift.hip's wide tiles: it and the qwen35moe line's object (kernels/pf_q35m.hip includes
+# it as it is)
+WIDE_MODULES = (MODULE, 'pf_q35m')
 MMW_MIN_PER_CU = 4   # (the wide tile only when its grid has at least this many workgroups per compute unit)
 # the codebook formats (the tcap object only): the decode engine's copies in place (IQ4_XS raw blocks; the grid formats
 # in the record layout), one more argument: the buffer's rows (Rtot)
@@ -69,7 +72,7 @@ CROSSOVER = 12
 
 
 class Ops(q3m_ops.Ops):
-    """kernels/q35_prefill.hip's launchers: q3m_prefill's (included as they are) + the dense qwen35 line's own"""
+    """kernels/pf_q35_swift.hip's launchers: pf_q3m's (included as they are) + the dense qwen35 line's own"""
 
     def __init__(self, dev, module=MODULE):
         super().__init__(dev, module)
@@ -93,9 +96,9 @@ class Ops(q3m_ops.Ops):
             n = int(n); grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
             getattr(self.mod, IQ_KERNEL[fmt])(grid, (256,), wb, I(R), I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
             return
-        if fmt == 'Q4_K' and work is None and n is not None and self.module in (MODULE, 'q35_prefill_abl1') and not self.q4k_narrow:
-            # the wide tile (kernels/q35_prefill.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows; ThinkingCap has
-            # no Q4_K weights; the measurement build q35_prefill_abl1 (B = 1) too; q4k_narrow = True runs q3p_mm_q4k and
+        if fmt == 'Q4_K' and work is None and n is not None and self.module in WIDE_MODULES and not self.q4k_narrow:
+            # the wide tile (kernels/pf_q35_swift.hip q35p_mm_q4k_w: 32 rows per wave, bitwise q3p_mm_q4k's rows; ThinkingCap has
+            # no Q4_K weights; q4k_narrow = True runs q3p_mm_q4k and
             # q4k_force_wide = True skips the grid-size rule, both for benchmarks/q35_prefill_gemm.py --arms ab)
             if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
             n = int(n)
@@ -105,8 +108,8 @@ class Ops(q3m_ops.Ops):
                 return super().mm((fmt, R, K, wb), x16, ldx, y, ldy, n=n, work=work)
             self.mod.q35p_mm_q4k_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
             return
-        if fmt == 'Q6_K' and work is None and n is not None and self.module in (MODULE, 'q35_prefill_abl1') and not self.q6k_narrow:
-            # the wide tile (kernels/q35_prefill.hip q35p_mm_q6k_w, bitwise q3p_mm_q6k's rows; the same grid-size rule; the B = 1
+        if fmt == 'Q6_K' and work is None and n is not None and self.module in WIDE_MODULES and not self.q6k_narrow:
+            # the wide tile (kernels/pf_q35_swift.hip q35p_mm_q6k_w, bitwise q3p_mm_q6k's rows; the same grid-size rule; the B = 1
             # measurement build too; q6k_narrow / q6k_force_wide for benchmarks/q35_prefill_gemm.py --arms ab)
             if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
             n = int(n)
@@ -118,14 +121,18 @@ class Ops(q3m_ops.Ops):
         if K % 256: raise ValueError(f'q35 mm: K {K} is not a multiple of 256')
         if work is not None or n is None: raise ValueError(f'q35 mm: {fmt} takes dense rows (n) only')
         n = int(n)
-        if (fmt == 'Q8_0' and self.module in (MODULE, 'q35_prefill_abl1') and not self.q8_narrow
-                and (-(-n // q3m_ops.MM_M) * -(-R // MMW_N) >= MMW_MIN_PER_CU * self.cus or self.q8_force_wide)):
-            # the wide tile (kernels/q35_prefill.hip q35p_mm_q8_0_w, bitwise q35p_mm_q8_0's rows; the same grid-size rule; Swift
+        if (fmt == 'Q8_0' and self.module in WIDE_MODULES and not self.q8_narrow
+                and (-(-n // q3m_ops.MM_M) * -(-R // MMW_N) >= self.q8_wide_min_wg() or self.q8_force_wide)):
+            # the wide tile (kernels/pf_q35_swift.hip q35p_mm_q8_0_w, bitwise q35p_mm_q8_0's rows; the same grid-size rule; Swift
             # only for now: ThinkingCap's Q8_0 tensors stay on q35p_mm_q8_0; q8_narrow / q8_force_wide for --arms ab)
             self.mod.q35p_mm_q8_0_w((-(-n // q3m_ops.MM_M), -(-R // MMW_N)), (256,), wb, I(R), I(K), x16, I(ldx), y, I(ldy), I(n))
             return
         grid = (-(-n // q3m_ops.MM_M), -(-R // q3m_ops.MM_N))
         getattr(self.mod, MM_KERNEL[fmt])(grid, (256,), wb, I(R), I(K), x16, I(ldx), NULL, y, I(ldy), NULL, NULL, NULL, I(n))
+
+    def q8_wide_min_wg(self):
+        """the grid (workgroups) from which a dense Q8_0 GEMM runs on the wide tile"""
+        return MMW_MIN_PER_CU * self.cus
 
     def emb_iq2s(self, W, rb, vocab, toks, x, n, N):
         """x [n][N] = the IQ2_S embedding rows toks[i] (OP_OWN_EMB's IQ2_S statements: bitwise the host decoder)"""
@@ -134,7 +141,7 @@ class Ops(q3m_ops.Ops):
 
     def add_rms16(self, x, nw, eps, h16, n, N, d=None, h=None):
         """per row: x += d (d None: no add); h = rms_norm(x) * nw (fp32, always written: the kernel's fp16 rounding
-        depends on it, see kernels/q35_prefill.hip); h16 = the decode op's fp16 copy"""
+        depends on it, see kernels/pf_q35_swift.hip); h16 = the decode op's fp16 copy"""
         if N % 256 or not 256 <= N <= 65536: raise ValueError(f'q35 add_rms16: N {N} (a multiple of 256)')
         if h is None: raise ValueError('q35 add_rms16: h (the fp32 output) is required')
         self.mod.q35p_add_rms16((int(n),), (256,), x, NULL if d is None else d, nw, F(eps), h, h16, I(N))
@@ -163,22 +170,30 @@ class Ops(q3m_ops.Ops):
         self.mod.q35p_attn16(((r1 - r0) * heads,), (256,), ctypes.c_void_p(q.data_ptr() + off * es), cache, I(pos0), I(r0),
                              I(heads), I(nkv), I(D), F(scale), ctypes.c_void_p(out.data_ptr() + off * es))
 
+    # the tiled attention's kernels by cache format (f16, q8: None = not in this object)
+    WM_KERNEL = ('q35p_attn_wm', None)
+
     def attn_wm(self, q, cache, pos0, n, heads, nkv, D, scale, out, rows, b0=None, b1=None):
-        """the tiled attention (kernels/q35_prefill.hip q35p_attn_wm) of a chunk at positions pos0 .. pos0 + n - 1, the
+        """the tiled attention (kernels/pf_q35_swift.hip q35p_attn_wm) of a chunk at positions pos0 .. pos0 + n - 1, the
         8-position blocks b0 .. b1 - 1 of attn_blocks() (one launch): out[r, h] = the attention of q[r, h] over cache
         positions 0 .. pos0 + r, for the chunk's rows in those blocks. q / out: the chunk's [n, heads, D] fp32 (whole
-        buffers: the kernel addresses rows by position). A row's bits do not depend on the chunking or the launch split"""
+        buffers: the kernel addresses rows by position). A row's bits do not depend on the chunking or the launch split.
+        The kernels are WM_KERNEL's (caminus.prefill.q35moe's subclass: q35mp_attn, and a uint8 cache's Q8_0 rows from
+        its Q8 object, self.kvmod)"""
         B0, B1 = self._wm_span(pos0, n)
         b0 = B0 if b0 is None else int(b0); b1 = B1 if b1 is None else int(b1)
         if not self.attn_wm_ok(heads, nkv, D) or not B0 <= b0 < b1 <= B1:
             raise ValueError(f'q35 attn_wm: D {D} (only {ATTN_WM_D}), heads {heads} / nkv {nkv} (at most 8 per kv head), blocks [{b0}, {b1}) of [{B0}, {B1})')
-        alloc = cache.numel() // (2 * nkv * D)
+        q8 = cache.dtype == torch.uint8
+        name = self.WM_KERNEL[q8]
+        if name is None or (q8 and getattr(self, 'kvmod', None) is None): raise ValueError(f'q35 attn_wm: no {"Q8" if q8 else "F16"} cache kernel here')
+        alloc = k3.kv_rows(cache, nkv * D, q8)
         if not 0 < int(rows) <= alloc: raise ValueError(f'q35 attn_wm: rows {rows} of a cache of {alloc}')
         k3.check_span(pos0, n, int(rows), what='q35 attn_wm')
         if q.numel() < n * heads * D or out.numel() < n * heads * D: raise ValueError('q35 attn_wm: q / out smaller than the chunk')
         assert q.dtype == out.dtype and q.element_size() == 4 and q.data_ptr() % 16 == 0 and cache.data_ptr() % 16 == 0
-        self.mod.q35p_attn_wm((b1 - b0, int(nkv)), (256,), q, cache, I(pos0), I(n), I(b0), I(heads), I(nkv),
-                              F(float(scale) * 1.4426950408889634), out)
+        fn = getattr(self.kvmod if q8 else self.mod, name)
+        fn((b1 - b0, int(nkv)), (256,), q, cache, I(pos0), I(n), I(b0), I(heads), I(nkv), F(float(scale) * 1.4426950408889634), out)
 
     @staticmethod
     def attn_wm_ok(heads, nkv, D):
@@ -279,7 +294,7 @@ class Q35OwnPrefill(PrefillDriver):
         if m.emb.type not in (('Q4_K', 'IQ2_S') if self.tcap else ('Q4_K',)): bad.append(f'token_embd: {m.emb.type}')
         if bad: raise ValueError(f'Q35OwnPrefill: {len(bad)} matrices without a prefill kernel (first: {"; ".join(bad[:4])})')
         if m.D != 5120: raise ValueError(f'Q35OwnPrefill: n_embd {m.D} (the F32 alpha / beta kernel is pf_f32_mv_k5120)')
-        attn = {6: 'prefill_attn_q35d', 8: 'prefill_attn_q35'}.get(m.nh // m.nkv)
+        attn = {6: 'pf_gg_attn_q35', 8: 'pf_gg_attn_q35m'}.get(m.nh // m.nkv)
         if attn is None: raise ValueError(f'Q35OwnPrefill: {m.nh // m.nkv} query heads per kv head')
         T = self.chunk
         nf = len(self.feature_layers)
@@ -288,8 +303,8 @@ class Q35OwnPrefill(PrefillDriver):
         f32, f16, i32 = layout(m, T, export_h=self.export_h, nfeat=nf)
         with torch.cuda.device(dev):
             self.O = Ops(dev, module=MODULE_GSQ if self.gsq else MODULE_TCAP if self.tcap else MODULE)
-            self.Gl = Glue(dev, module='prefill_glue_q35d')
-            self.Gd = Gdn(dev, module='prefill_gdn_q35')
+            self.Gl = Glue(dev, module='pf_gg_glue_q35')
+            self.Gd = Gdn(dev, module='pf_gg_gdn_q35')
             self.A = Attn(dev, name=attn)
             for n, c in f32.items(): setattr(self, n, torch.zeros(c, dtype=torch.float32, device=dev))
             for n, c in f16.items(): setattr(self, n, torch.zeros(c, dtype=torch.float16, device=dev))

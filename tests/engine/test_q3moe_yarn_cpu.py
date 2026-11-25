@@ -5,21 +5,22 @@ synthetic files (tests/engine/tiny_q3m.py), the registry's mode, caps, KV choice
     within fp32 rounding of caminus.ref_q3moe's llama.cpp-statement YaRN (written separately: a wrong table fails here);
     mscale fp32(1 + 0.1 ln 4), the value llama.cpp's fp32 chain (get_mscale, the cancel, rope_yarn's multiply) gives
   - the module tables: each YaRN build has its base's memberships (lean / two-card / Q8 tables, MODULE_CAPS, the split
-    cap), Q3M_YARN_OF covers exactly the four decode modules, no verify build; every YaRN object (and q3m_prefill_kvq8's
+    cap), Q3M_YARN_OF covers exactly the four decode modules, no verify build; every YaRN object (and pf_q3m_kvq8's
     Q8 attention) is in the installed runtime set; each module file is its define over its base, nothing else
   - the engines: rope=YarnMode picks the YaRN build (F16 / Q8, one card / two), every layer's qk_par is the native block +
     the table (323 floats), max_ctx past the file's context_length is taken in the mode and refused without it, rope_key set;
     the two-card projection counts the table; refusals: rope not a YarnMode, a YaRN module without rope, another tape form
     with rope, the verify engine on a YaRN engine, a short par block on a YaRN module (own_atts) and in the YaRN prefill
-  - the prefills: q3p_qk_rope from q3m_prefill_yarn (Q8: q3p_qk_rope_q8 from q3m_prefill_kvq8_yarn), every other kernel on
-    its own object (the Q8 attention on q3m_prefill_kvq8); numerics carry the rope (F16 numerics unchanged)
+  - the prefills: q3p_qk_rope from pf_q3m_yarn (Q8: q3p_qk_rope_q8 from pf_q3m_kvq8_yarn), every other kernel on
+    its own object (the Q8 attention on pf_q3m_kvq8); numerics carry the rope (F16 numerics unchanged)
   - the engine key: a YaRN engine's carries tp.rope and its module; a native key has no rope entry (unchanged)
   - the registry: the mode is opt-in (--long-context, or an explicit max_ctx past 40,960), its cap 131,072 (more refused),
     auto_need's native_ctx the cap; the KV choice (F16 where the asked context fits, else Q8 where it holds more) and the
     note naming it; every other entry refuses --long-context; the Coder's needs an explicit max_ctx past 262,144
   - the mode's file check: a qwen3moe file that is not the recipe's model (context_length / rope.freq_base) or has codebook
     or row-scale tensors is refused by long_mode (flag and explicit max_ctx), and stays native within its own context
-  - the gates' YaRN bounds (tools/gates/yarn_bound.py, synthetic rows) and q3moe_ref32's atomic resume state
+  - the gates' YaRN bounds (tools/gates/yarn_bound.py, synthetic rows), the depth gate's rule (q3moe_depth_gmodel) and
+    q3moe_ref32's atomic resume state
   - the CLI: caminus serve --long-context (and in options_json), caminus start passes it and refuses a model without a mode
 Prints PASS / FAIL lines and RESULT PASS | FAIL.
   python -I tests/engine/test_q3moe_yarn_cpu.py --scratch DIR"""
@@ -116,26 +117,27 @@ check(raises(lambda: rope.yarn_table(64, 1e6, 4.0, 32768)) and raises(lambda: ro
 YO = k3.Q3M_YARN_OF
 mem = lambda m: (m in k3.Q3M_LEAN_MODULES, m in k3.Q3M_TP_MODULES, m in k3.Q3M_KV_Q8_MODULES, m in k3.Q3M_MODULES,
                  k3.MODULE_CAPS.get(m), k3.atts_max_splits(m), m in k3.Q3M_VER_MODULES)
-check(set(YO) == {'k3_q3m_lean', 'k3_q3m_lean_kvq8', 'k3_q3m_lean_tp', 'k3_q3m_lean_tp_kvq8'}
+check(set(YO) == {'dec_q3m', 'dec_q3m_kvq8', 'dec_q3m_tp', 'dec_q3m_tp_kvq8'}
       and all(mem(y) == mem(b) for b, y in YO.items()) and all(k3.Q3M_YARN_BASE[y] == b for b, y in YO.items())
-      and k3.Q3M_TP_OF[YO['k3_q3m_lean']] == YO['k3_q3m_lean_tp'] and k3.Q3M_TP_OF[YO['k3_q3m_lean_kvq8']] == YO['k3_q3m_lean_tp_kvq8']
-      and k3.Q3M_KV_Q8_OF[YO['k3_q3m_lean']] == YO['k3_q3m_lean_kvq8'] and k3.Q3M_KV_Q8_OF[YO['k3_q3m_lean_tp']] == YO['k3_q3m_lean_tp_kvq8']
+      and k3.Q3M_TP_OF[YO['dec_q3m']] == YO['dec_q3m_tp'] and k3.Q3M_TP_OF[YO['dec_q3m_kvq8']] == YO['dec_q3m_tp_kvq8']
+      and k3.Q3M_KV_Q8_OF[YO['dec_q3m']] == YO['dec_q3m_kvq8'] and k3.Q3M_KV_Q8_OF[YO['dec_q3m_tp']] == YO['dec_q3m_tp_kvq8']
       and not any(y in k3.Q3M_VER_MODULES for y in YO.values()),
       'module tables: each YaRN build has its base\'s memberships (lean / two-card / Q8 / caps / split cap), the two-card and Q8 '
       'maps between YaRN builds, no verify build')
-ship = ('k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn', 'k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn', 'q3m_prefill_yarn',
-        'q3m_prefill_kvq8_yarn', 'q3m_prefill_kvq8')
-check(all(n in kernels.RUNTIME_SET for n in ship) and 'k3_q3m_lean_kvq8' in kernels.RUNTIME_SET
-      and q3m_ops.YARN_MODULE == {False: 'q3m_prefill_yarn', True: 'q3m_prefill_kvq8_yarn'},
-      'runtime set: the four YaRN decode objects, the two YaRN prefill objects and q3m_prefill_kvq8 (the Q8 attention the mode '
+ship = ('dec_q3m_yarn', 'dec_q3m_kvq8_yarn', 'dec_q3m_tp_yarn', 'dec_q3m_tp_kvq8_yarn', 'pf_q3m_yarn',
+        'pf_q3m_kvq8_yarn', 'pf_q3m_kvq8')
+check(all(n in kernels.RUNTIME_SET for n in ship) and 'dec_q3m_kvq8' in kernels.RUNTIME_SET
+      and q3m_ops.YARN_MODULE == {False: 'pf_q3m_yarn', True: 'pf_q3m_kvq8_yarn'},
+      'runtime set: the four YaRN decode objects, the two YaRN prefill objects and pf_q3m_kvq8 (the Q8 attention the mode '
       'runs); the native Q8 decode module ships too (caminus serve --kv q8)')
-src_ok = True
-for name, (define, inc) in {'k3_q3m_lean_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean.hip'), 'k3_q3m_lean_kvq8_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean_kvq8.hip'),
-                            'k3_q3m_lean_tp_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean_tp.hip'), 'k3_q3m_lean_tp_kvq8_yarn': ('K3_Q3M_YARN', 'k3_q3m_lean_tp_kvq8.hip'),
-                            'q3m_prefill_yarn': ('Q3P_YARN', 'q3m_prefill.hip'), 'q3m_prefill_kvq8_yarn': ('Q3P_YARN', 'q3m_prefill_kvq8.hip')}.items():
-    src = [ln.strip() for ln in open(os.path.join(HERE, '..', '..', 'kernels', name + '.hip')) if ln.strip() and not ln.strip().startswith('//')]
-    src_ok &= src == [f'#define {define}', f'#include "{inc}"']
-check(src_ok, 'each YaRN module file is its define over its base, nothing else (the base objects keep their code)')
+sys.path.append(os.path.join(HERE, '..', '..', 'tools'))   # (after python/: tools/caminus.py would shadow the package)
+from own_closure import rows   # noqa: E402
+TABLE = rows()
+check(all(TABLE.get(name) == (base, [(define, '')]) for name, (define, base) in {
+          'dec_q3m_yarn': ('K3_Q3M_YARN', 'dec_q3m'), 'dec_q3m_kvq8_yarn': ('K3_Q3M_YARN', 'dec_q3m_kvq8'),
+          'dec_q3m_tp_yarn': ('K3_Q3M_YARN', 'dec_q3m_tp'), 'dec_q3m_tp_kvq8_yarn': ('K3_Q3M_YARN', 'dec_q3m_tp_kvq8'),
+          'pf_q3m_yarn': ('Q3P_YARN', 'pf_q3m'), 'pf_q3m_kvq8_yarn': ('Q3P_YARN', 'pf_q3m_kvq8')}.items()),
+      'each YaRN module is a kernels/objects.tsv row: its define over its base, nothing else (the base objects keep their code)')
 
 # ---- the engines (one card) -------------------------------------------------------------------------------------------------------
 P = os.path.join(A.scratch, 'tiny-q3m.gguf'); tiny_q3m.write(P)
@@ -144,13 +146,13 @@ mf = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False)
 my = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, rope=Y)
 mq = Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, rope=Y, q8=True)
 nat = 2 * 128 + 2
-check(mf.module == 'k3_q3m_lean' and my.module == 'k3_q3m_lean_yarn' and my.E.module == 'k3_q3m_lean_yarn'
-      and mq.module == 'k3_q3m_lean_kvq8_yarn' and mq.E.module == 'k3_q3m_lean_kvq8_yarn' and mq.E.kv_error is not None
+check(mf.module == 'dec_q3m' and my.module == 'dec_q3m_yarn' and my.E.module == 'dec_q3m_yarn'
+      and mq.module == 'dec_q3m_kvq8_yarn' and mq.E.module == 'dec_q3m_kvq8_yarn' and mq.E.kv_error is not None
       and all(d['qk_par'].numel() == nat for d in mf.L) and all(d['qk_par'].numel() == nat + 65 for d in my.L)
       and all(torch.equal(dy['qk_par'][:nat], df['qk_par']) and np.array_equal(dy['qk_par'][nat:].numpy(), my.rope_table) for dy, df in zip(my.L, mf.L))
       and np.array_equal(my.rope_table, rope.yarn_table(128, 1e6, 4.0, 32768)) and my.rope_key == Y.key() and not hasattr(mf, 'rope_key')
       and [sg.op for sg in my.E.segs] == [sg.op for sg in mf.E.segs],
-      'Q3MoEOne(rope=YarnMode): k3_q3m_lean_yarn (Q8: k3_q3m_lean_kvq8_yarn, with its error word), every qk_par the native block + '
+      'Q3MoEOne(rope=YarnMode): dec_q3m_yarn (Q8: dec_q3m_kvq8_yarn, with its error word), every qk_par the native block + '
       'the table, rope_key set; the tape the native one\'s ops in order')
 ats = [sg for sg in my.E.segs if sg.op == k3.OP_OWN_ATTS]
 check(len(ats) == my.nl and [sg.aux for sg in ats] == [d['qk_par'].data_ptr() for d in my.L],
@@ -161,18 +163,18 @@ check(big.max_ctx == 8192 and raises(lambda: Q3MoEOne(P, max_ctx=8192, vram_chec
       'max_ctx past the file\'s context_length (4,096) is taken in the mode and refused without it; past the mode\'s 131,072 refused')
 del big
 check(raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, rope='yarn'))
-      and raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, module='k3_q3m_lean_yarn'))
+      and raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, module='dec_q3m_yarn'))
       and raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, rope=Y, attn_split=False))
-      and raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, rope=Y, module='k3_gguf_q3m_own'))
+      and raises(lambda: Q3MoEOne(P, max_ctx=MC, vram_check=False, link_keepalive=False, rope=Y, module='dec_q3m_gg'))
       and raises(lambda: Q3MoEVerify(my, 2, vram_check=False)),
       'refused: rope not a YarnMode; a YaRN module without rope; rope with another tape form or module; the verify engine on a YaRN engine')
-E2 = k3.Engine(module='k3_q3m_lean_yarn', grid=8)
+E2 = k3.Engine(module='dec_q3m_yarn', grid=8)
 B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt)
 M = my.nkv * my.hd
 args = lambda npar: (B(my.nh * 128 + 2 * M), B(k3.Engine.atts_scratch_floats(my.nkv, 8)), B(npar), B((MC + 64) * 2 * M, torch.float16),
                      B(1, torch.int32), B(my.nh * 128, torch.float16), my.nh, my.nkv, 128, 0.1)
 check(raises(lambda: E2.own_atts(*args(nat), splits=8)) and not raises(lambda: E2.own_atts(*args(nat + 65), splits=8))
-      and not raises(lambda: k3.Engine(module='k3_q3m_lean', grid=8).own_atts(*args(nat), splits=8)),
+      and not raises(lambda: k3.Engine(module='dec_q3m', grid=8).own_atts(*args(nat), splits=8)),
       'own_atts: a YaRN module refuses a par block without the table (the device reads past eps); the native module takes it as before')
 
 # ---- the prefills -------------------------------------------------------------------------------------------------------------------
@@ -181,12 +183,13 @@ toks = list(range(1, 41))
 seen = {}
 for name_, p_ in (('f16', pf), ('q8', pq), ('native', pn)):
     LOG.clear(); p_._chunk(toks, 0, 40)
-    seen[name_] = ({(e[0], e[1]) for e in LOG if e[1].startswith('q3p_qk_rope')}, {(e[0], e[1]) for e in LOG if e[1].startswith('q3p_attn')},
-                   {e[0] for e in LOG if not e[1].startswith(('q3p_qk_rope', 'q3p_attn'))})
-check(seen['f16'] == ({('q3m_prefill_yarn', 'q3p_qk_rope')}, {('q3m_prefill', 'q3p_attn')}, {'q3m_prefill'})
-      and seen['q8'] == ({('q3m_prefill_kvq8_yarn', 'q3p_qk_rope_q8')}, {('q3m_prefill_kvq8', 'q3p_attn_q8')}, {'q3m_prefill'})
-      and seen['native'] == ({('q3m_prefill', 'q3p_qk_rope')}, {('q3m_prefill', 'q3p_attn')}, {'q3m_prefill'}),
-      'prefill: q3p_qk_rope from q3m_prefill_yarn (Q8: q3p_qk_rope_q8 from q3m_prefill_kvq8_yarn), the attention and every other '
+    seen[name_] = ({(e[0], e[1]) for e in LOG if e[1].startswith('q3p_qk_rope')}, {(e[0], e[1]) for e in LOG if e[1].startswith('q3mp_attn')},
+                   {e[0] for e in LOG if not e[1].startswith(('q3p_qk_rope', 'q3mp_attn'))})
+rest = {'pf_q3m', q3m_ops.WIDE_MODULE}   # (the glue and narrow GEMMs; the wide GEMM tiles and fused gate | up)
+check(seen['f16'] == ({('pf_q3m_yarn', 'q3p_qk_rope')}, {('pf_q3m', 'q3mp_attn')}, rest)
+      and seen['q8'] == ({('pf_q3m_kvq8_yarn', 'q3p_qk_rope_q8')}, {('pf_q3m_kvq8', 'q3mp_attn_q8')}, rest)
+      and seen['native'] == ({('pf_q3m', 'q3p_qk_rope')}, {('pf_q3m', 'q3mp_attn')}, rest),
+      'prefill: q3p_qk_rope from pf_q3m_yarn (Q8: q3p_qk_rope_q8 from pf_q3m_kvq8_yarn), the attention and every other '
       'kernel on their own objects; the native prefill unchanged')
 check(pf.numerics().get('rope') == Y.key() and pq.numerics().get('rope') == Y.key() and 'rope' not in pn.numerics()
       and raises(lambda: pf.ops.qk_rope(pf.qkv, 512, my.nh, my.nkv, mf.L[0]['qk_par'], 0, pf.q16, my.L[0]['cache'], 4))
@@ -197,7 +200,7 @@ check(pf.numerics().get('rope') == Y.key() and pq.numerics().get('rope') == Y.ke
 from types import SimpleNamespace as NS
 pfk = NS(numerics=lambda: dict(q='x'), crossover=8)
 ky, kf = prompt.engine_key(my, pfk, build='fixture'), prompt.engine_key(mf, pfk, build='fixture')
-check(ky['tp'].get('rope') == Y.key() and 'rope' not in kf['tp'] and ky['module'] == 'k3_q3m_lean_yarn' and prompt.key_hash(ky) != prompt.key_hash(kf),
+check(ky['tp'].get('rope') == Y.key() and 'rope' not in kf['tp'] and ky['module'] == 'dec_q3m_yarn' and prompt.key_hash(ky) != prompt.key_hash(kf),
       'engine key: a YaRN engine\'s carries tp.rope and its module; a native key has no rope entry (unchanged): no park crosses')
 
 # ---- two cards ------------------------------------------------------------------------------------------------------------------------
@@ -224,10 +227,10 @@ q3moe_tp.Slots = FakeSlots
 tY = q3moe_tp.Q3MoETP(PT, devices=(0, 1), max_ctx=MC, vram_check=False, rope=Y)
 tQ = q3moe_tp.Q3MoETP(PT, devices=(0, 1), max_ctx=MC, vram_check=False, rope=Y, q8=True)
 tN = q3moe_tp.Q3MoETP(PT, devices=(0, 1), max_ctx=MC, vram_check=False)
-tp_ok = (tY.module == 'k3_q3m_lean_tp_yarn' and tQ.module == 'k3_q3m_lean_tp_kvq8_yarn' and tN.module == 'k3_q3m_lean_tp'
+tp_ok = (tY.module == 'dec_q3m_tp_yarn' and tQ.module == 'dec_q3m_tp_kvq8_yarn' and tN.module == 'dec_q3m_tp'
          and tY._qk_par(0).size == nat + 65 and np.array_equal(tY._qk_par(0)[:nat], tN._qk_par(0))
          and np.array_equal(tY._qk_par(0)[nat:], tY.rope_table) and tY.rope_key == Y.key() and not hasattr(tN, 'rope_key')
-         and all(E_.module == 'k3_q3m_lean_tp_yarn' for E_ in getattr(tY, 'E', []) if hasattr(E_, 'module')))
+         and all(E_.module == 'dec_q3m_tp_yarn' for E_ in getattr(tY, 'E', []) if hasattr(E_, 'module')))
 tp_note = 'built on stand-ins, F16 and Q8'
 class FakeX:   # (the prefill's peer exchange: as tests/engine/test_q3moe_tp_kvq8_cpu.py)
     def __init__(self, devices, T, D, streams, check=True): self.calls = []
@@ -243,16 +246,16 @@ q3m_tp.Exchange = FakeX
 ptp = q3m_tp.Q3MPrefillTP(tY, chunk=64, check=False)
 LOG.clear(); ptp._chunk(list(range(1, 41)), 0, 40)
 tr = [e for e in LOG if e[1].startswith('q3p_qk_rope')]
-check(ptp.yarn and len(tr) == 2 * tY.nl and all(e[0] == 'q3m_prefill_yarn' and e[1] == 'q3p_qk_rope' for e in tr)
+check(ptp.yarn and len(tr) == 2 * tY.nl and all(e[0] == 'pf_q3m_yarn' and e[1] == 'q3p_qk_rope' for e in tr)
       and all(e[3][4].numel() == nat + 65 for e in tr) and ptp.numerics().get('rope') == Y.key()
-      and not any(e[1] == 'q3p_qk_rope' and e[0] != 'q3m_prefill_yarn' for e in LOG),
-      f'Q3MPrefillTP on a YaRN engine: {len(tr)} q3p_qk_rope launches (both cards, every layer) from q3m_prefill_yarn on the '
+      and not any(e[1] == 'q3p_qk_rope' and e[0] != 'pf_q3m_yarn' for e in LOG),
+      f'Q3MPrefillTP on a YaRN engine: {len(tr)} q3p_qk_rope launches (both cards, every layer) from pf_q3m_yarn on the '
       f'{nat + 65}-float block; numerics carry the rope')
 F = __import__('caminus.ggufio', fromlist=['GGUFFile']).GGUFFile(PT)
 tn, ty = q3moe_tp.projection_terms(F, MC), q3moe_tp.projection_terms(F, MC, yarn=True)
 nl = int(F.hp('block_count'))
 check(tp_ok and all(b['small'] - a['small'] == nl * 65 * 4 for a, b in zip(tn, ty))
-      and raises(lambda: q3moe_tp.Q3MoETP(PT, devices=(0, 1), max_ctx=MC, vram_check=False, module='k3_q3m_lean_tp_yarn')),
+      and raises(lambda: q3moe_tp.Q3MoETP(PT, devices=(0, 1), max_ctx=MC, vram_check=False, module='dec_q3m_tp_yarn')),
       f'two cards: the YaRN two-card builds and the table in each block ({tp_note}); the projection counts 65 floats per layer; '
       f'a YaRN module without rope refused')
 
@@ -290,7 +293,7 @@ check(extra == {'kv': 'q8'} and ox['kv'] == 'q8' and 'Q8_0' in note and 'chosen 
 arch.Arch.context_fit = _ARCH_FIT
 bad = []
 for name, a in arch.ARCHS.items():
-    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen4exp'): continue
+    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen4exp', 'qwen35moe-own'): continue
     try: a.long_mode(dict(model=P, long_context=True)); bad.append(name)
     except ValueError as e:
         if '--long-context' not in str(e): bad.append(name)
@@ -355,6 +358,12 @@ check(q.LONG_OFF_FORMATS == frozenset(k3.OWN_IQ_FMT) | frozenset(RS_CONT),
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'gates')); sys.path.insert(0, os.path.join(HERE, '..', '..', 'tools', 'reference'))
 import yarn_bound
 from q3moe_gmodel import score as g_score
+import q3moe_depth_gmodel as depth_gate
+d_l = dict(mean=7.9e-03, top1=63, n=64)
+check(depth_gate.TOP1_SLACK == 1 and depth_gate.rule(dict(mean=9.7e-04, top1=62, n=64), d_l) == (True, True)
+      and depth_gate.rule(dict(mean=9.7e-04, top1=61, n=64), d_l) == (True, False)
+      and depth_gate.rule(dict(mean=8.0e-03, top1=64, n=64), d_l) == (False, True),
+      'q3moe_depth_gmodel rule: mean KLD at most llama.cpp\'s; top-1 at most one position of the 64 below it (two fail)')
 rng = np.random.default_rng(3)
 ry = rng.standard_normal((16, 64)) * 3; rn = ry + rng.standard_normal((16, 64)) * 1.0      # the YaRN and native references
 ours_ = ry + rng.standard_normal((16, 64)) * 0.02; good = ry + rng.standard_normal((16, 64)) * 0.05

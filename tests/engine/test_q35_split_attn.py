@@ -1,22 +1,22 @@
-"""The dense qwen35 own modules' decode attention (the split pair of kernels/k3_attn_split.h, built into k3_q35_swift /
-k3_q35_swift_ver / k3_q35_tcap by kernels/k3_q35_ops.h under K3_Q35_ATTN_SPLIT) on one attention layer's shapes (24 query
+"""The dense qwen35 own modules' decode attention (the split pair of kernels/ops_attn_split.h, built into dec_q35_swift /
+dec_q35_swift_ver / dec_q35_tcap by kernels/ops_q35.h under K3_Q35_ATTN_SPLIT) on one attention layer's shapes (24 query
 heads over 4 kv heads, head dim 256, f16 cache), a tape of just the pair on random q and cache rows:
-  - bitwise the GGUF module's pair on the same inputs (k3_gguf_q35d for T = 1, k3_gguf_q35d_mt for T = 2, 3, 4: the same
-    source, its PART unpacked), at every list length tried: the verify module k3_q35_swift_ver runs the packed PART (one
-    task per (split, kv head) for every pass row: kernels/k3_attn_split.h op_attn_part_packed) and must give its bits;
+  - bitwise the GGUF module's pair on the same inputs (dec_q35_arex for T = 1, dec_q35_arex_ver for T = 2, 3, 4: the same
+    source, its PART unpacked), at every list length tried: the verify module dec_q35_swift_ver runs the packed PART (one
+    task per (split, kv head) for every pass row: kernels/ops_attn_split.h op_attn_part_packed) and must give its bits;
     lengths 34 / 35 / 4098 put a split under only some of a pass's rows
   - a T-row pass's row r bitwise the one-row pass at position pos + r (the split layout depends only on the list length)
   - the packed PART refuses T above k3.ATTN_PACK_T and a QSA selection (identity lists only)
   - against float64 attention: max |difference| <= 1e-5 x max |V|
   - the q8_0 cache refused on the F16 own modules (their device code reads f16 only)
---kv q8 runs the same pair on the separate Q8 objects (k3_q35_{swift,tcap,gsq}_kvq8, the verify objects
-k3_q35_{swift,tcap}_ver_kvq8 with the unpacked PART) over a q8_0 cache that caminus.ref_kv encodes on the host:
-  - bitwise the GGUF module's pair on the same cache bytes (k3_gguf_q35d with T = 1, k3_gguf_q35d_mt with T = 2, 3, 4)
+--kv q8 runs the same pair on the separate Q8 objects (dec_q35_{swift,tcap,gsq}_kvq8, the verify objects
+dec_q35_{swift,tcap}_ver_kvq8 with the unpacked PART) over a q8_0 cache that caminus.ref_kv encodes on the host:
+  - bitwise the GGUF module's pair on the same cache bytes (dec_q35_arex with T = 1, dec_q35_arex_ver with T = 2, 3, 4)
   - a T-row pass's row r bitwise the one-row pass at position pos + r
   - against float64 attention over the same decoded rows (caminus.ref_kv.decode_q8_kv): max |difference| <= 1e-5 x
     max |V|. The bound is the F16 arm's: an int8 code times a half scale is exact in fp32, so the device reads the
     reference's values exactly; what is left is the same fp32 score, softmax and sum path. Not yet measured for Q8.
-  - the Q8 objects' own Hadamard and append ops (kernels/k3_q35_kvq8_ops.h) on known K / V, K256 and V64 as the tapes
+  - the Q8 objects' own Hadamard and append ops (kernels/ops_q35_kvq8.h) on known K / V, K256 and V64 as the tapes
     run them, T 1 on the decode objects and T 2 / 3 / 4 on the verify objects: the transformed rows bitwise a host fp32
     Sylvester transform in the op's order, the cache bytes bitwise caminus.ref_kv.encode_q8_kv of those rows (only rows
     p0 .. p0 + T - 1 written); the output H64 once and twice bitwise the host transform (twice is the input within
@@ -89,7 +89,7 @@ def ref(qrow, pos):
 
 
 def sylvester(x, n):
-    """the host fp32 Walsh-Hadamard transform of each chunk of n values, in the device op's order (kernels/k3_q35_kvq8_ops.h
+    """the host fp32 Walsh-Hadamard transform of each chunk of n values, in the device op's order (kernels/ops_q35_kvq8.h
     q35_op_hadamard: for h = 1, 2, 4 ..: a + b and a - b at i, i + h; then x 1/sqrt(n), exact for n = 64 / 256)"""
     y = np.array(x, dtype=np.float32).reshape(-1, n)
     h = 1
@@ -111,19 +111,19 @@ def refuses(fn, want):
 
 
 if Q8:
-    ONE, VER = ('k3_q35_swift_kvq8', 'k3_q35_tcap_kvq8', 'k3_q35_gsq_kvq8'), ('k3_q35_swift_ver_kvq8', 'k3_q35_tcap_ver_kvq8')
+    ONE, VER = ('dec_q35_swift_kvq8', 'dec_q35_tcap_kvq8', 'dec_q35_gsq_kvq8'), ('dec_q35_swift_ver_kvq8', 'dec_q35_tcap_ver_kvq8')
     bit, rows_ok, err = True, True, 0.0
     for n in LENS:
         pos = n - 1
         q1 = torch.randn(H * D, generator=g, device='cuda') * 0.1
         a = run(ONE[0], 1, pos, q1)
-        bit &= torch.equal(a, run('k3_gguf_q35d', 1, pos, q1)) and all(torch.equal(a, run(m, 1, pos, q1)) for m in ONE[1:])
+        bit &= torch.equal(a, run('dec_q35_arex', 1, pos, q1)) and all(torch.equal(a, run(m, 1, pos, q1)) for m in ONE[1:])
         err = max(err, float(np.abs(a[0].double().cpu().numpy() - ref(q1, pos)).max()))
         for T in (2, 3, 4):
             if n < T: continue
             qT = torch.randn(T * H * D, generator=g, device='cuda') * 0.1
             p0 = n - T
-            bT = run('k3_gguf_q35d_mt', T, p0, qT)
+            bT = run('dec_q35_arex_ver', T, p0, qT)
             for m in VER:
                 aT = run(m, T, p0, qT)
                 bit &= torch.equal(aT, bT)
@@ -131,12 +131,12 @@ if Q8:
                     rows_ok &= torch.equal(aT[r], run(ONE[0], 1, p0 + r, qT[r * H * D:(r + 1) * H * D].contiguous())[0])
         print(f'  list length {n}: max |own Q8 - float64| so far {err:.2e}', flush=True)
     check(bit, f'the Q8 objects\' pair (T 1: {", ".join(ONE)}; T 2 / 3 / 4: {", ".join(VER)}, unpacked PART) is bitwise '
-               f'k3_gguf_q35d\'s / k3_gguf_q35d_mt\'s on the same q8_0 bytes at list lengths {LENS}')
+               f'dec_q35_arex\'s / dec_q35_arex_ver\'s on the same q8_0 bytes at list lengths {LENS}')
     check(rows_ok, 'a Q8 verify pass\'s rows (T = 2 / 3 / 4) are bitwise the one-row Q8 passes at their positions')
     check(err <= 1e-5 * vmax, f'against float64 attention over the same decoded q8_0 rows: max |difference| {err:.2e} '
                               f'<= 1e-5 x max |V| ({vmax:.2f})')
 
-    # the Q8 objects' own Hadamard and append ops (kernels/k3_q35_kvq8_ops.h) on known K / V, as the tapes run them:
+    # the Q8 objects' own Hadamard and append ops (kernels/ops_q35_kvq8.h) on known K / V, as the tapes run them:
     # K256 and V64 in place, then the append of the T rows at p0
     def append_run(module, T, p0, kx, vx, rows=8):
         E = k3.Engine(module=module, grid=k3.resident_grid(module), T=T, limit_us=500_000)
@@ -197,22 +197,22 @@ bit, rows_ok, err = True, True, 0.0
 for n in LENS:
     pos = n - 1
     q1 = torch.randn(H * D, generator=g, device='cuda') * 0.1
-    a = run('k3_q35_swift', 1, pos, q1); b = run('k3_gguf_q35d', 1, pos, q1); c = run('k3_q35_tcap', 1, pos, q1)
+    a = run('dec_q35_swift', 1, pos, q1); b = run('dec_q35_arex', 1, pos, q1); c = run('dec_q35_tcap', 1, pos, q1)
     bit &= torch.equal(a, b) and torch.equal(a, c)
     err = max(err, float(np.abs(a[0].double().cpu().numpy() - ref(q1, pos)).max()))
     for T in (2, 3, 4):
         if n < T: continue
         qT = torch.randn(T * H * D, generator=g, device='cuda') * 0.1
         p0 = n - T
-        aT = run('k3_q35_swift_ver', T, p0, qT); bT = run('k3_gguf_q35d_mt', T, p0, qT)
+        aT = run('dec_q35_swift_ver', T, p0, qT); bT = run('dec_q35_arex_ver', T, p0, qT)
         bit &= torch.equal(aT, bT)
         for r in range(T):
-            rows_ok &= torch.equal(aT[r], run('k3_q35_swift', 1, p0 + r, qT[r * H * D:(r + 1) * H * D].contiguous())[0])
+            rows_ok &= torch.equal(aT[r], run('dec_q35_swift', 1, p0 + r, qT[r * H * D:(r + 1) * H * D].contiguous())[0])
     print(f'  list length {n}: max |own - float64| so far {err:.2e}', flush=True)
-check(bit, f'the own modules\' pair (packed PART at T 2 / 3 / 4) is bitwise k3_gguf_q35d\'s (T 1) and k3_gguf_q35d_mt\'s (unpacked) at list lengths {LENS}')
+check(bit, f'the own modules\' pair (packed PART at T 2 / 3 / 4) is bitwise dec_q35_arex\'s (T 1) and dec_q35_arex_ver\'s (unpacked) at list lengths {LENS}')
 check(rows_ok, 'a T = 2 / 3 / 4 pass\'s rows are bitwise the one-row passes at their positions')
 check(err <= 1e-5 * vmax, f'against float64 attention: max |difference| {err:.2e} <= 1e-5 x max |V| ({vmax:.2f})')
-E = k3.Engine(module='k3_q35_swift', grid=k3.resident_grid('k3_q35_swift'), T=1, limit_us=500_000)
+E = k3.Engine(module='dec_q35_swift', grid=k3.resident_grid('dec_q35_swift'), T=1, limit_us=500_000)
 try:
     q8c = torch.zeros(64 * k3.kv_pos_bytes(NKV * D, True), dtype=torch.uint8, device='cuda')
     E.attn_dec(torch.zeros(H * D, device='cuda'), q8c, torch.zeros(1, dtype=torch.int32, device='cuda'), torch.zeros(H * D, device='cuda'),
@@ -225,7 +225,7 @@ for what, kw in (('T 5', dict(T=5)), ('a QSA selection', dict(T=4, sel=True)), (
     # (a q8_0 cache: the F16 object's own format check refuses it before the packed PART's check is reached)
     want = 'F16 KV cache only' if kw.get('q8') else 'the packed PART'
     try:
-        Ex = k3.Engine(module='k3_q35_swift_ver', grid=k3.resident_grid('k3_q35_swift_ver'), T=kw['T'], limit_us=500_000)
+        Ex = k3.Engine(module='dec_q35_swift_ver', grid=k3.resident_grid('dec_q35_swift_ver'), T=kw['T'], limit_us=500_000)
         T_ = kw['T']; sel = torch.zeros(T_ * k3.QSA_SELW, dtype=torch.int32, device='cuda') if kw.get('sel') else None
         q8 = bool(kw.get('q8'))
         Ex._attn_split(torch.zeros(T_ * H * D, device='cuda'), q8c if q8 else cache, torch.zeros(1, dtype=torch.int32, device='cuda'), sel,
@@ -234,5 +234,5 @@ for what, kw in (('T 5', dict(T=5)), ('a QSA selection', dict(T=4, sel=True)), (
     except ValueError as ex:
         refused = want in str(ex)   # (the expected refusal, not another ValueError on the way)
         if not refused: print(f'  ({what}: a different ValueError: {ex})', flush=True)
-    check(refused, f'k3_q35_swift_ver refuses {what} ({want!r})')
+    check(refused, f'dec_q35_swift_ver refuses {what} ({want!r})')
 print('RESULT', 'PASS' if ok else 'FAIL'); sys.exit(0 if ok else 1)

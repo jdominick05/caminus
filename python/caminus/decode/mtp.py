@@ -16,7 +16,7 @@ expert likewise; hc / router / eh_proj replicated; the head by vocabulary, the t
 - KV f16 without rotation (llama.cpp's draft context: -ctkd default f16, no ctx_other for qwen4exp, so no Hadamard)
 - two engine sets: the catch-up (T = the target's ntok rows: the verified pairs of a round, ending at the bonus token,
   whose row gives draft 1) and the chain (T = 1: draft i + the block's own res -> draft i + 1)
-- the shared expert is BF16: gate / up as BF16 matvecs, the down with the fp32 swiglu LDS stage (k3_gguf_gsq_mtp*,
+- the shared expert is BF16: gate / up as BF16 matvecs, the down with the fp32 swiglu LDS stage (dec_q4x_gsq_mtp*,
   OP_BF16_MV work 2); its split must keep <= 320 columns per card (the LDS stage)
 
 The MTP layer has no recurrent state: its KV rows are rewritten by position, so rollback is a pointer (n_done: the rows
@@ -40,7 +40,7 @@ from .. import config as _config   # noqa: E402
 SIDECAR = _config.mtp()   # the MTP sidecar GGUF (not distributed: CAMINUS_MTP / config.toml; None when unset)
 from ..device.capacity import QSA_EXACT   # noqa: E402  (2051: dense attention == the QSA layer's selection up to here)
 from ..device import capacity   # noqa: E402
-MODULE = 'k3_gguf_gsq_mtp'
+MODULE = 'dec_q4x_gsq_mtp'
 P = 'blk.48'
 
 

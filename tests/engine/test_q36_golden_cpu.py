@@ -1,17 +1,40 @@
-"""CPU cross-check of the qwen35moe (Qwen3.6-35B-A3B) reading for the one-card engine, against llama.cpp's own
-intermediates (tools/reference/q3n_refs.sh's golden_layers with Q3N_LAYERS=0,1,2,3,19,38,39: layers 0 (GDN) and 3 (attention),
-positions 0 .. 7 of the code text), as tests/engine/test_q3n_golden_cpu.py does for qwen35moe. The differences it pins down:
-the fused gated-delta-net op maps value head h to key head h % nk (TILED, ggml-cuda gated_delta_net.cu fastmodulo; the
-qwen3next interleave h // 2 must NOT match), separate ssm_alpha / ssm_beta tensors, the SiLU output gate, top-8 of 256,
-IMRoPE on 64 dims with equal text positions. It checks the reading, not K3. Nothing runs on a GPU; reads only small F32
-tensors of the GGUF.
-usage: HIP_VISIBLE_DEVICES= python -I tests/engine/test_q36_golden_cpu.py GOLDEN_DIR GGUF"""
+"""CPU cross-check of the qwen35moe (Qwen3.6-35B-A3B) reading against llama.cpp's own intermediates (llama.cpp here: the
+ignite-llama fork's libllama that build/gg_golden links): layers 0 (GDN) and 3 (attention) of a gg_golden dump (one token
+per llama_decode, f16 KV, positions 0 .. 7 of tools/reference/q3moe_ref.py's public text), as
+tests/engine/test_q3n_golden_cpu.py does for qwen3next. The differences it pins down: the fused gated-delta-net op maps
+value head h to key head h % nk (TILED, ggml-cuda gated_delta_net.cu fastmodulo; the qwen3next interleave h // 2 must NOT
+match), separate ssm_alpha / ssm_beta tensors, the SiLU output gate, top-8 of 256, IMRoPE on 64 dims with equal text
+positions.
+Then the float64 reference (caminus.ref_q35) against the same dump. The dump must hold layers 0, 1, 2, 3, 19, 38 and 39.
+  - token ids: the own BPE on the text == llama.cpp's
+  - each block from llama.cpp's own input (no drift from the layers before): the FFN on llama.cpp's attn_post_norm, the
+    same 8 experts at every position, the same renormalized weights (|d| < 1e-5), the FFN output's ||d|| / ||llama|| under
+    0.04; the mixer (Gated DeltaNet or attention) of each dumped layer whose previous layer is dumped too, on llama.cpp's
+    previous l_out from a fresh state over the 8 positions: its output's ||d|| / ||ref|| under 0.06
+  - the whole forward on the dump's tokens: the residual after each dumped layer (||ref - llama|| / ||ref|| under the
+    layer's line in RESID), the same top-8 set at 3 of 4 (layer, position) pairs or more with 6 or more in common, the
+    logits (mean KLD(ref || llama) under 0.01, the same top token at 7 of 8 positions or more)
+The lines are about twice what this dump measured on 2026-11-19 (XT, the fork's build-hip-therock): router weights 1.1e-7,
+FFN output 1.8e-2, mixer 3.1e-2 (both llama.cpp's quantized activations), residual drift by layer in RESID, same top-8
+set 51 / 56, KLD 2.0e-3 with 8 / 8. A gross misreading costs 0.1 or more on the drift checks; a subtle one does not:
+sigmoid instead of softmax router weights, or 7 experts instead of 8, stay within the drift lines here and within
+tools/gates/q35_gmodel.py --ref-only's (the 128-position logits form); only the per-block FFN checks catch them (sigmoid:
+weights off by up to 8.5e-2, the output by 7.8e-2; 7 experts: no expert set equal). Nothing runs on a GPU here, but the reference's whole forward reads
+several GB of the file through the page cache (20 s to a few minutes): never run it beside a GPU timing or gate. Its RSS
+(about 8 GB) is mostly the memory-mapped file, not a leak. The reader is caminus.ggufio; gguf-py is not imported.
+The dump (a GPU run, on the card that drives no display):
+  HIP_VISIBLE_DEVICES=N tools/guard.sh LOG 300 build/gg_golden GGUF GOLDEN_DIR "$(python -I -c 'import sys;
+      sys.path[:0] = ["python", "tools/reference"]; from q3moe_ref import TEXT; print(TEXT)')" 8 0,1,2,3,19,38,39 f16
+usage: python -I tests/engine/test_q36_golden_cpu.py GOLDEN_DIR GGUF"""
 import os
 import sys
 import numpy as np
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
-import caminus.engine.flashnext   # noqa: E402,F401  (puts gguf-py on the path)
-from gguf import GGUFReader   # noqa: E402
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [os.path.join(HERE, '..', '..', 'python'), os.path.join(HERE, '..', '..', 'tools', 'reference')]
+from caminus import own_dequant   # noqa: E402
+from caminus.bpe import BPE   # noqa: E402
+from caminus.ref_q35 import Q35Ref   # noqa: E402
+from q3moe_ref import TEXT   # noqa: E402
 
 if len(sys.argv) < 2: raise SystemExit(__doc__)
 G = sys.argv[1]
@@ -40,8 +63,8 @@ def rel(a, b):
     return float(np.abs(a - b).max() / max(1e-30, np.abs(b).max()))
 
 
-rd = GGUFReader(M, 'r'); T = {t.name: t for t in rd.tensors}
-f32 = lambda n: np.asarray(T[n].data, dtype=np.float32)
+ref = Q35Ref(M); F = ref.F
+f32 = lambda n: own_dequant.rows(F.T[n], 0, F.T[n].rows()[0]).reshape(-1)
 S, NK, NV, R = 128, 16, 32, 2
 KU = 8   # experts per token
 TOL = 2e-5
@@ -50,7 +73,7 @@ TOL = 2e-5
 for st in (0, 5):
     cos = get(st, 'conv_output_silu-0'); q = get(st, 'q_conv-0'); k = get(st, 'k_conv-0')
     l2 = lambda x: x / np.sqrt(np.maximum((x.astype(np.float64) ** 2).sum(-1, keepdims=True), 1e-6 ** 2))
-    eps = float(rd.fields['qwen35moe.attention.layer_norm_rms_epsilon'].contents())
+    eps = float(F.hp('attention.layer_norm_rms_epsilon'))
     l2e = lambda x: x / np.maximum(np.sqrt((x.astype(np.float64) ** 2).sum(-1, keepdims=True)), eps)
     qc = cos[:NK * S].reshape(NK, S); kc = cos[NK * S:2 * NK * S].reshape(NK, S); vc = cos[2 * NK * S:].reshape(NV, S)
     e1 = rel(qc, q); e2 = rel(kc, k)
@@ -89,7 +112,7 @@ for st in (0, 5):
     ok(f'step {st}: final = (rms(o) * w) * SiLU(z), not sigmoid(z)', es < 1e-5 and eg > 1e-3, f'(silu {es:.1e}, sigmoid {eg:.1e})')
 
 # ---- attention layer 3 ----
-fb = float(rd.fields['qwen35moe.rope.freq_base'].contents()); nrot = int(rd.fields['qwen35moe.rope.dimension_count'].contents())
+fb = float(F.hp('rope.freq_base')); nrot = int(F.hp('rope.dimension_count'))
 toks = [int(v) for v in open(f'{G}/tokens.txt').read().split()]
 for st in (0, 6):
     qf = get(st, 'Qcur_full-3').reshape(16, 512).astype(np.float64); gt = qf[:, 256:]
@@ -124,5 +147,51 @@ for L in (0, 3):
         ok(f'layer {L} step {st}: l_out = attn_residual + ffn_out', rel(ar + fo, lo) < 1e-6)
         an = get(st, f'attn_post_norm-{L}').astype(np.float64); pw = f32(f'blk.{L}.post_attention_norm.weight').astype(np.float64)
         ok(f'layer {L} step {st}: post_attention_norm = rms(attn_residual) * w', rel(ar / np.sqrt((ar ** 2).mean() + eps) * pw, an) < 1e-5)
+
+# ---- the float64 reference: token ids; each block from llama.cpp's own input; the whole forward ----
+NEED = (0, 1, 2, 3, 19, 38, 39)
+RESID = {0: 0.04, 1: 0.13, 2: 0.10, 3: 0.11, 19: 0.23, 38: 0.14, 39: 0.15}   # (2x measured: 1.8e-2, 6.3e-2, 4.8e-2, 5.4e-2, 0.115, 7.0e-2, 7.6e-2)
+NS = len(toks); mine = BPE(F.meta).encode(TEXT)[:NS]
+ok(f'the dump\'s {NS} tokens are the own BPE\'s ids of the public text (llama.cpp\'s tokenizer == ours)', mine == toks, f'({toks} / {mine})')
+layers = sorted({int(r[2].rsplit('-', 1)[1]) for r in rows if r[2].startswith('l_out-')})
+ok(f'the dump holds layers {list(NEED)} (it has {layers})', set(NEED) <= set(layers) and NS >= 8)
+lay = [L for L in NEED if L in layers]
+ids_same = pairs = 0; werr = ferr = 0.0
+for L in lay:
+    h = np.stack([get(st, f'attn_post_norm-{L}') for st in range(NS)]).astype(np.float64)
+    y, top, w = ref._moe(L, h)
+    for st in range(NS):
+        tk = get(st, f'ffn_moe_topk-{L}').reshape(-1); wn = get(st, f'ffn_moe_weights_norm-{L}').reshape(-1).astype(np.float64)
+        fo = get(st, f'ffn_out-{L}').astype(np.float64); pairs += 1
+        ferr = max(ferr, float(np.linalg.norm(y[st] - fo) / np.linalg.norm(fo)))
+        if len(top[st]) == len(tk) and set(top[st].tolist()) == set(tk.tolist()):
+            ids_same += 1; at = {int(e): i for i, e in enumerate(top[st])}
+            werr = max(werr, float(np.abs(np.array([w[st][at[int(e)]] for e in tk]) - wn).max()))
+ok(f'each FFN on llama.cpp\'s input: the same 8 experts at {ids_same} of {pairs} (layer, position) pairs (all), weights max |d| {werr:.1e} (< 1e-5)',
+   pairs > 0 and ids_same == pairs and werr < 1e-5)
+ok(f'each FFN on llama.cpp\'s input: output max ||d|| / ||llama|| {ferr:.2e} (< 0.04)', ferr < 0.04)
+for L in [L for L in lay if L - 1 in layers]:
+    ref.reset(); x = np.stack([get(st, f'l_out-{L - 1}') for st in range(NS)]).astype(np.float64)
+    hh = ref.rms(x, ref.vec(f'blk.{L}.attn_norm.weight'))
+    mix = ref._gdn(L, hh) if ref.gdn[L] else ref._attn(L, hh, np.arange(NS, dtype=np.float64))
+    e = max(float(np.linalg.norm(mix[st] - (get(st, f'attn_residual-{L}') - x[st])) / np.linalg.norm(mix[st])) for st in range(NS))
+    ok(f'layer {L}: the {"Gated DeltaNet" if ref.gdn[L] else "attention"} block on llama.cpp\'s previous l_out: ||d|| / ||ref|| {e:.2e} (< 0.06)', e < 0.06)
+ref.reset(); tr, ro = [], []; lg = ref.feed(toks, trace=tr, routes=ro)
+same = pairs = 0; worst = 8
+for L in lay:
+    e = max(float(np.linalg.norm(tr[L][st] - get(st, f'l_out-{L}')) / np.linalg.norm(tr[L][st])) for st in range(NS))
+    ok(f'layer {L}: the forward\'s residual vs llama.cpp\'s l_out, max ||d|| / ||ref|| {e:.2e} (< {RESID[L]})', e < RESID[L])
+    for st in range(NS):
+        n = len(set(ro[L][0][st].tolist()) & set(get(st, f'ffn_moe_topk-{L}').reshape(-1).tolist()))
+        same += n == KU; pairs += 1; worst = min(worst, n)
+ok(f'the forward\'s top-8 experts: the same set at {same} of {pairs} (layer, position) pairs (>= 3 / 4), at least {worst} of 8 in common (>= 6)',
+   same * 4 >= pairs * 3 and worst >= 6)
+kl, t1 = [], 0
+for st in range(NS):
+    lr = lg[st] - lg[st].max(); lr -= np.log(np.exp(lr).sum())
+    ll = get(st, 'result_output').astype(np.float64); ll -= ll.max(); ll -= np.log(np.exp(ll).sum())
+    kl.append(float(np.sum(np.exp(lr) * (lr - ll)))); t1 += int(np.argmax(lr) == np.argmax(ll))
+ok(f'logits: mean KLD(ref || llama.cpp) {np.mean(kl):.2e} (< 0.01; max {max(kl):.2e}), the same top token at {t1} of {NS} (>= 7 / 8)',
+   np.mean(kl) < 0.01 and t1 * 8 >= NS * 7)
 print(f'RESULT {sum(RES)} ok, {len(RES) - sum(RES)} FAIL')
 sys.exit(0 if all(RES) else 1)

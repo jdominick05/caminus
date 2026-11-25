@@ -1,4 +1,4 @@
-"""The split attention pair (kernels/k3_attn_split.h: OP_ATTN_PART + OP_ATTN_COMB, caminus.engine.k3.Engine.attn_dec / attn_sel on
+"""The split attention pair (kernels/ops_attn_split.h: OP_ATTN_PART + OP_ATTN_COMB, caminus.engine.k3.Engine.attn_dec / attn_sel on
 the GSQ-RCO Coder's modules) on ONE card (run it on the XT alone: HIP_VISIBLE_DEVICES=1), a TP card's geometry (12 query
 heads over 1 kv head of 256; also 24 over 2, the layer split's):
   (1) vs a float64 reference over the same cell list (dequantized K / V as kv_get): identity lists of every length
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from caminus.engine import k3, qsa
 
-MOD = 'k3_gguf_gsq'
+MOD = 'dec_q4x_gsq'
 D = 256
 RES, MODS = [], set()
 CANARY = -12345.678

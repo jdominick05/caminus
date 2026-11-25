@@ -1,13 +1,13 @@
 """The batched prefill of a one-card qwen35moe engine (caminus.engine.qwen35_one.Qwen35One: Qwen3.6-35B-A3B; the 2-bit GSQ
 checkpoint first): the layer loop of a chunk over the decode tape's own weights and states (Qwen35One.pw: references,
-nothing copied), on the prefill kernels' qwen35moe code objects (prefill_glue_q35, prefill_gdn_q35, prefill_attn_q35,
-prefill_mmq_glue8) and the vendored MMQ. One card: no exchange, no hyper-connections, no PLE, no QSA, no micro-chunks.
+nothing copied), on the prefill kernels' qwen35moe code objects (pf_gg_glue_q35m, pf_gg_gdn_q35, pf_gg_attn_q35m,
+pf_gg_mmq_glue8) and the vendored MMQ. One card: no exchange, no hyper-connections, no PLE, no QSA, no micro-chunks.
 
 Per layer of a chunk of n tokens at positions p .. p + n - 1, the decode tape's ops in its order:
   mixed = rms_mul(res, attn_norm)                         pf_rms_mul at 2048 (OP_RMS_MUL's general loop: bitwise)
   GDN       alpha / beta (BF16: pf_bf16_mv_n4, bitwise OP_BF16_MV), gates (pf_gdn_gates), attn_qkv (MMQ), the conv + its
             state (pf_gdn_conv / pf_conv_state), l2, attn_gate (MMQ), the recurrence (pf_gdn_step: K3's state in place,
-            read once, written once), the output norm with the SiLU gate (prefill_gdn_q35), ssm_out (MMQ)
+            read once, written once), the output norm with the SiLU gate (pf_gg_gdn_q35), ssm_out (MMQ)
   attention attn_q / k / v (MMQ); k: q/k norm + RoPE, Hadamard; v: Hadamard; the q8_0 KV append; q: norm + RoPE,
             Hadamard; the split pair over cells 0 .. pos at any depth (Attn.attend_full: 32-cell splits, 8 query heads per
             kv head, bitwise the decode's), Hadamard, the output gate, attn_output (MMQ)
@@ -87,15 +87,15 @@ class Prefill35(PrefillDriver):
         self._check_formats()
         fmts = sorted({W['fmt'] for L in m.pw for k in self.MMQ_KEYS[L['kind']] + self.ffn_keys for W in [L[k]]} |
                       {L[k]['fmt'] for L in m.pw if L['kind'] == 'gdn' for k in ('al', 'be') if L[k]['fmt'] in mmq.FORMATS_ALL})
-        glue = {2048: 'prefill_glue_q35', 5120: 'prefill_glue_q35d'}.get(D)
-        attn = {8: 'prefill_attn_q35', 6: 'prefill_attn_q35d'}.get(nh // nkv)
+        glue = {2048: 'pf_gg_glue_q35m', 5120: 'pf_gg_glue_q35'}.get(D)
+        attn = {8: 'pf_gg_attn_q35m', 6: 'pf_gg_attn_q35'}.get(nh // nkv)
         if glue is None or attn is None: raise ValueError(f'Prefill35: no prefill objects for n_embd {D} / {nh // nkv} query heads per kv head')
         with torch.cuda.device(dev):
             self.Gl = Glue(dev, module=glue)
-            self.Gd = Gdn(dev, module='prefill_gdn_q35')
+            self.Gd = Gdn(dev, module='pf_gg_gdn_q35')
             self.A = Attn(dev, name=attn)
             self.P = Tp(dev)
-            self.M = mmq.MMQ(dev, formats=fmts, glue='prefill_mmq_glue8')
+            self.M = mmq.MMQ(dev, formats=fmts, glue='pf_gg_mmq_glue8')
         T = self.chunk
         assert nkv * self.A.G == nh, (nkv, self.A.G, nh)
         f32, i32, wd = layout(m, T)

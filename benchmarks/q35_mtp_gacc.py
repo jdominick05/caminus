@@ -11,8 +11,8 @@ The block has no reference mode in the engine yet, so its fp32 forward stands in
 
 Per tensor, on 256 sampled rows x every recorded vector of its site:
   G-acc   |y - y_ref| / rms(y_ref), y_ref the float64 dot of our decoders' rows (bitwise gguf-py's) with the fp32
-          activation; mean and p99 over rows x vectors; own (fp16 activations, kernels/own_quant_q4_0.h on the plane
-          layout) against llama.cpp (ggml-cuda's vec_dot_q4_0_q8_1 on q8_1 activations, kernels/gg_mv_ref.hip). PASS when
+          activation; mean and p99 over rows x vectors; own (fp16 activations, kernels/quant_q4_0.h on the plane
+          layout) against llama.cpp (ggml-cuda's vec_dot_q4_0_q8_1 on q8_1 activations, kernels/ref_gg_mv.hip). PASS when
           own's mean and p99 are both at most llama.cpp's.
   G-self  4 tokens in one launch (nt = 4) equal 4 one-token launches, bit for bit, on every row.
   speed   cold: copies of the tensor rotated past the Infinity Cache (at least 512 MiB); median us per matvec over
@@ -21,7 +21,7 @@ Per tensor, on 256 sampled rows x every recorded vector of its site:
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>). Prints PASS / FAIL and RESULT."""
 import argparse, ctypes, gc, os, sys, time
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-sys.path.insert(0, os.path.join(ROOT, 'python'))
+sys.path.insert(0, os.path.join(ROOT, 'python')); sys.path.insert(0, os.path.join(ROOT, 'tools', 'gates'))
 import numpy as np
 import torch
 from caminus import ggufio, own_dequant
@@ -29,6 +29,7 @@ from caminus.bpe import BPE
 from caminus.device import capacity
 from caminus.device.hip import Module
 from caminus.engine.own_layout import q4_0_planes
+import gacc  # noqa: E402  (tools/gates/gacc.py: G-acc's shared pieces)
 from caminus.engine.q35_dense import Dense35Own
 
 ap = argparse.ArgumentParser()
@@ -144,13 +145,11 @@ DEV = eng.dev
 del B, blk, ch, REC, H, eng; gc.collect(); torch.cuda.empty_cache()   # (the trunk's weights go: the timing copies need the room)
 
 # ---- 2. per tensor: G-acc, G-self, speed -------------------------------------------------------------------------------
-OWN = Module('own_mv_q35'); GG = Module('gg_mv_ref'); RD = Module('own_mv')   # (own_read: the plain read)
+OWN = Module('bench_own_mv_q35'); GG = Module('ref_gg_mv'); RD = Module('bench_own_mv')   # (own_read: the plain read)
 sink = torch.zeros(1, dtype=torch.int32, device=dev)
 
 
-def q8_1(x32):
-    K = x32.numel(); y = torch.zeros(K // 32 * 36, dtype=torch.uint8, device=dev)
-    GG.gg_ref_quantize_q8_1(((K + 255) // 256,), (256,), x32, y, ctypes.c_int(K)); return y
+def q8_1(x32): return gacc.ref_q8_1(GG, x32)
 
 
 def run_own(w, rows, K, x16, out, nt):
@@ -161,9 +160,7 @@ def run_llama(w, rows, K, yq, out):
     GG.gg_ref_mv_q4_0(((rows + 3) // 4,), (32, 4), w, yq, out, ctypes.c_int(rows), ctypes.c_int(K))
 
 
-def run_read(w):
-    n16 = w.numel() // 16
-    RD.own_read((min(4096, (n16 + 255) // 256),), (256,), w, ctypes.c_long(n16), sink)
+def run_read(w): gacc.own_read(RD, w, sink)
 
 
 rows_tab = []
@@ -180,16 +177,16 @@ for key, name in Q4.items():
     assert xs.shape[1] == K, (name, xs.shape, K)
     srows = np.sort(rng.choice(rows, min(256, rows), replace=False))
     W64 = own_dequant.dequant(raw.reshape(rows, -1)[srows].reshape(-1), 'Q4_0', len(srows) * K).astype(np.float64).reshape(len(srows), K)
-    e_own, e_ll = [], []
+    Yref = W64 @ xs.double().numpy().T                # [rows sampled, vectors]
+    y_own, y_ll = np.empty_like(Yref), np.empty_like(Yref)
     out = torch.zeros(4 * rows, dtype=torch.float32, device=dev)
-    for x in xs:
-        yref = W64 @ x.double().numpy(); sc = np.sqrt((yref ** 2).mean())
+    for v, x in enumerate(xs):
         x32 = x.to(dev).contiguous()
         out.zero_(); run_own(Wo[0], rows, K, x32.half(), out, 1); torch.cuda.synchronize()
-        e_own.append(np.abs(out[:rows].double().cpu().numpy()[srows] - yref) / sc)
+        y_own[:, v] = out[:rows].double().cpu().numpy()[srows]
         out.zero_(); run_llama(Wl[0], rows, K, q8_1(x32), out); torch.cuda.synchronize()
-        e_ll.append(np.abs(out[:rows].double().cpu().numpy()[srows] - yref) / sc)
-    e_own, e_ll = np.concatenate(e_own), np.concatenate(e_ll)
+        y_ll[:, v] = out[:rows].double().cpu().numpy()[srows]
+    (e_own, _), (e_ll, _) = gacc.rel_errors(Yref, y_own), gacc.rel_errors(Yref, y_ll)
     mo, po, ml, pll = e_own.mean(), np.percentile(e_own, 99), e_ll.mean(), np.percentile(e_ll, 99)
     acc_ok = mo <= ml and po <= pll
     # G-self: nt 4 in one launch vs 4 launches of nt 1, bitwise, every row

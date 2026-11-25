@@ -51,7 +51,7 @@ for name, (bs, rs, hs) in sorted(own_layout.IQ_REC.items()):   # the kernels' re
     ok = (rec.size == raw.size + own_layout.IQ_PAD and np.array_equal(own_layout.iq_from_records(rec, 6, 768, name), raw)
           and np.array_equal(np.sort(rec[:raw.size]), np.sort(raw))); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name}: the record layout holds the blocks\' bytes and inverts')
-for rows, K in ((6, 5120), (3, 96)):   # Q4_0 planes (kernels/own_quant_q4_0.h): codes | d, as the tile decodes them, and back
+for rows, K in ((6, 5120), (3, 96)):   # Q4_0 planes (kernels/quant_q4_0.h): codes | d, as the tile decodes them, and back
     raw = rng.integers(0, 256, rows * (K // 32) * 18, dtype=np.uint8)
     pl = own_layout.q4_0_planes(raw, rows, K)
     u = pl[:rows * K // 32 * 16].reshape(rows, K // 32, 16); dd = pl[rows * K // 32 * 16:].view(np.float16).reshape(rows, K // 32)
@@ -95,10 +95,10 @@ tabs = [('KVALUES_IQ4', iq_tables.KVALUES_IQ4, np.array(quants.IQ4_NL.kvalues)),
 for name, ours, ref in tabs:
     ok = ours.shape == ref.shape and np.array_equal(ours.astype(np.float64), ref.astype(np.float64)); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' {name} equals the table of gguf-py')
-hdr = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'kernels', 'iq_grids.h')
+hdr = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'kernels', 'quant_grid_iq.h')
 ok = open(hdr).read() == iq_tables.c_header(); bad += not ok
-print(('PASS' if ok else 'FAIL') + ' kernels/iq_grids.h is the tables\' own header (iq_tables.c_header)')
-for fn, gen in (('iq2xs_grid.h', iq_tables.c_header_iq2xs), ('iq1_grid.h', iq_tables.c_header_iq1)):
+print(('PASS' if ok else 'FAIL') + ' kernels/quant_grid_iq.h is the tables\' own header (iq_tables.c_header)')
+for fn, gen in (('quant_grid_iq2xs.h', iq_tables.c_header_iq2xs), ('quant_grid_iq1.h', iq_tables.c_header_iq1)):
     ok = open(os.path.join(os.path.dirname(hdr), fn)).read() == gen(); bad += not ok
     print(('PASS' if ok else 'FAIL') + f' kernels/{fn} is the tables\' own header (iq_tables.{gen.__name__})')
 from caminus.engine.own_layout import iq_records, iq_from_records, q2k_records, q2k_from_records, iq1m_records
@@ -113,8 +113,8 @@ s16 = raw.reshape(2, 56)[:, 48:56].copy().view(np.uint16).reshape(2, 4)
 dref = ((s16[:, 0] >> 12) | ((s16[:, 1] >> 8) & 0xF0) | ((s16[:, 2] >> 4) & 0xF00) | (s16[:, 3] & 0xF000)).astype(np.uint16)
 ok = np.array_equal(rec[2 * 8 * 8:2 * 8 * 8 + 4].view(np.uint16), dref); bad += not ok
 print(('PASS' if ok else 'FAIL') + ' IQ1_M: the record header holds the reassembled d')
-ok = open(os.path.join(os.path.dirname(hdr), 'iq2s_grid.h')).read() == iq_tables.c_header_iq2s(); bad += not ok
-print(('PASS' if ok else 'FAIL') + ' kernels/iq2s_grid.h is the tables\' own packed IQ2_S header (iq_tables.c_header_iq2s)')
+ok = open(os.path.join(os.path.dirname(hdr), 'quant_grid_iq2s.h')).read() == iq_tables.c_header_iq2s(); bad += not ok
+print(('PASS' if ok else 'FAIL') + ' kernels/quant_grid_iq2s.h is the tables\' own packed IQ2_S header (iq_tables.c_header_iq2s)')
 if A.gguf is None:
     print('RESULT', 'PASS' if bad == 0 else 'FAIL'); sys.exit(1 if bad else 0)
 F = ggufio.GGUFFile(A.gguf)

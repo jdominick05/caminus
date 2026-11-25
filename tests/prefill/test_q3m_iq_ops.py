@@ -1,4 +1,4 @@
-"""kernels/q3m_prefill_iq.hip (the IQ study's prefill object: the codebook formats' quantized GEMMs, docs/dev/iq-quant-study.md)
+"""kernels/pf_q3m_iq.hip (the IQ study's prefill object: the codebook formats' quantized GEMMs, docs/dev/iq-quant-study.md)
 against float64 on an arm file's real expert rows and random activations; one card.
 
   per (expert role, format) in the file, at the first layer that has it:

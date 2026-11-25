@@ -2,11 +2,11 @@
 caminus.prefill.q3m_tp.Q3MPrefillTP and the 'qwen3moe-tp' registry entry), on stand-ins for the torch.cuda and HIP calls
 (every tensor in host memory; nothing is launched), with the tiny synthetic file with two-card shapes (tests/engine/tiny_q3m.py
 tp=True: 4 kv heads, 2 per card).
-  - the module tables: k3_q3m_lean_tp_kvq8 is k3_q3m_lean_tp's Q8 build (Q3M_KV_Q8_BASE) and k3_q3m_lean_kvq8's two-card
+  - the module tables: dec_q3m_tp_kvq8 is dec_q3m_tp's Q8 build (Q3M_KV_Q8_BASE) and dec_q3m_kvq8's two-card
     form (Q3M_TP_OF): the two-card modules' ops whitelist and (op, format) pairs, 128 attention splits, an error word after
     Sync on its Engine; not a lean (one-card) module; in the installed runtime set (served: caminus serve --cards 2 --kv q8); its kernels/*.hip file defines the
     Q8 switch and the add_rms16 pin over the two-card module and nothing else
-  - the engine: k3_q3m_lean_tp_kvq8 on both cards, each card's caches uint8 (max_ctx + ATS_PAD) rows of its 2 kv heads'
+  - the engine: dec_q3m_tp_kvq8 on both cards, each card's caches uint8 (max_ctx + ATS_PAD) rows of its 2 kv heads'
     Q8 row (544 bytes), the prompt cache's state views max_ctx rows of bytes, every OP_OWN_ATTS segment on its layer's cache
     of that card, both tapes the F16 engine's ops in order; kv_format_id = the one-card engine's KV_FORMAT_Q8; the
     projection counts Q8 rows (the engine's own check, and the F16 projection less exactly the row bytes saved per card);
@@ -18,8 +18,8 @@ tp=True: 4 kv heads, 2 per card).
     card (9 words on a Q8 engine, 8 on F16): _pass_wait raises InvalidKVEncoding before the bail path (no bail recorded,
     the words not cleared), the engine stays broken across reset() and refuses every pass with that class; non-finite
     logits still mark it with NonFiniteLogits
-  - the prefill on a Q8 engine: each card's Ops with q8 (q3m_prefill_kvq8 beside q3m_prefill), qk_rope / attn launched as
-    q3p_qk_rope_q8 (with that card's KV error word) / q3p_attn_q8 over 2 kv heads, no F16 row or attention kernel, rows
+  - the prefill on a Q8 engine: each card's Ops with q8 (pf_q3m_kvq8 beside pf_q3m), qk_rope / attn launched as
+    q3p_qk_rope_q8 (with that card's KV error word) / q3mp_attn_q8 over 2 kv heads, no F16 row or attention kernel, rows
     checked against the byte caches; numerics() names the cache (F16: unchanged); either card's error word set: the
     settle raises InvalidKVEncoding before the routing flags, the engine is broken, the next chunk is refused
   - the prompt cache: the checkpoint layout's row on each card is that card's Q8 row; the engine key carries the KV format
@@ -119,8 +119,9 @@ class Rec:
 
 class FakeOps(q3m_ops.Ops):
     """q3m_ops.Ops with its code objects recorders (its launch wrappers' host checks run)"""
-    def __init__(self, dev, module='q3m_prefill', q8=False, yarn=False):
+    def __init__(self, dev, module='pf_q3m', q8=False, yarn=False, wide=None):
         self.dev, self.module, self.q8, self.yarn = torch.device(dev), module, bool(q8), bool(yarn)
+        self.wide = self.gu = bool(wide)   # (the two-card prefill passes False: the narrow tiles)
         card = int(str(dev).split(':')[1])
         self.mod = Rec(card, module); self.kvmod = Rec(card, q3m_ops.KVQ8_MODULE) if self.q8 else None
         self.ropemod = Rec(card, q3m_ops.YARN_MODULE[self.q8]) if self.yarn else (self.kvmod if self.q8 else self.mod)
@@ -144,24 +145,25 @@ q3m_tp.q3m_ops.Ops = FakeOps; q3m_tp.SlotSum = FakeSlotSum; q3m_tp.Exchange = Fa
 capacity.check = lambda *a, **k: None
 
 # ---- the module tables -------------------------------------------------------------------------------------------------------
-TPQ = 'k3_q3m_lean_tp_kvq8'
-check(k3.Q3M_KV_Q8_BASE == {'k3_q3m_lean_kvq8': 'k3_q3m_lean', TPQ: 'k3_q3m_lean_tp',     # (+ their YaRN builds: test_q3moe_yarn_cpu.py)
-                           'k3_q3m_lean_kvq8_yarn': 'k3_q3m_lean_yarn', TPQ + '_yarn': 'k3_q3m_lean_tp_yarn'}
-      and k3.Q3M_KV_Q8_OF['k3_q3m_lean_tp'] == TPQ and k3.Q3M_TP_OF['k3_q3m_lean_kvq8'] == TPQ
+TPQ = 'dec_q3m_tp_kvq8'
+check(k3.Q3M_KV_Q8_BASE == {'dec_q3m_kvq8': 'dec_q3m', TPQ: 'dec_q3m_tp',     # (+ their YaRN builds: test_q3moe_yarn_cpu.py)
+                           'dec_q3m_kvq8_yarn': 'dec_q3m_yarn', TPQ + '_yarn': 'dec_q3m_tp_yarn'}
+      and k3.Q3M_KV_Q8_OF['dec_q3m_tp'] == TPQ and k3.Q3M_TP_OF['dec_q3m_kvq8'] == TPQ
       and TPQ in k3.Q3M_TP_MODULES and TPQ in k3.Q3M_KV_Q8_MODULES and TPQ in k3.Q3M_MODULES and TPQ not in k3.Q3M_LEAN_MODULES
-      and k3.MODULE_CAPS[TPQ] == k3.MODULE_CAPS['k3_q3m_lean_tp'] and k3.atts_max_splits(TPQ) == 128,
-      f'{TPQ}: k3_q3m_lean_tp\'s Q8 build and k3_q3m_lean_kvq8\'s two-card form: the two-card ops and pairs, 128 attention splits, '
+      and k3.MODULE_CAPS[TPQ] == k3.MODULE_CAPS['dec_q3m_tp'] and k3.atts_max_splits(TPQ) == 128,
+      f'{TPQ}: dec_q3m_tp\'s Q8 build and dec_q3m_kvq8\'s two-card form: the two-card ops and pairs, 128 attention splits, '
       f'not a one-card lean module')
-check(TPQ in kernels.RUNTIME_SET and 'k3_q3m_lean_kvq8' in kernels.RUNTIME_SET and 'q3m_prefill_kvq8' in kernels.RUNTIME_SET
-      and 'k3_q3m_lean_tp' in kernels.RUNTIME_SET,
-      'in the installed runtime set with the one-card Q8 module and q3m_prefill_kvq8 (served: --cards 2 --kv q8); the F16 two-card '
+check(TPQ in kernels.RUNTIME_SET and 'dec_q3m_kvq8' in kernels.RUNTIME_SET and 'pf_q3m_kvq8' in kernels.RUNTIME_SET
+      and 'dec_q3m_tp' in kernels.RUNTIME_SET,
+      'in the installed runtime set with the one-card Q8 module and pf_q3m_kvq8 (served: --cards 2 --kv q8); the F16 two-card '
       'module stays in it')
-src = [ln.strip() for ln in open(os.path.join(ROOT, 'kernels', TPQ + '.hip')) if ln.strip() and not ln.strip().startswith('//')]
-check(src == ['#define K3_Q3M_KV_Q8', '#define K3_Q3M_ADD_RMS_PIN', '#include "k3_q3m_lean_tp.hip"'],
-      f'kernels/{TPQ}.hip: the Q8 switch and the add_rms16 pin over the two-card module, nothing else')
+sys.path.append(os.path.join(ROOT, 'tools'))   # (after python/: tools/caminus.py would shadow the package)
+from own_closure import rows   # noqa: E402
+check(rows().get(TPQ) == ('dec_q3m_tp', [('K3_Q3M_KV_Q8', ''), ('K3_Q3M_ADD_RMS_PIN', '')]),
+      f'kernels/objects.tsv {TPQ}: the Q8 switch and the add_rms16 pin over the two-card module, nothing else')
 E = k3.Engine(module=TPQ, grid=8, T=1)
 check(E.sync.numel() == k3.SYNC_WORDS + 1 and E.kv_error is not None and E.kv_error.data_ptr() == E.sync.data_ptr() + 4 * k3.SYNC_WORDS
-      and E.status_words().numel() == k3.STATUS_WORDS + 1 and k3.Engine(module='k3_q3m_lean_tp', grid=8).kv_error is None,
+      and E.status_words().numel() == k3.STATUS_WORDS + 1 and k3.Engine(module='dec_q3m_tp', grid=8).kv_error is None,
       'its Engine: one int32 error word after Sync, in the status words\' one copy (the F16 two-card Engine has none)')
 
 # ---- the engine on the tiny file ------------------------------------------------------------------------------------------------
@@ -170,7 +172,7 @@ MC = 64
 m = Q3MoETP(P, devices=(0, 1), max_ctx=MC, vram_check=False, q8=True)
 f = Q3MoETP(P, devices=(0, 1), max_ctx=MC, vram_check=False)
 rb = [k3.kv_pos_bytes(k * m.hd, True) for k in m.kvc]
-check(m.module == TPQ and all(e.module == TPQ for e in m.E) and f.module == 'k3_q3m_lean_tp' and m.kv_format_id == q3moe_one.KV_FORMAT_Q8
+check(m.module == TPQ and all(e.module == TPQ for e in m.E) and f.module == 'dec_q3m_tp' and m.kv_format_id == q3moe_one.KV_FORMAT_Q8
       and not hasattr(f, 'kv_format_id') and m.kvc == [2, 2] and rb == [544, 544],
       f'Q3MoETP(q8=True) decodes on {TPQ} on both cards with kv_format_id {m.kv_format_id!r} (the one-card format); 2 kv heads per '
       f'card: a {rb[0]}-byte Q8 row (F16 1,024)')
@@ -193,19 +195,19 @@ check(all(abs(a - b) < 1e-9 for a, b in zip(m.vram_mib, pq_)) and all(abs(a - b 
 
 # ---- refusals ---------------------------------------------------------------------------------------------------------------------
 mk = lambda **kw: Q3MoETP(P, devices=(0, 1), max_ctx=MC, vram_check=False, **kw)
-check(raises(lambda: mk(q8=1)) and raises(lambda: mk(q8=True, module='k3_q3m_lean')) and raises(lambda: mk(q8=True, module='k3_q3m_lean_tp'))
-      and raises(lambda: mk(q8=True, module='k3_q3m_lean_trace')) and raises(lambda: mk(module=TPQ)) and raises(lambda: mk(module='k3_q3m_lean_kvq8'))
-      and mk(q8=True, module='k3_q3m_lean_kvq8').module == TPQ and mk(q8=True, module=TPQ).module == TPQ,
+check(raises(lambda: mk(q8=1)) and raises(lambda: mk(q8=True, module='dec_q3m')) and raises(lambda: mk(q8=True, module='dec_q3m_tp'))
+      and raises(lambda: mk(q8=True, module='dec_q3m_trace')) and raises(lambda: mk(module=TPQ)) and raises(lambda: mk(module='dec_q3m_kvq8'))
+      and mk(q8=True, module='dec_q3m_kvq8').module == TPQ and mk(q8=True, module=TPQ).module == TPQ,
       'refused: q8 not a bool, q8 on the F16 two-card module (either name) or the _trace build, the Q8 module (either name) '
       'without q8; q8 with the Q8 module named (either name) runs it')
 P1 = os.path.join(A.scratch, 'tiny-q3m.gguf'); tiny_q3m.write(P1)
 mo = Q3MoEOne(P1, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True)
 mo._module = TPQ   # (the one-card probe's switch: tests/engine/test_q3m_tp_probe.py --kv q8 replays the tape on it)
 check(raises(lambda: Q3MoEOne(P1, max_ctx=MC, vram_check=False, link_keepalive=False, module=TPQ)) and mo.module == TPQ
-      and raises(lambda: Q3MoEOne(P1, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, module='k3_q3m_lean_tp')),
+      and raises(lambda: Q3MoEOne(P1, max_ctx=MC, vram_check=False, link_keepalive=False, q8=True, module='dec_q3m_tp')),
       'the one-card engine refuses the two-card Q8 module without q8 (and the F16 two-card module with q8); with q8 it takes it '
       'only when set by name (the one-card probe)')
-E2, Ef = k3.Engine(module=TPQ, grid=8), k3.Engine(module='k3_q3m_lean_tp', grid=8)
+E2, Ef = k3.Engine(module=TPQ, grid=8), k3.Engine(module='dec_q3m_tp', grid=8)
 B = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt)
 M2 = 2 * 128
 args = lambda cache: (B(16 * 128 + 2 * M2), B(k3.Engine.atts_scratch_floats(2, 100)), B(258), cache, B(1, torch.int32),
@@ -247,21 +249,21 @@ check(mn._broken_error is errors.NonFiniteLogits and raises(lambda: mn.step_toke
 mp = mk(q8=True)
 pf = q3m_tp.Q3MPrefillTP(mp, chunk=64, check=False)
 pff = q3m_tp.Q3MPrefillTP(mk(), chunk=64, check=False)
-check(pf.q8 and all(o.q8 and o.module == 'q3m_prefill' and o.kvmod.name == 'q3m_prefill_kvq8' for o in pf.O)
+check(pf.q8 and all(o.q8 and o.module == 'pf_q3m' and o.kvmod.name == 'pf_q3m_kvq8' for o in pf.O)
       and pf.numerics().get('kv') == 'q8_0' and 'kv' not in pff.numerics() and not any(o.q8 for o in pff.O)
       and all('kverr' in b for b in pf.B),
-      'Q3MPrefillTP on a Q8 engine: each card\'s ops on q3m_prefill with q3m_prefill_kvq8 for the rows and attention, a KV error '
+      'Q3MPrefillTP on a Q8 engine: each card\'s ops on pf_q3m with pf_q3m_kvq8 for the rows and attention, a KV error '
       'word per card; numerics name the cache (the F16 prefill\'s unchanged)')
 LOG.clear()
 seq = list(range(1, 41))
 pf._chunk(seq, 0, 40)
-rope = [e for e in LOG if e[2].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[2].startswith('q3p_attn')]
-check(rope and all(e[1] == 'q3m_prefill_kvq8' and e[2] == 'q3p_qk_rope_q8' and e[4][-1] is pf.B[e[0]]['kverr'] and e[3][1] == 16 + 2 for e in rope)
-      and att and all(e[1] == 'q3m_prefill_kvq8' and e[2] == 'q3p_attn_q8' and e[3][1] == 2 for e in att)
-      and sorted(e[0] for e in rope) == [0] * mp.nl + [1] * mp.nl and not any(e[2] in ('q3p_qk_rope', 'q3p_attn') for e in LOG)
+rope = [e for e in LOG if e[2].startswith('q3p_qk_rope')]; att = [e for e in LOG if e[2].startswith('q3mp_attn')]
+check(rope and all(e[1] == 'pf_q3m_kvq8' and e[2] == 'q3p_qk_rope_q8' and e[4][-1] is pf.B[e[0]]['kverr'] and e[3][1] == 16 + 2 for e in rope)
+      and att and all(e[1] == 'pf_q3m_kvq8' and e[2] == 'q3mp_attn_q8' and e[3][1] == 2 for e in att)
+      and sorted(e[0] for e in rope) == [0] * mp.nl + [1] * mp.nl and not any(e[2] in ('q3p_qk_rope', 'q3mp_attn') for e in LOG)
       and all(e[4][7] is mp.L[il][e[0]]['cache'] for il, e in zip([i for i in range(mp.nl) for _ in (0, 1)], rope)),
       f'a chunk: {len(rope)} q3p_qk_rope_q8 (16 + 2 heads, the card\'s own KV error word, its layer\'s byte cache) and {len(att)} '
-      f'q3p_attn_q8 (2 kv heads) launches; no F16 row or attention kernel')
+      f'q3mp_attn_q8 (2 kv heads) launches; no F16 row or attention kernel')
 pf.B[1]['kverr'].fill_(2); pf.B[0]['err'].fill_(1)   # (a routing flag too: the KV word is read first)
 check(raises(pf._run_settle, errors.InvalidKVEncoding) and mp.broken and mp._broken_error is errors.InvalidKVEncoding and 'card 1' in mp.broken
       and int(pf.B[0]['err'].item()) == 1 and raises(lambda: pf._chunk(seq, 0, 40), errors.InvalidKVEncoding),
@@ -275,7 +277,7 @@ check(Lq.pb == rb and Lf.pb == [4 * k * m.hd for k in m.kvc] and Lq.kv_rows == M
       f'checkpoint layout per card: a Q8 row of {rb[0]} B per layer (F16 {Lf.pb[0]} B), no recurrent state')
 pfk = NS(numerics=lambda: dict(q='x'), crossover=8)
 kq, kf_ = prompt.engine_key(m, pfk, build='fixture'), prompt.engine_key(f, pfk, build='fixture')
-check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and kq['module'] == TPQ and kf_['module'] == 'k3_q3m_lean_tp'
+check(kq['tp'].get('kv') == q3moe_one.KV_FORMAT_Q8 and kq['module'] == TPQ and kf_['module'] == 'dec_q3m_tp'
       and set(kf_['tp']) == {'devices', 'names', 'gdn_keys', 'moe_blocks', 'vocab_share', 'ntok', 'local_only', 'exp_rows', 'kv_heads', 'vocab_rows'}
       and prompt.key_hash(kq) != prompt.key_hash(kf_),
       'engine key: the Q8 engine\'s carries its KV format and module; the F16 two-card key\'s tp entries are the ones it had (no kv), '
@@ -352,13 +354,13 @@ finally:
 check(q8_seen is True and f16_seen is False, f"qwen3moe-tp build passes q8 to the engine ({q8_seen} with kv q8, {f16_seen} without)")
 bad = []
 for name, a in arch.ARCHS.items():
-    if name in ('qwen3moe', 'qwen3moe-tp'): continue
+    if name in ('qwen3moe', 'qwen3moe-tp', 'qwen35moe-own'): continue   # (the own MoE line has its own Q8 object)
     for what, fn in (('build', lambda: a.build({'kv': 'q8'})), ('auto_need', lambda: a.auto_need({'kv': 'q8'}, 4))):
         try: fn(); bad.append((name, what, 'no error'))
         except ValueError as e:
             if "kv 'q8'" not in str(e): bad.append((name, what, str(e)[:80]))
         except Exception as e: bad.append((name, what, type(e).__name__ + ' ' + str(e)[:80]))
-check(not bad, f"every other registry entry ({len(arch.ARCHS) - 2}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything"
+check(not bad, f"every other registry entry ({len(arch.ARCHS) - 3}) refuses opt['kv'] = 'q8' in build and auto_need before reading anything"
       + (f' (wrong: {bad})' if bad else ''))
 
 print('RESULT', 'PASS' if ok else 'FAIL')

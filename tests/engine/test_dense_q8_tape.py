@@ -38,9 +38,9 @@ class DenseQ8Tape(unittest.TestCase):
         self.stack.enter_context(patch.object(torch.Tensor, 'cuda', lambda t: t))
         self.launch = Mock(return_value=0)
         self.stack.enter_context(patch.object(hip, 'hip', return_value=NS(hipModuleLaunchKernel=self.launch)))
-        self.module = self.stack.enter_context(patch.object(k3, '_m', return_value=NS(k3_run=NS(fn=123, lds_bytes=lambda: 1024))))
+        self.module = self.stack.enter_context(patch.object(k3, '_m', return_value=NS(k3_run=NS(fn=123, lds_bytes=lambda: 1024, vgprs=lambda: 96))))
 
-    def engine(self, module='k3_q35_swift_kvq8', T=1):
+    def engine(self, module='dec_q35_swift_kvq8', T=1):
         return k3.Engine(module=module, T=T, grid=2)
 
     def buffers(self, E, M=256, rows=37):
@@ -52,7 +52,7 @@ class DenseQ8Tape(unittest.TestCase):
         return E.kv_append(**b, q8=True)
 
     def test_five_specializations_keep_their_weight_and_execution_families(self):
-        bases = ('k3_q35_swift', 'k3_q35_swift_ver', 'k3_q35_tcap', 'k3_q35_tcap_ver', 'k3_q35_gsq')
+        bases = ('dec_q35_swift', 'dec_q35_swift_ver', 'dec_q35_tcap', 'dec_q35_tcap_ver', 'dec_q35_gsq')
         self.assertEqual(k3.Q35_KV_Q8_BASE, {base + '_kvq8': base for base in bases})
         for new, base in k3.Q35_KV_Q8_BASE.items():
             with self.subTest(module=new):
@@ -82,7 +82,7 @@ class DenseQ8Tape(unittest.TestCase):
                         self.engine(module, T)
                     alloc.assert_not_called()
         with self.assertRaises(ValueError):
-            k3.Engine(module='k3_q35_swift_kvq8', grid=2, teams=[2])
+            k3.Engine(module='dec_q35_swift_kvq8', grid=2, teams=[2])
 
     def test_extra_error_word_does_not_move_any_sync_status_field(self):
         for module in k3.Q35_KV_Q8_MODULES:
@@ -92,7 +92,7 @@ class DenseQ8Tape(unittest.TestCase):
             E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + k3.STATUS_WORDS] = torch.arange(1, 9, dtype=torch.int32)
             E.kv_error.fill_(2)
             self.assertEqual(E.sync[2 * k3.MAXSEG:2 * k3.MAXSEG + 8].tolist(), list(range(1, 9)))
-        legacy = self.engine('k3_q35_swift')
+        legacy = self.engine('dec_q35_swift')
         self.assertEqual(legacy.sync.numel(), k3.SYNC_WORDS)
         self.assertIsNone(legacy.kv_error)
 
@@ -113,7 +113,7 @@ class DenseQ8Tape(unittest.TestCase):
                     self.assertEqual(E.tape.numel(), len(E.segs) * k3.ctypes.sizeof(k3.Seg))
 
     def test_q8_verify_attention_is_unpacked_for_every_pass_row(self):
-        for module in ('k3_q35_swift_ver_kvq8', 'k3_q35_tcap_ver_kvq8'):
+        for module in ('dec_q35_swift_ver_kvq8', 'dec_q35_tcap_ver_kvq8'):
             for T in (1, 2, 3, 4):
                 with self.subTest(module=module, T=T):
                     E = self.engine(module, T)
@@ -166,7 +166,7 @@ class DenseQ8Tape(unittest.TestCase):
             self.assertEqual(E.segs, [])
             self.assertEqual(E.keep, [])
             self.assertEqual(E.guard_caps, {})
-        E4 = self.engine('k3_q35_swift_ver_kvq8', 4)
+        E4 = self.engine('dec_q35_swift_ver_kvq8', 4)
         with self.assertRaises(ValueError):
             self.append(E4, dict(self.buffers(E4), k=torch.zeros(1025)))
         for M in (2 ** 31, 2 ** 32):
@@ -247,12 +247,12 @@ class DenseQ8Tape(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'a wait gave up'):
             E.run(check=True)
         self.assertFalse(E.sync.any())
-        self.assertIsNone(self.engine('k3_q35_swift').check_kv_error())
+        self.assertIsNone(self.engine('dec_q35_swift').check_kv_error())
 
     def test_residency_uses_q8_compiled_metadata_and_refuses_excess_grid(self):
-        module = 'k3_q35_tcap_ver_kvq8'
+        module = 'dec_q35_tcap_ver_kvq8'
         lds = 20 * 1024
-        self.module.return_value = NS(k3_run=NS(lds_bytes=lambda: lds))
+        self.module.return_value = NS(k3_run=NS(lds_bytes=lambda: lds, vgprs=lambda: 96))
         with patch.object(torch.cuda, 'is_available', return_value=True), patch.object(k3, '_RESIDENT_OK', set()):
             self.assertEqual(k3.resident_grid(module, 6), 12)
             with self.assertRaises(ValueError):

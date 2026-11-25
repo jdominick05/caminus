@@ -1,7 +1,8 @@
 # benchmarks/
 
 Speed measurements, not gates: decode (`fn_bench.py`, `q3n_bench.py`, `fn_soak.py`), the prefill feed and the TP link
-(`prefill_*_bench.py`), the split attention pair (`attn_bench.py`), the dense qwen35 line's attention at depth and prefill GEMMs /
+(`prefill_*_bench.py`), the split attention pair (`attn_bench.py`; `--new` times it against the standalone qwen35moe decode attention kernel
+at 4K / 32K / 128K, `--kv q8`, `--cold`), the dense qwen35 line's attention at depth and prefill GEMMs /
 attention next to outside yardsticks (`attn_depth.py`, `q35_prefill_gemm.py`, `q35_prefill_attn.py`, `rocke_attn.py`; results and the
 yardsticks' versions in docs/dev/yardsticks.md), where a token's time goes (`fn_profile.py`, `k3_trace.py`),
 and the engine cost model's microbenchmarks (`bench_*.py`, `bench_link.hip`). Served A/Bs run `caminus serve` once per arm:

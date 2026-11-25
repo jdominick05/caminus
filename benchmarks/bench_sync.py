@@ -1,4 +1,4 @@
-"""K3 engine cost model, part 1 (kernels/sync_bench.hip): microseconds per stage handoff in a persistent kernel on this
+"""K3 engine cost model, part 1 (kernels/bench_sync.hip): microseconds per stage handoff in a persistent kernel on this
 card, for claim/done (the engine's sync; safe under partial residency) vs an arrival barrier (needs a co-resident grid)
 vs one launch per stage; by blocks per WGP and threads per block, with empty stages and with a little work per task.
 Also checks the err flag (a wait that gave up) stays 0.
@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import torch
 from caminus.device.hip import Module
 
-m = Module('sync_bench')
+m = Module('bench_sync')
 props = torch.cuda.get_device_properties(0)
 wgps = props.multi_processor_count   # HIP reports WGPs here on gfx11 (WGP mode): 48 on the XTX = 96 CUs
 SYNC_BYTES = 4 * (512 * 2 + 4)

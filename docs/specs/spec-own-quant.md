@@ -62,13 +62,23 @@ Applies to every change of quantized math. Pairs still on llama.cpp's math keep 
 **G-acc, per op.** For each (op, format) pair of every catalog model: at least 256 real rows per tensor and at least 64
 activation vectors recorded at that op site during a fixed decode (prompts in the gate tool), the activation exactly as
 the op receives it. Mean and p99 of |y - y_ref| / rms(y_ref) must not exceed llama.cpp's on the same inputs, measured
-with its own kernel on the GPU. Both numbers go in the pull request.
+with its own kernel on the GPU. Both numbers go in the pull request. The Coder's recording and llama.cpp's numbers per pair (kernels/ref_gg_mv.hip):
+tests/engine/test_k3_gguf_gsq.py, check (e).
+Qwen3.6's recording (Qwen35One under the same `K3_TEST_HOOKS=gacc-sites` hook) and the own Q2_0 tile against llama.cpp
+on it and on the Coder's Q2_0 down: benchmarks/q36_gacc.py; the tile's strict exact-dot check (every row, 1e-6 of
+sum |w| |x|) and its grouped forms: tests/engine/test_own_q2_0.py.
+The error, the per-expert row sampling, the K-shard cut and the reference q8_1 quantizer these harnesses (and
+benchmarks/q35_mtp_gacc.py) share are tools/gates/gacc.py, so every G-acc number is computed one way.
 
 **G-model, end to end.** A reference mode of the engine runs every quantized op with fp32 activations (per-op error
 about 1e-7 above). On the gate prompts: mean KLD of the candidate against the reference mode must not exceed llama.cpp's
 KLD against the reference mode, and top-1 agreement with the reference mode must be at least llama.cpp's. KLD against
 llama.cpp itself stays as a divergence bound that catches gross bugs; it is not an accuracy measure (llama.cpp's own
 error counts as divergence there).
+The Coder's reference is `caminus.ref_coder` (float64, every weight decoded exactly; up to 2,051 positions, where dense
+attention is its QSA): `tools/reference/q35_ref.py GGUF OUT.npz 256 --tokens TOKENS` writes it for a gate text,
+`tools/gates/q35_gmodel.py` scores the engine and llama.cpp against it (`--ref-only`: llama.cpp alone, no card), and
+`tests/engine/test_coder_golden_cpu.py` checks each block of it from llama.cpp's own inputs (router weights by expert).
 
 **G-self, bitwise against our own previous output.** T-token passes equal one-token steps; `K3_PER_WGP` 3 / 6 / 7 give
 the same bits; where a prefill op is designed to match its decode op, every row matches bitwise. The gate tool stores

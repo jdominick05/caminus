@@ -56,7 +56,7 @@ try:
         A.attend(q, cache, 0, T, 1, .0625, out, rec, err, rows_per_block=RPB, q8=q8)
         A.attend(q, cache, pa.qsa_exact(), T, 1, .0625, out, rec, err, rows_per_block=RPB, sel=sel, q8=q8)
         emitted = calls[start:]
-        want = 'q8' if q8 else 'prefill_attn_f16'
+        want = 'q8' if q8 else 'pf_gg_attn_f16'
         names = [fn for _, fn, _ in emitted]
         check(all(n == want for n, _, _ in emitted) and names.count('pf_kv_append') == 1
               and names.count('pf_attn_part') == 2 and names.count('pf_attn_comb') == 2
@@ -67,12 +67,12 @@ try:
         if q8: check(not loads, 'default Q8 loads no F16 module')
     A.kv_append(k, M, v, M, M, c16, 4, T, err, q8=False)
     A.kv_append(k, M, v, M, M, c8, 4, T, err)   # indexer remains Q8 even after target F16 launches
-    check(loads == ['prefill_attn_f16'] and calls[-1][0] == 'q8', 'F16 module loads once; later default/indexer append stays Q8')
+    check(loads == ['pf_gg_attn_f16'] and calls[-1][0] == 'q8', 'F16 module loads once; later default/indexer append stays Q8')
     preloaded = pa.Attn('cpu', module=KernelRecorder('q8', calls))
     n = len(calls)
     preloaded.prepare_f16()
     preloaded.prepare_f16()
-    check(loads == ['prefill_attn_f16', 'prefill_attn_f16'] and len(calls) == n,
+    check(loads == ['pf_gg_attn_f16', 'pf_gg_attn_f16'] and len(calls) == n,
           'F16 preparation loads once before capture without launching kernels')
 
     def refused(fn, msg, types=(ValueError,)):
@@ -94,7 +94,7 @@ try:
     refused(lambda: A.attend(q, bad_align, 0, T, 1, .0625, out, rec, err, rows_per_block=RPB, q8=False),
             'F16 vector-load cache alignment')
     refused(lambda: A.kv_append(k, M, v, M, M, c8, 0, T, err, q8='f16'), 'non-boolean cache policy')
-    other = pa.Attn('cpu', name='prefill_attn_q35', module=KernelRecorder('other', calls))
+    other = pa.Attn('cpu', name='pf_gg_attn_q35m', module=KernelRecorder('other', calls))
     refused(lambda: other.kv_append(k, M, v, M, M, c16, 0, T, err, q8=False), 'unsupported F16 object geometry')
     refused(other.prepare_f16, 'unsupported F16 module preparation')
 finally:

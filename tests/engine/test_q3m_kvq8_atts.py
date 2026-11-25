@@ -1,9 +1,9 @@
-"""The Q8 KV decode attention (OP_OWN_ATTS on k3_q3m_lean_kvq8, kernels/k3_own_atts.h under K3_Q3M_KV_Q8) alone, at Qwen3-30B-A3B's
+"""The Q8 KV decode attention (OP_OWN_ATTS on dec_q3m_kvq8, kernels/ops_own_atts.h under K3_Q3M_KV_Q8) alone, at Qwen3-30B-A3B's
 shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. One segment per launch, on a cache whose rows
 0 .. p - 1 hold caminus.ref_kv.encode_q8_kv(hadamard128(K), V) of known fp16 values (K rotated, as the op writes them):
   row       the position's row the op writes is byte for byte encode_q8_kv(hadamard128(K), V) of the K / V halves the F16
             path stores for the same q | k | v (the F16 prefill kernel q3p_qk_rope, OP_OWN_ATTS's norm + RoPE statements, on
-            the same inputs; caminus.ref_kv.hadamard128 is kernels/own_kv_rot128.h's fp32 transform in its order)
+            the same inputs; caminus.ref_kv.hadamard128 is kernels/kv_rot128.h's fp32 transform in its order)
   read      the fp16 output against float64 attention of the float64-rotated q (H q, H the orthonormal Sylvester
             Hadamard128) over the decoded rows 0 .. p (the own row decoded too), per element
             |out - ref| <= 2 fp16 ulps of ref + 1e-5 x max |V|, at positions across one / many splits and chunk edges (0, 1,
@@ -22,10 +22,10 @@ shapes (32 query / 4 kv heads, head dim 128), on known inputs; no model file. On
             the transform spreads it, so all four K blocks of each kv head are refused, blocks 1 / 3 included
   prefill   q3p_qk_rope_q8 (75 tokens at position 1,000, with the edge blocks) writes encode_q8_kv(hadamard128(K), V) of
             q3p_qk_rope's halves, byte for byte, and its q16 is fp16(hadamard128(q3p_qk_rope's q16)), bit for bit; it refuses
-            a NaN block into its error word; q3p_attn_q8 over Q8 rows equals q3p_attn over an F16 cache holding
+            a NaN block into its error word; q3mp_attn_q8 over Q8 rows equals q3mp_attn over an F16 cache holding
             fp16(decoded rows), bit for bit (the Q8 staging's values are exactly those halves)
   tools/guard.sh LOG 600 python -I tests/engine/test_q3m_kvq8_atts.py [--tp]
---tp: the same checks on the two-card module's Q8 build (k3_q3m_lean_tp_kvq8) at one card's shapes of the two-card engine
+--tp: the same checks on the two-card module's Q8 build (dec_q3m_tp_kvq8) at one card's shapes of the two-card engine
 (16 query / 2 kv heads), launched on one card alone: its attention takes up to 128 splits per kv head (the card's own
 q3moe_one.splits_for(2, 128): XTX 96, XT 105), so the positions run past 64 splits x 64 positions (4,096 .. 6,100: more
 than 64 active splits, the two-card merge's second round of m | l loads and the V scales' LDS beside it) to 8,000, on a
@@ -52,7 +52,7 @@ def check(c, msg):
 
 NH, NKV, HD = (16, 2, 128) if A.tp else (32, 4, 128)   # (--tp: one card's heads of the two-card engine)
 M = NKV * HD
-MOD = k3.Q3M_KV_Q8_OF['k3_q3m_lean_tp' if A.tp else 'k3_q3m_lean']
+MOD = k3.Q3M_KV_Q8_OF['dec_q3m_tp' if A.tp else 'dec_q3m']
 LAY = ref_kv.Q8KVLayout(NKV, HD)
 RB = LAY.row_bytes
 ROWS = (8192 if A.tp else 4096) + k3.Engine.ATS_PAD
@@ -77,7 +77,7 @@ out16 = torch.zeros(NH * HD, dtype=torch.float16, device=dev)
 q16 = torch.zeros(NH * HD, dtype=torch.float16, device=dev)
 S = q3moe_one.splits_for(NKV, k3.atts_max_splits(MOD))   # (the engines' count: 64 cap on one card, 128 on the two-card module)
 scratch = torch.zeros(k3.Engine.atts_scratch_floats(NKV, S), device=dev)
-ops = q3m_ops.Ops(dev, 'q3m_prefill')   # (the F16 kernels: the row oracle)
+ops = q3m_ops.Ops(dev, 'pf_q3m')   # (the F16 kernels: the row oracle)
 scale = 1.0 / np.sqrt(HD)
 H128 = np.array([[1.0]])
 for _ in range(7): H128 = np.block([[H128, H128], [H128, -H128]])
@@ -137,7 +137,7 @@ for p in POS:
     e = float(((d - 2 * ulp) / vmax).max()); worst = max(worst, e)             # (<= 1e-5: inside the bound)
     read_ok &= bool((d <= 2 * ulp + 1e-5 * vmax).all())
     outs[p] = (o.copy(), got.copy(), x)
-    Lp = -(-(p + 1) // S); Lp = max(-(-Lp // 64) * 64, q3moe_one.ATS_LMIN); nact = -(-(p + 1) // Lp)   # (kernels/k3_own_atts.h ats_layout)
+    Lp = -(-(p + 1) // S); Lp = max(-(-Lp // 64) * 64, q3moe_one.ATS_LMIN); nact = -(-(p + 1) // Lp)   # (kernels/ops_own_atts.h ats_layout)
     most = max(most, nact)
     print(f'  pos {p} ({nact} active splits of {Lp}): row {"=" if np.array_equal(got, want) else "!="} encode(F16 row); max |out - float64| / max|V| {float(d.max()) / vmax:.2e}, '
           f'past 2 fp16 ulps {e:.2e} (bound 1e-5)', flush=True)
@@ -225,7 +225,7 @@ check(np.array_equal(cache[p * RB:(p + 1) * RB].cpu().numpy(), want) and int(E.k
       'edge V blocks (+-65,504, exact ties, a stored scale that rounds to zero, zeros): the row byte for byte the reference; no error')
 
 # ---- the prefill's Q8 kernels -------------------------------------------------------------------------------------------------
-oq8 = q3m_ops.Ops(dev, 'q3m_prefill', q8=True)
+oq8 = q3m_ops.Ops(dev, 'pf_q3m', q8=True)
 kverr = torch.zeros(1, dtype=torch.int32, device=dev)
 pos0, n = 1000, 75
 xs = (rng.standard_normal((n, NH * HD + 2 * M)) * 1.3).astype(np.float32)
@@ -248,7 +248,7 @@ qa = torch.from_numpy((rng.standard_normal(n * NH * HD) * 0.5).astype(np.float16
 oa = torch.zeros(n * NH * HD, dtype=torch.float16, device=dev); ob = torch.zeros_like(oa)
 oq8.attn(qa, cache, pos0, n, NKV, scale, oa); ops.attn(qa, f16c, pos0, n, NKV, scale, ob); torch.cuda.synchronize()
 check(torch.equal(oa.view(torch.int16), ob.view(torch.int16)),
-      f'q3p_attn_q8 over Q8 rows = q3p_attn over fp16(decoded rows), bit for bit ({n} queries at position {pos0})')
+      f'q3mp_attn_q8 over Q8 rows = q3mp_attn over fp16(decoded rows), bit for bit ({n} queries at position {pos0})')
 # a refused block in the prefill
 xs2 = xs.copy(); xs2[3, NH * HD + M + 40] = np.nan
 cache[(pos0 + 3) * RB:(pos0 + 4) * RB] = 0xA5

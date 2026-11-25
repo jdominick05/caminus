@@ -93,9 +93,9 @@ def _model(name, title, arch, items, alias, speed, notes):
 
 ALL = (
     _model('coder', 'Qwen3.8-Flash-Next Coder IQ1_M + DFlash2', 'qwen4exp', ('coder-1', 'coder-2', 'dflash'), 'k3-coder',
-           '~104 tok/s decode, 123-203 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
-    _model('qwen3.6', 'Qwen3.6-35B-A3B GSQ-hybrid (2-bit)', 'qwen35moe', ('qwen3.6',), 'qwen3.6',
-           '175 tok/s decode, 5,227 tok/s prefill 2K (one XTX)', 'fits either card at 262K'),
+           '~104 tok/s decode, 122-201 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
+    _model('qwen3.6', 'Qwen3.6-35B-A3B GSQ-hybrid (2-bit)', 'qwen35moe-own', ('qwen3.6',), 'qwen3.6',   # (own code: Moe35Own)
+           '237 tok/s decode, 8,632 tok/s prefill 2K (one XTX); 211 / 6,613 on one XT', 'fits either card at 262K'),
     _model('qwen3.6-hauhau', 'Qwen3.6-35B-A3B HauhauCS Q3_K_P', 'qwen35moe', ('qwen3.6-hauhau',), 'qwen3.6',
            '192 tok/s decode, 4,136 tok/s prefill 2K (one XTX)', 'the 24 GB card only'),
     _model('arex-2', 'AREX-2 27B dense Q4_K_M', 'qwen35', ('arex-2',), 'arex-2',
@@ -103,16 +103,15 @@ ALL = (
     _model('qwen3-coder-next', 'Qwen3-Coder-Next 80B-A3B IQ3_S', 'qwen3next', ('qwen3-coder-next',), 'qwen3-coder-next',
            '136 tok/s decode; prompts read at ~135 tok/s (no batched prefill yet)', '262K context, both cards'),
     _model('swift-1.5', 'Swift 1.5 (Qwen3.8 27B dense) Q4_K_M (own code end to end)', 'qwen35-own', ('swift-1.5', 'dflash2-27b'), 'swift-1.5',
-           '42 tok/s decode on an XTX (short context); prefill 771 tok/s at 2K (XT)', 'the 24 GB card only, or two cards; --draft mtp (its own MTP block)'),
+           '44 tok/s decode on an XTX (short context); prefill 1,233 tok/s at 2K (XTX)', 'the 24 GB card only, or two cards; --draft mtp (its own MTP block)'),
     _model('thinkingcap', 'ThinkingCap (Qwen3.8 27B dense) RCO 4.2 bpw (own code end to end)', 'qwen35-own', ('thinkingcap', 'dflash2-27b'),
-           'thinkingcap', '47 tok/s decode on an XTX, 39 on an XT (short context); prefill 942 tok/s at 2K (XTX)',
+           'thinkingcap', '50 tok/s decode on an XTX, 42 on an XT (short context); prefill 1,059 tok/s at 2K (XTX)',
            'fits either card (an XT: ~53K context), or two; --draft dflash: its base model\'s DFlash2 drafter'),
     _model('qwen3.8-27b', 'Qwen3.8 27B dense GSQ-RCO IQ3_S (own code end to end)', 'qwen35-own', ('qwen3.8-27b', 'dflash2-27b'),
-           'qwen3.8-27b', '55 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
+           'qwen3.8-27b', '56 tok/s decode on an XTX (short context); --draft dflash 1.2-1.4x, --draft mtp 1.1-1.3x',
            'the plain Qwen3.8-27B (ISTA-DASLab GSQ-RCO, Apache-2.0); fits either card'),
     _model('qwen3-30b-a3b', 'Qwen3-30B-A3B Q4_K_M, unsloth imatrix (own code end to end)', 'qwen3moe', ('qwen3-30b-a3b',), 'qwen3-30b-a3b',
-           '248 tok/s decode at short context, 213 at 4K, 111 at 40.9K; prefill 6,432 tok/s at 4K (one XTX, the published row, '
-           'measured on the official Q4_K_M: the same formats)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
+           '257 tok/s decode at short context, 216 at 4K, 110 at 40.9K; prefill 7,275 tok/s at 4K (one XTX)', '40,960 context: the 24 GB card only, or two cards (--cards 2; one card stays the default)'),
 )
 # Each served model's recommended sampling for agentic work (thinking on), from its model card: what caminus serve uses as a
 # request's defaults (caminus.serve.sampler.model_defaults: these first, then the GGUF's general.sampling.* where a field is
@@ -150,6 +149,14 @@ SAMPLING = {
     # (enable_thinking=False), we suggest using Temperature=0.7, TopP=0.8, TopK=20, MinP=0, and PresencePenalty=1.5").
     'qwen3-30b-a3b': Sampling(0.6, 0.95, 20, 0.0, 1.5, None, 32768,
                               nothink=Sampling(0.7, 0.8, 20, 0.0, 1.5, None, 32768)),
+    # https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/345d467b117d1fd5eda9b879a5988de9ae5f47a7/README.md: the card has no
+    # set named for agent use. Its agent evaluations ran at "temp=1.0, top_p=0.95" (SWE-bench, NL2Repo) and "temp=1.0,
+    # top_p=0.95, top_k=20" (Terminal-Bench 2.0), with no presence penalty stated, and its generation_config.json ships
+    # temperature 1.0 / top_p 0.95 / top_k 20 and no penalty. Thinking: that set (presence 0, as served for coding agents),
+    # not its "general tasks" set (presence_penalty=1.5) or its "precise coding" set (temperature 0.6); "an output length
+    # of 32,768 tokens for most queries". nothink: its "Instruct (or non-thinking) mode" set. The GSQ-hybrid GGUF card
+    # (revision 34a912bd) states none.
+    'qwen3.6': Sampling(1.0, 0.95, 20, 0.0, 0.0, 1.0, 32768, nothink=Sampling(0.7, 0.8, 20, 0.0, 1.5, 1.0, 32768)),
 }
 
 
@@ -164,6 +171,13 @@ def sampling_of(path):
 # share/templates/; caminus.serve.vocab.load_gguf_vocab applies it). Qwen3-30B-A3B: the official GGUF's template, copied
 # unchanged below a comment header (its sha256 in the file's header), so the prompts stay the official file's whichever
 # Q4_K_M is served; unsloth's file carries its own edit of it (two edge cases differ: docs/dev/qwen3-30b-a3b.md).
+# Qwen3.6-35B-A3B has none (not pinned): its GSQ file's template (sha256
+# e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259) is Qwen's official chat_template.jinja
+# (Qwen/Qwen3.6-35B-A3B at revision 345d467b117d1fd5eda9b879a5988de9ae5f47a7, sha256
+# 1b8361565cc35d47551d342214cff341c0f1a9685ce529c7ce31de0ed3616248) with its two {% generation %} markers removed
+# (transformers' assistant-mask tags, which this Jinja environment refuses) and the strings around them regrouped; a
+# text diff of the two shows nothing else. The file's special ids and its 33 added tokens are the official ones. A
+# re-uploaded file with another template sha256 needs this comparison again.
 CHAT_TEMPLATES = {'qwen3-30b-a3b': 'qwen3-30b-a3b.jinja'}
 
 
@@ -203,8 +217,7 @@ PREVIOUS_FILES = {'qwen3-30b-a3b': (('Qwen3-30B-A3B-Q4_K_M.gguf', 18556685824),)
 # `caminus start` and the panel leave them out, and caminus serve refuses their architectures (caminus.arch.PAUSED), until
 # they are measured again on the current code. CAMINUS_ALLOW_PAUSED=1 offers them anyway (development and gates).
 PAUSED = {
-    'qwen3.6': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
-    'qwen3.6-hauhau': 'Qwen3.6 is paused: not in this release (it is not measured on the current code)',
+    'qwen3.6-hauhau': 'The HauhauCS Qwen3.6 file is paused: not in this release (its Q3_K_P formats run on llama.cpp math, not measured on the current code; the GSQ file `qwen3.6` runs on own code)',
     'qwen3-coder-next': 'Qwen3-Coder-Next is paused: not in this release (it is not measured on the current code)',
     'arex-2': 'AREX-2 is paused: not in this release (the 0.3.0 set is the Coder, Qwen3-30B-A3B and the three Qwen3.8 27B models)',
 }
@@ -216,17 +229,17 @@ PAUSED = {
 # models that run there, a two-card form as 'name:2' (the wizard's list before the files are on disk: the real projection
 # runs at caminus start); row / what / start_text: the README cells.
 SETUPS = (
-    {'cards': ('XT',), 'runs': ('thinkingcap', 'qwen3.8-27b'), 'start': 'thinkingcap',
-     'row': 'One XT', 'what': 'ThinkingCap, the plain Qwen3.8 27B', 'start_text': 'ThinkingCap'},
-    {'cards': ('XTX',), 'runs': ('swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b'), 'start': 'swift-1.5',
-     'row': 'One XTX', 'what': 'Those two, plus Qwen3-30B-A3B and Swift 1.5', 'start_text': 'Swift 1.5'},
-    {'cards': ('XTX', 'XT'), 'runs': ('coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b', 'swift-1.5:2',
+    {'cards': ('XT',), 'runs': ('thinkingcap', 'qwen3.8-27b', 'qwen3.6'), 'start': 'thinkingcap',
+     'row': 'One XT', 'what': 'ThinkingCap, the plain Qwen3.8 27B, Qwen3.6-35B-A3B', 'start_text': 'ThinkingCap'},
+    {'cards': ('XTX',), 'runs': ('swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3.6', 'qwen3-30b-a3b'), 'start': 'swift-1.5',
+     'row': 'One XTX', 'what': 'Those three, plus Qwen3-30B-A3B and Swift 1.5', 'start_text': 'Swift 1.5'},
+    {'cards': ('XTX', 'XT'), 'runs': ('coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3.6', 'qwen3-30b-a3b', 'swift-1.5:2',
                                      'thinkingcap:2', 'qwen3-30b-a3b:2'), 'start': 'coder',
      'row': 'XTX + XT', 'what': 'Everything, including the Coder and the two-card forms', 'start_text': 'the Coder (both cards)'},
-    {'cards': ('XTX', 'XTX'), 'runs': ('coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3-30b-a3b', 'swift-1.5:2',
+    {'cards': ('XTX', 'XTX'), 'runs': ('coder', 'swift-1.5', 'thinkingcap', 'qwen3.8-27b', 'qwen3.6', 'qwen3-30b-a3b', 'swift-1.5:2',
                                       'thinkingcap:2', 'qwen3-30b-a3b:2'), 'start': 'coder',
      'row': 'Two XTX', 'what': 'The same as XTX + XT. Untested: reports are welcome.', 'start_text': 'the Coder (both cards)'},
-    {'cards': ('XT', 'XT'), 'runs': ('thinkingcap', 'qwen3.8-27b', 'swift-1.5:2', 'thinkingcap:2', 'qwen3-30b-a3b:2'),
+    {'cards': ('XT', 'XT'), 'runs': ('thinkingcap', 'qwen3.8-27b', 'qwen3.6', 'swift-1.5:2', 'thinkingcap:2', 'qwen3-30b-a3b:2'),
      'start': 'thinkingcap', 'row': 'Two XT', 'what': 'Two-card Swift 1.5, ThinkingCap or Qwen3-30B-A3B, or two one-card models '
      'side by side; no Coder. Untested: reports are welcome.', 'start_text': 'ThinkingCap'},
 )

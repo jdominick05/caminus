@@ -224,20 +224,24 @@ def stage_guard_faults(S, guard):
     pf = 'amdgpu 0000:06:00.0: [gfxhub] page fault (src_id:0 ring:24 vmid:8 pasid:32771)'
     ring = 'amdgpu 0000:06:00.0: [drm] *ERROR* ring comp_1.0.0 timeout, signaled seq=11, emitted seq=12'
 
-    def run(name, lines):
+    def run(name, lines, cmd=('sleep', '4'), late=None):
+        """late: a line the fake journal prints only once the file MARK exists (the command creates it)"""
         d = os.path.join(S, 'faults', name)
         os.makedirs(os.path.join(d, 'bin'))
         kl = os.path.join(d, 'kernel.log')
         open(kl, 'w').write(''.join(x + '\n' for x in lines))
         jc = os.path.join(d, 'bin', 'journalctl')
-        open(jc, 'w').write(f'#!/bin/sh\ncat {shlex.quote(kl)}\n')
+        mark = os.path.join(d, 'MARK')
+        open(jc, 'w').write(f'#!/bin/sh\ncat {shlex.quote(kl)}\n'
+                            + (f'[ -e {shlex.quote(mark)} ] && echo {shlex.quote(late)}\nexit 0\n' if late else ''))
         os.chmod(jc, 0o755)
         stop = os.path.join(d, 'STOP')
         env = dict(os.environ, PATH=os.path.join(d, 'bin') + os.pathsep + os.environ.get('PATH', ''), K3_GUARD_STOP=stop,
                    CAMINUS_GPU_HIGH=shutil.which('env'))
         env.pop('CAMINUS_GUARD', None)
         log = os.path.join(d, 'run.log')
-        r = subprocess.run(['bash', guard, log, '60', 'sleep', '4'], env=env, capture_output=True, text=True, timeout=120)
+        cmd = [c.replace('MARK', shlex.quote(mark)) for c in cmd]
+        r = subprocess.run(['bash', guard, log, '60', *cmd], env=env, capture_output=True, text=True, timeout=120)
         return (r.returncode, open(log).read() if os.path.exists(log) else '',
                 open(stop).read() if os.path.exists(stop) else None)
 
@@ -264,6 +268,11 @@ def stage_guard_faults(S, guard):
               'rc=0' in out and 'GUARD KILL' not in out, out[-300:])
     else:
         print('NOTE guard: no `script` (util-linux): the terminal check is skipped', flush=True)
+    # a fault that ends the process (a HIP illegal address returns at once and the program exits) lands between two polls,
+    # and the kernel log may record it a moment after the exit: the check after the run must still see it
+    rc, log, stop = run('late', [boot], ('bash', '-c', '(sleep 0.5; touch MARK) & exit 1'), late=pf)
+    check('guard: a page fault logged just after the command exits is still a fault: exit 99, recorded once in STOP',
+          rc == 99 and stop is not None and stop.count(pf) == 1 and 'GPU FAULT' in log, f'rc {rc} stop {stop!r} {log[-300:]}')
     rc, log, stop = run('ring', [boot, ring])
     check('guard: a ring timeout is still a fault (exit 99)', rc == 99 and stop is not None and ring in stop, f'rc {rc} stop {stop!r}')
     mes = 'amdgpu 0000:06:00.0: MES failed to respond to msg=MISC (WAIT_REG_MEM)'
@@ -291,8 +300,8 @@ def stage_kernels(S):
         if keep is None: os.environ.pop('CAMINUS_KERNEL_DIR', None)
         else: os.environ['CAMINUS_KERNEL_DIR'] = keep
     names = set(K.RUNTIME_SET)
-    check('kernels: the runtime set has unique names and no trace / swiglu / test-reference builds',
-          not any(n.endswith(('_trace', '_swiglu')) or n == 'gg_mmvf_ref' for n in names)
+    check('kernels: the runtime set has unique names and no trace / test-reference builds',
+          not any(n.endswith('_trace') or n == 'ref_gg_mmvf' for n in names)
           and len(names) == len(K.RUNTIME_SET), str(len(names)))
     if not os.path.isfile(os.path.join(ROOT, 'build', 'BUILD-INFO')):
         print('NOTE kernels: no build/BUILD-INFO (./build.sh not run): the staging checks are skipped', flush=True); return
@@ -320,12 +329,12 @@ def stage_kernels(S):
                        capture_output=True, text=True, env=dict(noepoch, SOURCE_DATE_EPOCH='yesterday'))
     check('kernels: a SOURCE_DATE_EPOCH that is not whole seconds is refused', r.returncode == 2 and 'SOURCE_DATE_EPOCH' in r.stderr
           and not os.path.exists(os.path.join(S, 'staged-bad')), r.stderr.strip()[-200:])
-    p = os.path.join(st, 'k3_guard.hsaco')
+    p = os.path.join(st, 'dec_guard.hsaco')
     b = bytearray(open(p, 'rb').read()); b[-1] ^= 1; open(p, 'wb').write(bytes(b))
     os.rename(os.path.join(st, 'smoke.hsaco'), os.path.join(st, 'smoke.hsaco.moved'))
     _, res = K.verify(st)
     bad = {n: dt for n, ok, dt in res if not ok}
-    check('kernels: verify finds a changed byte and a missing object', set(bad) == {'k3_guard.hsaco', 'smoke.hsaco'}, str(bad))
+    check('kernels: verify finds a changed byte and a missing object', set(bad) == {'dec_guard.hsaco', 'smoke.hsaco'}, str(bad))
     r = subprocess.run([PY, '-I', os.path.join(ROOT, 'tools', 'release', 'stage_kernels.py'), '--out', os.path.join(S, 'staged2')], capture_output=True, text=True)
     info = dict(l.split('\t', 1) for l in open(os.path.join(ROOT, 'build', 'BUILD-INFO')).read().splitlines() if l)
     if info.get('source_dirty') == '1':
@@ -520,15 +529,15 @@ def stage_doctor(S):
     # what one card runs, by its size (a fake sysfs: nothing reads a real card)
     from caminus.cmd import doctor as D
     A = '0x1002'
-    for name, total, want in (('one XTX', 24560, 'one card (One XTX): swift-1.5, thinkingcap, qwen3.8-27b, qwen3-30b-a3b run'),
-                              ('one XT', 20464, 'one card (One XT): thinkingcap, qwen3.8-27b run')):
+    for name, total, want in (('one XTX', 24560, 'one card (One XTX): swift-1.5, thinkingcap, qwen3.8-27b, qwen3.6, qwen3-30b-a3b run'),
+                              ('one XT', 20464, 'one card (One XT): thinkingcap, qwen3.8-27b, qwen3.6 run')):
         root = os.path.join(S, 'sysfs-' + name.replace(' ', '-'))
         fixture(root, [('card0', total, '0x744c', 128, 0, {}, A, '0000:03:00.0')], [(128, 110000)])
         R = D.Report()
         D.check_gpus(R, root)
         msgs = [m for lv, area, m in R.rows if area == 'gpu']
         check(f'doctor: {name}: says what runs on it', any(want in m for m in msgs), str(msgs)[-300:])
-        check(f'doctor: {name}: names no paused model', not any(x in m for m in msgs for x in ('Qwen3.6', 'AREX', 'Coder-Next')), str(msgs)[-300:])
+        check(f'doctor: {name}: names no paused model', not any(x in m for m in msgs for x in ('HauhauCS', 'AREX', 'Coder-Next')), str(msgs)[-300:])
     # the Coder's 24 GB card 0 rule on a pair: caminus.models.card_class's line (22 GiB), the one copy
     from caminus import models as M
     for card0 in (22 * 1024 - 1, 22 * 1024):

@@ -23,16 +23,16 @@ from caminus.prefill import attn, gdn, glue, q3m, q3m_ops, q3m_tp, q35own, q35ow
 
 # Frozen pre-fix registry: a negative control independent of the current registry.
 OLD_RUNTIME = (
-    'k3_gguf_gsq', 'k3_gguf_gsq_mt', 'k3_gguf_gsq_qsa', 'k3_gguf_gsq_qsa_mt',
-    'k3_gguf_gsq_mtp', 'k3_gguf_gsq_mtp_mt', 'k3_gguf_draft', 'k3_gguf', 'k3_gguf_mt', 'k3_guard',
-    'k3_gguf_q35h', 'k3_gguf_q35g', 'k3_gguf_q35d', 'k3_gguf_q3n',
-    'prefill_attn', 'prefill_feed', 'prefill_gdn', 'prefill_glue', 'prefill_tp', 'prefill_dense_q6_k', 'gemm',
-    'prefill_glue_q35', 'prefill_glue_q35d', 'prefill_gdn_q35', 'prefill_attn_q35', 'prefill_attn_q35d',
-    'prefill_mmq_iq2_s', 'prefill_mmq_iq3_s', 'prefill_mmq_iq3_xxs', 'prefill_mmq_iq4_nl',
-    'prefill_mmq_iq4_xs', 'prefill_mmq_q2_0', 'prefill_mmq_q3_k', 'prefill_mmq_q4_k',
-    'prefill_mmq_q5_k', 'prefill_mmq_q6_k', 'prefill_mmq_q8_0', 'prefill_mmq_glue', 'prefill_mmq_glue8',
-    'prefill_moe_iq2_s', 'prefill_moe_iq3_s', 'prefill_moe_iq3_xxs', 'prefill_moe_iq4_xs',
-    'prefill_moe_iq4_nl', 'prefill_moe_q2_0', 'prefill_moe_glue', 'own_topk', 'smoke',
+    'dec_q4x_gsq', 'dec_q4x_gsq_ver', 'dec_q4x_gsq_qsa', 'dec_q4x_gsq_qsa_ver',
+    'dec_q4x_gsq_mtp', 'dec_q4x_gsq_mtp_ver', 'dec_q4x_dflash', 'dec_q4x_gg', 'dec_q4x_gg_ver', 'dec_guard',
+    'dec_q35m_hh', 'dec_q35m_gg', 'dec_q35_arex', 'dec_q3n',
+    'pf_gg_attn', 'pf_feed', 'pf_gg_gdn', 'pf_gg_glue', 'pf_tp', 'pf_gg_dense_q6_k', 'pf_gemm',
+    'pf_gg_glue_q35m', 'pf_gg_glue_q35', 'pf_gg_gdn_q35', 'pf_gg_attn_q35m', 'pf_gg_attn_q35',
+    'pf_gg_mmq_iq2_s', 'pf_gg_mmq_iq3_s', 'pf_gg_mmq_iq3_xxs', 'pf_gg_mmq_iq4_nl',
+    'pf_gg_mmq_iq4_xs', 'pf_gg_mmq_q2_0', 'pf_gg_mmq_q3_k', 'pf_gg_mmq_q4_k',
+    'pf_gg_mmq_q5_k', 'pf_gg_mmq_q6_k', 'pf_gg_mmq_q8_0', 'pf_gg_mmq_glue', 'pf_gg_mmq_glue8',
+    'pf_gg_moe_iq2_s', 'pf_gg_moe_iq3_s', 'pf_gg_moe_iq3_xxs', 'pf_gg_moe_iq4_xs',
+    'pf_gg_moe_iq4_nl', 'pf_gg_moe_q2_0', 'pf_gg_moe_glue', 'samp_topk', 'smoke',
 )
 
 
@@ -157,7 +157,7 @@ class RuntimeKernels(unittest.TestCase):
         drafter = q35_dflash.Dflash35.__new__(q35_dflash.Dflash35)
         with patch.object(q35_dflash.ggufio, 'GGUFFile', side_effect=SelectionOnly), self.assertRaises(SelectionOnly):
             q35_dflash.Dflash35.__init__(drafter, 'unused-selector-fixture.gguf', eng, vram_check=False)
-        self.assertEqual(drafter.module, 'k3_q35_gsq_dflash')
+        self.assertEqual(drafter.module, 'dec_q35_gsq_dflash')
         self.require_runtime([drafter.module])
         without = tuple(n for n in kernels.RUNTIME_SET if n != drafter.module)
         with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
@@ -167,7 +167,7 @@ class RuntimeKernels(unittest.TestCase):
         # Two-card drafting is served (Swift 1.5, ThinkingCap), so the real constructor's two verify objects are in the
         # installed runtime; without them a wheel would refuse the default two-card serve.
         # CUDA/HIP access is forbidden by setUp; only the tensor tape is omitted (test_q35_verify_tp_cpu.py covers it).
-        cases = [('k3_q35_swift_tp', 'k3_q35_swift_tp_ver'), ('k3_q35_tcap_tp', 'k3_q35_tcap_tp_ver')]
+        cases = [('dec_q35_swift_tp', 'dec_q35_swift_tp_ver'), ('dec_q35_tcap_tp', 'dec_q35_tcap_tp_ver')]
         for module, want in cases:
             for T in (1, 4):
                 with self.subTest(module=module, T=T):
@@ -186,12 +186,12 @@ class RuntimeKernels(unittest.TestCase):
 
     def test_two_card_drafters_select_the_shipped_one_card_objects(self):
         # The two-card drafted serve runs the one-card MTP / DFlash2 drafters on a TP trunk's view (DraftTarget35TP:
-        # module k3_q35_*_tp, tcap as the trunk's). Exercise the real constructors' selectors, stopping at file opening.
+        # module dec_q35_*_tp, tcap as the trunk's). Exercise the real constructors' selectors, stopping at file opening.
         class SelectionOnly(Exception):
             pass
 
-        for tp_module, tcap, mtp_want, df_want in (('k3_q35_swift_tp', False, q35_mtp.MODULE, q35_dflash.MODULE),
-                                                   ('k3_q35_tcap_tp', True, q35_mtp.MODULE_TCAP, q35_dflash.MODULE_TCAP)):
+        for tp_module, tcap, mtp_want, df_want in (('dec_q35_swift_tp', False, q35_mtp.MODULE, q35_dflash.MODULE),
+                                                   ('dec_q35_tcap_tp', True, q35_mtp.MODULE_TCAP, q35_dflash.MODULE_TCAP)):
             with self.subTest(module=tp_module):
                 eng = NS(module=tp_module, tcap=tcap, head=dict(fmt='Q8_0' if tcap else 'Q6_K'),
                          emb=NS(type='IQ2_S' if tcap else 'Q4_K'))
@@ -215,7 +215,7 @@ class RuntimeKernels(unittest.TestCase):
             for ratio in (6, 8):
                 with self.subTest(module=module, ratio=ratio):
                     names = self.dense_prefill(module, ratio)
-                    self.assertIn('prefill_attn_q35d' if ratio == 6 else 'prefill_attn_q35', names)
+                    self.assertIn('pf_gg_attn_q35' if ratio == 6 else 'pf_gg_attn_q35m', names)
                     self.assertIn(q35own.MODULE_GSQ if module == q35_dense.MODULE_GSQ else
                                   q35own.MODULE_TCAP if module == q35_dense.MODULE_TCAP else q35own.MODULE, names)
                     self.require_runtime(names)
@@ -223,7 +223,7 @@ class RuntimeKernels(unittest.TestCase):
             for feature_card in (0, 1):   # (the drafter's card: its feature rows and launchers; same objects)
                 with self.subTest(tp=one, feature_card=feature_card):
                     names = self.dense_prefill(k3.Q35_TP_OF[one], tp=True, feature_card=feature_card)
-                    self.assertEqual(names.count('prefill_tp'), 2)
+                    self.assertEqual(names.count('pf_tp'), 2)
                     self.require_runtime(names)
 
     def test_real_q3_module_property_selects_lean_iq_and_row_scale(self):
@@ -255,8 +255,12 @@ class RuntimeKernels(unittest.TestCase):
         for fmt in ('Q4_K', 'Q6_K') + tuple(q3m_ops.IQ_KERNEL):
             with self.subTest(fmt=fmt):
                 names = self.q3_prefill(fmt)
-                self.assertEqual(names, [q3m_ops.IQ_MODULE if fmt in q3m_ops.IQ_KERNEL else 'q3m_prefill'])
+                # (pf_q3m's wide GEMM tiles are their own object: the IQ study object runs the narrow tiles)
+                self.assertEqual(names, [q3m_ops.IQ_MODULE] if fmt in q3m_ops.IQ_KERNEL else ['pf_q3m', q3m_ops.WIDE_MODULE])
                 self.require_runtime(names)
+        without = tuple(n for n in kernels.RUNTIME_SET if n != q3m_ops.WIDE_MODULE)
+        with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+            self.require_runtime(self.q3_prefill('Q4_K'))
         for fmt in q3moe_one.MODULE_RS:
             with self.subTest(fmt=fmt), self.assertRaises(ValueError):
                 self.q3_prefill(fmt)
@@ -279,14 +283,14 @@ class RuntimeKernels(unittest.TestCase):
         # caminus serve --cards 2 for Qwen3-30B-A3B (arch.Q3MoETP): the engine's decode module is the lean module's
         # two-card build, the prefill loads its GEMM object, the slot sum's object (on both cards) and the exchange's add
         tp = k3.Q3M_TP_OF[q3moe_one.MODULE_LEAN]
-        self.assertEqual(tp, 'k3_q3m_lean_tp')
+        self.assertEqual(tp, 'dec_q3m_tp')
         self.assertEqual(q3moe_tp.MODULE, tp)
         names = self.q3_prefill_tp()
-        self.assertEqual(sorted(set(names)), ['prefill_tp', 'q3m_prefill', 'q3m_prefill_tp'])
-        self.assertEqual(names.count('q3m_prefill_tp'), 2)
+        self.assertEqual(sorted(set(names)), ['pf_q3m', 'pf_q3m_tp', 'pf_tp'])
+        self.assertEqual(names.count('pf_q3m_tp'), 2)
         self.require_runtime([tp] + names)
-        self.assertNotIn(k3.Q3M_TP_OF['k3_q3m_lean_trace'], kernels.RUNTIME_SET)
-        for name in (tp, 'q3m_prefill_tp'):
+        self.assertNotIn(k3.Q3M_TP_OF['dec_q3m_trace'], kernels.RUNTIME_SET)
+        for name in (tp, 'pf_q3m_tp'):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime([tp] + names)
@@ -294,22 +298,22 @@ class RuntimeKernels(unittest.TestCase):
     def test_q3_q8_kv_serve_selects_shipped_objects(self):
         # caminus serve --kv q8 for Qwen3-30B-A3B (arch.Q3MoE / Q3MoETP with opt['kv'] = 'q8'): one card decodes on the real
         # module property's Q8 module, two cards on its Q3M_TP_OF build (as Q3MoETP(q8=True) picks it); both prefills'
-        # constructors load q3m_prefill_kvq8 beside their F16 objects (the rows and attention). All are in the runtime set,
+        # constructors load pf_q3m_kvq8 beside their F16 objects (the rows and attention). All are in the runtime set,
         # and each one's removal is caught (a wheel without it would refuse the served --kv q8)
         one = q3_engine(q8=True).module
-        self.assertEqual(one, 'k3_q3m_lean_kvq8')
+        self.assertEqual(one, 'dec_q3m_kvq8')
         tp = k3.Q3M_TP_OF[one]
-        self.assertEqual(tp, 'k3_q3m_lean_tp_kvq8')
+        self.assertEqual(tp, 'dec_q3m_tp_kvq8')
         self.assertEqual(q3_engine().module, q3moe_one.MODULE_LEAN)   # (the F16 default unchanged)
         names1 = self.q3_prefill('Q4_K', q8=True)
-        self.assertEqual(sorted(set(names1)), ['q3m_prefill', 'q3m_prefill_kvq8'])
+        self.assertEqual(sorted(set(names1)), ['pf_q3m', 'pf_q3m_kvq8', 'pf_q3m_mm'])
         names2 = self.q3_prefill_tp(q8=True)
-        self.assertEqual(sorted(set(names2)), ['prefill_tp', 'q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_tp'])
-        self.assertEqual(names2.count('q3m_prefill_kvq8'), 2)   # (one per card)
-        self.assertNotIn('q3m_prefill_kvq8', self.q3_prefill('Q4_K') + self.q3_prefill_tp())   # (F16 prefills load no Q8 object)
+        self.assertEqual(sorted(set(names2)), ['pf_q3m', 'pf_q3m_kvq8', 'pf_q3m_tp', 'pf_tp'])
+        self.assertEqual(names2.count('pf_q3m_kvq8'), 2)   # (one per card)
+        self.assertNotIn('pf_q3m_kvq8', self.q3_prefill('Q4_K') + self.q3_prefill_tp())   # (F16 prefills load no Q8 object)
         want = [one, tp] + names1 + names2
         self.require_runtime(want)
-        for name in (one, tp, 'q3m_prefill_kvq8'):
+        for name in (one, tp, 'pf_q3m_kvq8'):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
                 self.require_runtime(want)
@@ -322,9 +326,9 @@ class RuntimeKernels(unittest.TestCase):
         Y = rope.YarnMode(4.0, 32768)
         one = q3_engine(rope=Y).module
         q8 = q3_engine(rope=Y, q8=True).module
-        self.assertEqual((one, q8), ('k3_q3m_lean_yarn', 'k3_q3m_lean_kvq8_yarn'))
+        self.assertEqual((one, q8), ('dec_q3m_yarn', 'dec_q3m_kvq8_yarn'))
         tps = [k3.Q3M_TP_OF[one], k3.Q3M_TP_OF[q8]]
-        self.assertEqual(tps, ['k3_q3m_lean_tp_yarn', 'k3_q3m_lean_tp_kvq8_yarn'])
+        self.assertEqual(tps, ['dec_q3m_tp_yarn', 'dec_q3m_tp_kvq8_yarn'])
         for q8_ in (False, True):
             with self.subTest(q8=q8_):
                 m = NS(dev=0, D=256, nh=8, nkv=1, hd=128, k_used=1, n_exp=2, ffn=256, q8=q8_, rope=Y, rope_key=Y.key(),
@@ -332,14 +336,61 @@ class RuntimeKernels(unittest.TestCase):
                 start = len(self.loads)
                 q3m.Q3MPrefill(m, chunk=16, check=False)
                 names = self.loads[start:]
-                want = ['q3m_prefill', 'q3m_prefill_kvq8', 'q3m_prefill_kvq8_yarn'] if q8_ else ['q3m_prefill', 'q3m_prefill_yarn']
+                want = (['pf_q3m', 'pf_q3m_mm', 'pf_q3m_kvq8', 'pf_q3m_kvq8_yarn'] if q8_
+                        else ['pf_q3m', 'pf_q3m_mm', 'pf_q3m_yarn'])
                 self.assertEqual(names, want)
                 self.require_runtime(names)
         self.require_runtime([one, q8] + tps)
-        for name in (one, 'q3m_prefill_yarn'):
+        for name in (one, 'pf_q3m_yarn'):
             without = tuple(n for n in kernels.RUNTIME_SET if n != name)
             with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
-                self.require_runtime([one, 'q3m_prefill', 'q3m_prefill_yarn'])
+                self.require_runtime([one, 'pf_q3m', 'pf_q3m_yarn'])
+
+    def test_q35moe_serve_selects_shipped_objects(self):
+        # caminus serve for Qwen3.6-35B-A3B (arch.Q35MoE): the decode module from the file (module_of / kv_module: F16 and
+        # --kv q8) and the batched prefill's constructor loads in every mode (its wide expert tiles always; the Q8 rows and attention object only with a
+        # Q8 engine, the YaRN attention object only in the long-context mode); all are in the installed runtime set and
+        # each one's removal is caught
+        from caminus.engine import q35_moe
+        from caminus.prefill import q35moe
+        f16 = q35_moe.kv_module(None, module=q35_moe.module_of(None))
+        q8 = q35_moe.kv_module(None, module=q35_moe.module_of(None), q8=True)
+        self.assertEqual((f16, q8), ('dec_q35m', 'dec_q35m_kvq8'))
+        mm = lambda f: dict(fmt=f)
+        layer = lambda kind: dict(kind=kind, **{k: mm('Q8_0') for k in q35moe.Q35MoEPrefill.MM_KEYS[kind] + q35moe.Q35MoEPrefill.SH_KEYS},
+                                  **{k: mm('Q2_0') for k in q35moe.Q35MoEPrefill.EXP_KEYS}, al=mm('F32'), be=mm('F32'))
+        names = {}
+        tensor = torch.tensor
+        self.stack.enter_context(patch.object(torch, 'tensor', side_effect=lambda *a, **kw: tensor(*a, **{k: v for k, v in kw.items() if k != 'device'})))
+        for q8_, yarn in ((False, None), (True, None), (False, 4.0), (True, 4.0)):
+            m = NS(dev=0, q8=q8_, yarn_factor=yarn, yarn=([1.0] * 32, 1.1), rope_key='yarn4', kv_format_id='q8', nl=2, nl_build=2, D=2048, nh=16, nkv=2, hd=256, k_used=8, n_exp=256,
+                   ffn=512, ffn_shexp=512, S=128, NK=16, NV=32, vocab=64, emb=NS(type='BF16'), L=[layer('gdn'), layer('attn')])
+            start = len(self.loads)
+            pf = q35moe.Q35MoEPrefill(m, chunk=16, check=False)
+            names[q8_, yarn] = self.loads[start:]
+            self.assertEqual('rope' in pf.numerics(), yarn is not None)
+        base = names[False, None]
+        self.assertIn('pf_q35m_mm', base)   # (the experts' wide tiles and fused gate | up: every mode)
+        self.assertNotIn('pf_q35m_kvq8', base); self.assertNotIn('pf_gg_attn_q35m_yarn', base)
+        self.assertEqual(sorted(set(names[True, None]) - set(base)), ['pf_q35m_kvq8'])
+        self.assertEqual(sorted(set(names[False, 4.0]) - set(base)), ['pf_gg_attn_q35m_yarn'])
+        self.assertNotIn('pf_gg_attn_q35m', names[False, 4.0])   # (the YaRN object replaces the native one)
+        self.assertEqual(sorted(set(names[True, 4.0]) - set(base)), ['pf_gg_attn_q35m_yarn', 'pf_q35m_kvq8'])
+        # the sliced pass's decode attention kernel (engine/dec_q35m_attn.py): every Moe35Own on a card loads it when it builds
+        from caminus.engine import dec_q35m_attn
+        rec = lambda name: (self.loads.append(name), NS(dec_q35m_attn_f16=None, dec_q35m_attn_q8=None))[1]
+        err = NS(dtype=torch.int32, is_cuda=True, numel=lambda: 1)
+        start = len(self.loads)
+        with patch.dict(dec_q35m_attn._mods, {}, clear=True), patch.object(dec_q35m_attn, 'Module', side_effect=rec), \
+                patch.object(dec_q35m_attn.capacity, 'check'):
+            dec_q35m_attn.DecQ35mAttn(False, err=err); dec_q35m_attn.DecQ35mAttn(True, err=err)
+        self.assertEqual(self.loads[start:], ['dec_q35m_attn'])
+        want = [f16, q8, 'dec_q35m_attn'] + [n for v in names.values() for n in v]
+        self.require_runtime(want)
+        for name in (f16, q8, 'dec_q35m_attn', 'pf_q35m', 'pf_q35m_mm', 'pf_q35m_kvq8', 'pf_gg_attn_q35m_yarn'):
+            without = tuple(n for n in kernels.RUNTIME_SET if n != name)
+            with patch.object(kernels, 'RUNTIME_SET', without), self.assertRaisesRegex(AssertionError, 'missing from package'):
+                self.require_runtime(want)
 
     def test_lazy_sampler_and_guard_are_included(self):
         # Exercise the lazy sampler module selection, without allocating candidates.
@@ -363,8 +414,8 @@ class RuntimeKernels(unittest.TestCase):
         with patch.object(torch.cuda, 'current_device', return_value=0), patch.object(k3, '_m', side_effect=guard_module), \
                 patch.object(hip, 'hip', return_value=NS(hipModuleLaunchKernel=lambda *args: 0)):
             E._guard(0)
-        self.assertIn('own_topk', self.loads)
-        self.assertIn('k3_guard', self.loads)
+        self.assertIn('samp_topk', self.loads)
+        self.assertIn('dec_guard', self.loads)
         self.require_runtime(self.loads)
 
     def test_frozen_old_registry_reproduces_missing_runtime_selection(self):
@@ -379,13 +430,35 @@ class RuntimeKernels(unittest.TestCase):
     def test_experimental_objects_remain_excluded_and_names_are_unique(self):
         names = kernels.RUNTIME_SET
         self.assertEqual(len(names), len(set(names)))
-        self.assertFalse(any(n.endswith(('_trace', '_swiglu')) or '_abl' in n for n in names))
+        self.assertFalse(any(n.endswith('_trace') for n in names))
         self.assertTrue(set(k3.Q35TPV_MODULES) <= set(names))
         self.assertTrue(set(k3.Q3M_VER_MODULES).isdisjoint(names))
         self.assertNotIn('kv_codec', names)
-        self.assertNotIn('gg_mv_ref', names)
-        self.assertNotIn('gg_mmvf_ref', names)
+        self.assertNotIn('ref_gg_mv', names)
+        self.assertNotIn('ref_gg_mmvf', names)
 
+
+
+class CardObjects(unittest.TestCase):
+    """one register cap per card (kernels/dec_core.hip K3_PER_WGP): the XTX's <name>_w4 objects ship and load by card"""
+
+    def test_every_own_decode_module_ships_its_xtx_object(self):
+        # (build.sh's rule: the 30B's own decode modules, and the 35B's dec_q35m and dec_q35m_kvq8, not its attention kernel)
+        own = [n for n in kernels.RUNTIME_SET if (n.startswith('dec_q3m') or n in ('dec_q35m', 'dec_q35m_kvq8')) and not n.endswith('_w4')]
+        self.assertTrue(own); self.assertIn('dec_q35m_w4', kernels.CARD_W4); self.assertIn('dec_q35m_kvq8_w4', kernels.CARD_W4)
+        self.assertEqual(sorted(n + '_w4' for n in own), sorted(kernels.CARD_W4))
+
+    def test_card_object_follows_the_grid_and_the_files(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, 'dec_q3m_w4.hsaco'), 'wb').close()
+            with patch.object(hip, 'BUILD', d), patch.object(k3.torch.cuda, 'is_available', lambda: True):
+                for per, name, want in ((4, 'dec_q3m', 'dec_q3m_w4'), (5, 'dec_q3m', 'dec_q3m'),
+                                        (4, 'dec_q3m_iq', 'dec_q3m_iq')):   # (no dec_q3m_iq_w4 file: the module itself)
+                    with patch.dict(os.environ, {'K3_CARD_PER_WGP': str(per)}):
+                        self.assertEqual(k3.card_object(name), want, (per, name))
+                with patch.dict(os.environ, {'K3_CARD_PER_WGP': '4', 'K3_CARD_OBJECTS': '0'}):
+                    self.assertEqual(k3.card_object('dec_q3m'), 'dec_q3m')
 
 if __name__ == '__main__':
     result = unittest.main(exit=False).result

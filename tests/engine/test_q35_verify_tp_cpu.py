@@ -1,7 +1,7 @@
 """The two-card verify tape's host side without a card (caminus.engine.q35_dense_verify_tp.Dense35VerifyTP on Dense35TP with
 spec_T): the tiny synthetic models with two-card shapes (tests/engine/tiny_q35.py tp=True), on stand-ins for the torch.cuda
 and HIP calls (every tensor in host memory; nothing is launched):
-  - the module: k3.Q35_TPV_OF maps each two-card module to its verify build (k3_q35_{swift,tcap}_tp_ver); Dense35VerifyTP
+  - the module: k3.Q35_TPV_OF maps each two-card module to its verify build (dec_q35_{swift,tcap}_tp_ver); Dense35VerifyTP
     takes it by default and refuses any other; T outside 1 .. 4, T above the engine's spec_T, and an engine without spec_T
     are refused
   - the tapes: every op one the module dispatches (k3.Q35S_OPS + OP_XCHG), 2 exchanges per block on each card with indices
@@ -73,12 +73,12 @@ P_S = os.path.join(A.scratch, 'tiny-tp-swift.gguf'); iS = tiny_q35.write(P_S, tp
 P_T = os.path.join(A.scratch, 'tiny-tp-tcap.gguf'); iT = tiny_q35.write(P_T, variant='tcap', tp=True)
 
 # ---- the module mapping and the refusals --------------------------------------------------------------------------------
-good = k3.Q35_TPV_OF == {'k3_q35_swift_tp': 'k3_q35_swift_tp_ver', 'k3_q35_tcap_tp': 'k3_q35_tcap_tp_ver'}
+good = k3.Q35_TPV_OF == {'dec_q35_swift_tp': 'dec_q35_swift_tp_ver', 'dec_q35_tcap_tp': 'dec_q35_tcap_tp_ver'}
 good &= all(m in k3.Q35V_MODULES and m in k3.ATTN_PACK_MODULES and m in k3.Q35_SPLIT_MODULES for m in k3.Q35TPV_MODULES)
 good &= all(k3.MODULE_CAPS[m] for m in k3.Q35TPV_MODULES)
 check(good, 'k3.Q35_TPV_OF maps each two-card module to its verify build; the verify builds are T-token, packed-split modules with caps')
 eng = Dense35TP(P_S, devices=(0, 1), max_ctx=64, vram_check=False, spec_T=MAX_T)
-try: Dense35VerifyTP(eng, MAX_T, module='k3_q35_swift_ver'); refused = False
+try: Dense35VerifyTP(eng, MAX_T, module='dec_q35_swift_ver'); refused = False
 except ValueError: refused = True
 try: Dense35VerifyTP(eng, 0); refused0 = False
 except ValueError: refused0 = True
@@ -94,7 +94,7 @@ check(refused and refused0 and refusedT and refusedS and refusedE,
       'a one-card verify module, T outside 1 .. 4, T above spec_T and an engine without spec_T are all refused')
 
 # ---- the tapes ----------------------------------------------------------------------------------------------------------
-for path, info, want_mod in ((P_S, iS, 'k3_q35_swift_tp_ver'), (P_T, iT, 'k3_q35_tcap_tp_ver')):
+for path, info, want_mod in ((P_S, iS, 'dec_q35_swift_tp_ver'), (P_T, iT, 'dec_q35_tcap_tp_ver')):
     m = Dense35TP(path, devices=(0, 1), max_ctx=64, vram_check=False, spec_T=MAX_T)
     nl = info['blocks']; D = m.D
     check(m.spec_T == MAX_T and m.commit_max() == 0, f'{os.path.basename(path)}: spec_T {m.spec_T}, commit_max 0 after a reset')
@@ -355,7 +355,7 @@ check(tp.placement_extra(dict(opt, draft='mtp'), cards) == {'draft_card': 0} and
       'placement stores MTP on card 0 and nothing without a drafter')
 
 # Two-card drafting is served for Swift 1.5 and ThinkingCap (no environment switch), DFlash2 by default; a file whose
-# decode module has no two-card verify object (the plain 27B's k3_q35_gsq) is refused it in serve and build.
+# decode module has no two-card verify object (the plain 27B's dec_q35_gsq) is refused it in serve and build.
 tp = arch.ARCHS['qwen35-own-tp']
 P_G = os.path.join(A.scratch, 'tiny-tp-gsq.gguf'); tiny_q35.write(P_G, variant='gsq', tp=True)
 why = [tp.draft_refusal(d, p) for d in ('mtp', 'dflash') for p in (P_S, P_T, P_M, None)]
@@ -378,12 +378,12 @@ try:
     gsq = (recipe(model=P_G, draft='mtp'), recipe(model=P_G, draft='dflash', drafter=P_D), recipe(model=P_G, draft=None, drafter=P_D))
 finally:
     _cli._arch.of = keep_of
-check(all(w is None for w in why) and all(w and 'k3_q35_gsq' in w for w in why_g) and tp.draft_refusal('off', P_G) is None
+check(all(w is None for w in why) and all(w and 'dec_q35_gsq' in w for w in why_g) and tp.draft_refusal('off', P_G) is None
       and built_g == 'refused' and served == ('mtp', 'dflash', 'off') and dflt == ('dflash', 'off') and gsq == ('refused', 'refused', 'off')
       and tp.default_draft(dict(model=P_T)) == 'dflash' and tp.default_draft(dict(model=P_S)) == 'dflash'
       and tp.default_draft(dict(model=P_G)) == 'off',
       f'two-card drafting served without any environment switch (serve recipe {served}; no --draft: {dflt}); '
-      f'a k3_q35_gsq file refused it (recipe {gsq}, build {built_g}) and defaults plain')
+      f'a dec_q35_gsq file refused it (recipe {gsq}, build {built_g}) and defaults plain')
 # The default drafter keeps serve.cli.keep_default_draft's rule on two cards: kept when MIN_CTX (or --max-ctx) fits with
 # it on the cards, else plain with the full context; an explicit --draft dflash is kept either way.
 from caminus.device import host as _host

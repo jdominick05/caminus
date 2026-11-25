@@ -22,7 +22,7 @@ int main(int argc, char ** argv) {
     const size_t base = arena.used;
     hipStream_t s; HIP_CHECK(hipStreamCreate(&s));
     rocblas_handle blas; BLAS_CHECK(rocblas_create_handle(&blas)); BLAS_CHECK(rocblas_set_stream(blas, s));
-    Module actq, attn; actq.load("actq"); attn.load("attn");
+    Module actq, attn; actq.load("train_actq"); attn.load("train_attn");
     const int T = (int)G["tokens"].numel(), D = 896, H = 14, KV = 2, HD = 64;
     for (int i : {3, 7, 11}) {
         arena.reset(base);

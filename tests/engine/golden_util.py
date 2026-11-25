@@ -1,6 +1,6 @@
 """Shared helpers of the tests/test_golden_*.py checks (K3 engine vs llama.cpp's own tensors from tools/gg_golden), for
-both Flash-Next models: REAP-308 (Q8_0 hc, F32 router, module k3_gguf) and the GSQ-RCO Coder (BF16 hc / router / alpha /
-beta / PLE key-value, the K-quant and IQ formats of docs/specs/spec-gsq-port.md, module k3_gguf_gsq).
+both Flash-Next models: REAP-308 (Q8_0 hc, F32 router, module dec_q4x_gg) and the GSQ-RCO Coder (BF16 hc / router / alpha /
+beta / PLE key-value, the K-quant and IQ formats of docs/specs/spec-gsq-port.md, module dec_q4x_gsq).
 
 Gate G3 of the GSQ port (spec S4): an op whose kernel reproduces llama.cpp's summation order must be BITWISE equal to
 llama.cpp's tensor when fed llama.cpp's own input; every other op within 1e-6 relative. Bitwise is expected for
@@ -35,13 +35,24 @@ class Golden:
         r = [r for r in self.idx if int(r[0]) == step and r[2] == name][nth]; ne = [int(v) for v in r[4:8]]
         return np.fromfile(f'{self.gd}/{r[8]}', dtype=np.float32 if r[3] == 'f32' else np.int32).reshape(ne[::-1]).squeeze()
 
+    def get(self, step, name, nth=0):
+        """golden(step, name, nth), or None when the dump lacks it (a layer not dumped, a non-contiguous view it skipped)"""
+        r = [r for r in self.idx if int(r[0]) == step and r[2] == name]
+        return None if len(r) <= nth or r[nth][8].startswith('skipped') else self(step, name, nth)
+
     def tokens(self):
         return [int(v) for v in open(f'{self.gd}/tokens.txt').read().split()]
 
 
+def nrel(a, b):
+    """the largest over positions (the first axis) of ||a - b|| / ||b||: a block's error against llama.cpp's at each step"""
+    a = np.asarray(a, np.float64).reshape(len(a), -1); b = np.asarray(b, np.float64).reshape(len(b), -1)
+    return float(max(np.linalg.norm(x - y) / max(np.linalg.norm(y), 1e-30) for x, y in zip(a, b)))
+
+
 class Model:
     """the GGUF's tensors (memory-mapped; a split GGUF's first shard holds every tensor the engine reads) and the K3 module
-    its formats need (caminus.engine.flashnext.pick_module: k3_gguf for REAP-308, k3_gguf_gsq for the Coder)"""
+    its formats need (caminus.engine.flashnext.pick_module: dec_q4x_gg for REAP-308, dec_q4x_gsq for the Coder)"""
     def __init__(self, path):
         self.path = path
         self.rd = G.GGUFReader(path, 'r'); self.T = {t.name: t for t in self.rd.tensors}

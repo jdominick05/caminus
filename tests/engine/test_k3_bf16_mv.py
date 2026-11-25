@@ -1,4 +1,4 @@
-"""Gates G2 / G2b of the GSQ port (docs/specs/spec-gsq-port.md S2): OP_BF16_MV (kernels/k3_gguf_ops.h) against llama.cpp's
+"""Gates G2 / G2b of the GSQ port (docs/specs/spec-gsq-port.md S2): OP_BF16_MV (kernels/ops_gg.h) against llama.cpp's
 own BF16 x F32 matvec, mul_mat_vec_f<nv_bfloat16, float, ncols_dst, block_size> (ignite-llama ggml-cuda/mmvf.cu: what
 ignite's HIP build runs for every BF16 matrix at ne11 = 1, and at ne11 = 4 for the matrices MMF does not take: hc inject,
 ssm alpha / beta, the shared-expert gate), on real GSQ-RCO Coder tensors read with O_DIRECT (shard 1 only).
@@ -6,18 +6,18 @@ References (both must agree bitwise, and the engine with both):
   shipped  the gfx1100 code object of ignite's build (build-hip-therock .../ggml-cuda/mmvf.cu.o, unbundled), whose bf16
            kernel bodies are checked byte for byte inside bin/libggml-hip.so (what llama-server loads); the silu input of
            the hc up comes from the same build's unary.cu.o: scale_unary_kernel<op_silu> (ggml_scale + ggml_silu fused)
-  source   build/gg_mmvf_ref.hsaco: mmvf.cu compiled from the ignite tree by build.sh with ignite's flags
+  source   build/ref_gg_mmvf.hsaco: mmvf.cu compiled from the ignite tree by build.sh with ignite's flags
 checks
   G2   disassembly of the shipped bf16 kernels: the col2 loop does 2 FMAs per token (v_fmac_f32 / v_fma_f32), no
        v_mul_f32 / v_dot2 / v_pk_fma (fp contraction as assumed), and the float mode of k3_run's descriptor equals theirs
-  G2b  (a) T = 1 (module k3_gguf_gsq): engine == mul_mat_vec_f<..., 1, bs> bitwise, at 3 / 5 / 6 / 7 / 8 workgroups per
+  G2b  (a) T = 1 (module dec_q4x_gsq): engine == mul_mat_vec_f<..., 1, bs> bitwise, at 3 / 5 / 6 / 7 / 8 workgroups per
            WGP and rows_per_task 8 / 16 / 5 / 1 / 2 / 3 / 4, every card; K = 10240 (hc down, inject, output_hc down), 2560 (router, shared
            gate, alpha, beta, ple key / value, indexer q), 320 (hc up and output_hc up through the silu path)
-       (b) T = 2 / 3 / 4 (module k3_gguf_gsq_mt, rows_per_task 16 (5 at 5 WG/WGP) / 1 / 3): every token's row == T = 1's, and T = 4 == mul_mat_vec_f<..., 4, bs>
+       (b) T = 2 / 3 / 4 (module dec_q4x_gsq_ver, rows_per_task 16 (5 at 5 WG/WGP) / 1 / 3): every token's row == T = 1's, and T = 4 == mul_mat_vec_f<..., 4, bs>
        (c) the alpha path llama.cpp runs fused (mul_mat_vec_f<..., 1, 256, has_fusion> with x_bias = dt bias) == the
            engine's output + the bias (one fp32 add), so K3's separate add stays bitwise
   tools/guard.sh LOG 900 python -I tests/engine/test_k3_bf16_mv.py [CODER-00001-of-00002.gguf] [--cards 0,1] [--wgp 3,5,6,7,8]
-      [--module k3_gguf_gsq | k3_gguf_gsq_trace] [--ignite ~/src/ignite-llama/build-hip-therock]"""
+      [--module dec_q4x_gsq | dec_q4x_gsq_trace] [--ignite ~/src/ignite-llama/build-hip-therock]"""
 import ctypes, os, re, struct, subprocess, sys, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
 import torch
@@ -32,8 +32,8 @@ def opt(name, default):
     return default
 CARDS = [int(v) for v in opt('--cards', '0,1').split(',')]
 WGP = [int(v) for v in opt('--wgp', '3,5,6,7,8').split(',')]
-M1 = opt('--module', 'k3_gguf_gsq'); assert M1 in ('k3_gguf_gsq', 'k3_gguf_gsq_trace'), M1
-MT = M1.replace('k3_gguf_gsq', 'k3_gguf_gsq_mt')
+M1 = opt('--module', 'dec_q4x_gsq'); assert M1 in ('dec_q4x_gsq', 'dec_q4x_gsq_trace'), M1
+MT = M1.replace('dec_q4x_gsq', 'dec_q4x_gsq_ver')
 IGN = os.path.expanduser(opt('--ignite', '~/src/ignite-llama/build-hip-therock'))
 TR = os.path.join(os.environ.get('ROCM_PATH') or os.path.expanduser('~/rocm-therock/10.2.0a20261011'), 'llvm', 'bin', '')   # as build.sh
 from caminus import devpaths  # noqa: E402  (CODER / REAP / ARTIFACTS: CLAUDE.md, "Models and data")
@@ -177,7 +177,7 @@ CASES = [  # (tensor, silu): every BF16 shape class of the Coder's decode tape
 
 def run_card(card):
     dev = f'cuda:{card}'; n_ok = n_all = 0
-    refs = {'shipped': Ref(CO_MMVF), 'source': Ref(os.path.join(BUILD, 'gg_mmvf_ref.hsaco'))}
+    refs = {'shipped': Ref(CO_MMVF), 'source': Ref(os.path.join(BUILD, 'ref_gg_mmvf.hsaco'))}
     silu_ref = Ref(CO_UNARY)
     for name, silu in CASES:
         t = TT[name]; K = int(t.shape[0]); N = int(t.shape[1]) if len(t.shape) > 1 else 1

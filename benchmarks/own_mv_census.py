@@ -3,7 +3,7 @@ same bytes (docs/specs/spec-own-quant.md). Qwen3-30B-A3B (qwen3moe): the decode-
 v, o, router, 8 x gate, 8 x up, 8 x down) + the vocab head = 1,393 matvecs. The dense qwen35 line (Qwen3.8-27B: Swift,
 ThinkingCap): every trunk tensor once per token (the 48 Gated DeltaNet layers' qkv, gate and out, the 16 attention
 layers' q, k, v and output, 64 x the feed-forward's gate, up and down, the head; the multi-token-prediction block and the
-F32 / BF16 alpha / beta excluded), on kernels/own_mv_q35.hip's tiles in K3's form. The GGUF is read with caminus.ggufio
+F32 / BF16 alpha / beta excluded), on kernels/bench_own_mv_q35.hip's tiles in K3's form. The GGUF is read with caminus.ggufio
 (our reader).
 
 Per distinct (role, format, rows, K):
@@ -39,14 +39,14 @@ ap.add_argument('--formats', default=None, help='comma-separated formats to time
 ap.add_argument('--log', default=None, help='append the result lines to this file too')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
-OWN = Module('own_mv')
+OWN = Module('bench_own_mv')
 rng = np.random.default_rng(0)
 F = ggufio.GGUFFile(A.gguf)
 NL = min(A.layers or 10 ** 6, int(F.hp('block_count')))
 DENSE = F.meta.get('general.architecture') == 'qwen35' and F.hp('expert_count') is None
 KU, NE = (1, 1) if DENSE else (int(F.hp('expert_used_count')), int(F.hp('expert_count')))
 if DENSE: NL = min(A.layers or 10 ** 6, int(F.hp('block_count')) - int(F.hp('nextn_predict_layers', 0)))   # (the trunk)
-OWNQ = Module('own_mv_q35') if DENSE else None
+OWNQ = Module('bench_own_mv_q35') if DENSE else None
 GEN = ('Q8_0',) if A.q5k == '1rt' else ('Q5_K', 'Q8_0')   # (the general rows tiles: 4 rows per wave)
 OUT = []
 Q8_SAME = []
@@ -140,8 +140,8 @@ for role in ROLES:
         yref = W64 @ x32.double().cpu().numpy(); sc = np.sqrt((yref ** 2).mean())
         acc = {}
         if has_llama:
-            G._m('k3_gguf_q35h' if qt in G.MV_Q35H else 'k3_gguf_gsq' if qt in G.MV_GSQ else 'k3_gguf')
-            ml = G._m('k3_gguf_q35h' if qt in G.MV_Q35H else 'k3_gguf_gsq' if qt in G.MV_GSQ else 'k3_gguf')
+            G._m('dec_q35m_hh' if qt in G.MV_Q35H else 'dec_q4x_gsq' if qt in G.MV_GSQ else 'dec_q4x_gg')
+            ml = G._m('dec_q35m_hh' if qt in G.MV_Q35H else 'dec_q4x_gsq' if qt in G.MV_GSQ else 'dec_q4x_gg')
             kll = getattr(ml, G.MV[qt])
             run_llama = lambda w: kll(((rows + 3) // 4,), (32, 4), w, yq, out, ctypes.c_int(rows), ctypes.c_int(K))
             out.zero_(); run_llama(Wl[0]); torch.cuda.synchronize()

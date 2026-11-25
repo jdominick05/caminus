@@ -24,7 +24,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""The batched prefill's dense quantized GEMMs of our own (kernels/prefill_dense.hip, impl:q6k-dense; project decision 11-03:
+"""The batched prefill's dense quantized GEMMs of our own (kernels/pf_gg_dense.hip, impl:q6k-dense; project decision 11-03:
 prefill GEMM kernels of our own), replacing the vendored MMQ's mul_mat_q (caminus.prefill.mmq.MMQ.mm) for the Q6_K dense matrices:
 
   mm(fmt, w, rows, K, y, ncols, dst)   dst[c * rows + r] = sum_k W[r, k] x[c, k] for c < ncols; W: [rows][K] raw Q6_K rows;
@@ -48,7 +48,7 @@ from ..device.hip import Module
 
 FORMATS = ('Q6_K',)
 JS = (16, 32, 48, 64, 96, 128)
-VDS = (0, 1, 2, 3)            # the tile products (kernels/prefill_dense.hip): 0 the vendored one (the control), 1 .. 3 ours
+VDS = (0, 1, 2, 3)            # the tile products (kernels/pf_gg_dense.hip): 0 the vendored one (the control), 1 .. 3 ours
 JS_VD = {vd: JS for vd in VDS}
 VD = 3                        # the default (measured: tests/prefill/test_prefill_dense.py speed)
 CFG_WORDS = 9
@@ -82,7 +82,7 @@ class Dense:
 
     def _load(self, fmt):
         if fmt not in FORMATS: raise ValueError(f'dense: no kernels for {fmt}')
-        name = f'prefill_dense_{fmt.lower()}'
+        name = f'pf_gg_dense_{fmt.lower()}'
         with torch.cuda.device(self.dev):
             mod = Module(name); self.mods[name] = mod
             self.kdeq[fmt] = mod.k3_dense_deq_bf16
@@ -124,7 +124,7 @@ class Dense:
 
     def deq_bf16(self, fmt, w, rows, K, out, stream=None):
         """out [rows][K] bf16 = W dequantized (ggml's dequantize_row_q6_K in fp32, each value rounded to bf16): candidate (b) of
-        impl:q6k-dense, the B operand (W) of gemm.hip's WMMA (ChunkStack(q6k='wmma')). Not bitwise MMQ: a tolerance"""
+        impl:q6k-dense, the B operand (W) of pf_gemm.hip's WMMA (ChunkStack(q6k='wmma')). Not bitwise MMQ: a tolerance"""
         rows, K = int(rows), int(K)
         if fmt != 'Q6_K': raise ValueError(f'dense.deq_bf16: {fmt} (Q6_K only)')
         if K < mmq.K_VRAM or K % mmq.K_VRAM or rows < 1: raise ValueError(f'dense.deq_bf16: rows {rows}, K {K}')
@@ -151,7 +151,7 @@ class Dense:
 def bf16_layout(T, d):
     """name -> bytes of one card's buffers for ChunkStack(q6k='wmma') at chunks of up to T tokens (d: mmq.card_dims): w_bf the
     largest dense matrix of the card's shapes as bf16 (each Q6_K matrix is dequantized into it right before its GEMM), x_bf the
-    activation's bf16 copy (tpad(T) rows x the widest K: gemm.hip's A operand)"""
+    activation's bf16 copy (tpad(T) rows x the widest K: pf_gemm.hip's A operand)"""
     T = int(T); Tw = -(-T // mmq.WMMA_ROWS) * mmq.WMMA_ROWS
     L = dict(w_bf=2 * max(d['qkv'] * d['D'], d['z'] * d['D'], d['D'] * d['ssm_K'], d['q'] * d['D'], d['kv'] * d['D'],
                           d['D'] * d['ao_K'], d['ffc'] * d['D'], d['D'] * d['ffc']),

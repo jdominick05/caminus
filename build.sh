@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build every kernels/*.hip into a gfx1100 code object (build/<name>.hsaco), then the C++ runtime tests.
+# Build every kernels/*.hip and every kernels/objects.tsv row (a source with defines) into a gfx1100 code object
+# (build/<name>.hsaco), then the C++ runtime tests.
 # Code objects are runtime-neutral: PyTorch's HIP 7.2 runtime and TheRock's both load them via hipModuleLoadData.
 # BUILD_JOBS compiles run at once (default: the CPU count, at most 8; 1 = one after another). Every object is its own
 # compiler run with its own intermediates, so the count changes no byte of any output, and the output's order (this
@@ -29,7 +30,7 @@ finish() {   # wait for every job; print each one's output and name in the order
     QUEUE=()
     [ ${#bad[@]} = 0 ] || { echo "build.sh: FAILED: ${bad[*]}" >&2; exit 1; }
 }
-# k3_gguf.hip includes llama.cpp's ggml-cuda headers (vecdotq.cuh: the GGUF block formats) from the ignite-llama tree
+# dec_q4x_gg.hip includes llama.cpp's ggml-cuda headers (vecdotq.cuh: the GGUF block formats) from the ignite-llama tree
 IG=${IGNITE:-$HOME/src/ignite-llama}
 GG=$IG/ggml
 # provenance inputs for tools/stage_kernels.py (docs/dev/packaging.md): build/BUILD-INFO (the toolchain, the sources' commit,
@@ -59,33 +60,73 @@ info source_dirty "$src_dirty"
 info kernel_tree_sha256 "$(find kernels build.sh -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)"
 info ggml_commit "$gg_commit"
 info ggml_dirty "$gg_dirty"
-for src in kernels/*.hip; do
-    out=build/$(basename "$src" .hip).hsaco
-    # test builds (kernels/k3_gguf*_swiglu.hip: REAP-308 with the swiglu glue, the forced-unfused shared expert) only
-    # with K3_TEST_BUILDS=1
-    case "$src" in *_swiglu.hip) [ "${K3_TEST_BUILDS:-0}" = 1 ] || continue ;; esac
-    case "$src" in kernels/prefill_mmq.hip|kernels/prefill_moe.hip|kernels/prefill_dense.hip) continue ;; esac   # below: their own pipeline
-
-    extra=(); std=c++20
-    # k3_gguf*: LLVM's max-ilp machine scheduler (not occupancy-driven): the dense matvec loops issue their weight loads in
-    # batches instead of one wait per dependent pair (attn_qkv 29.7 -> 17.6 us, hc_*_down 15 -> 10), same instructions
-    # otherwise (bitwise); TP decode 13.56 -> 12.19 ms/token. It does not trade registers for occupancy: register-heavy
-    # code spills at the 96-VGPR cap sooner than under the default scheduler (check llvm-readelf after changes)
-    case "$src" in kernels/k3_q3m*.hip|kernels/k3_q35_*.hip) extra=(-mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;   # (the own decode modules: k3_gguf's scheduler, no ggml headers)
-    esac
-    case "$src" in *k3_gguf*.hip|*gg_mv_ref.hip) extra=(-DGGML_USE_HIP -D__HIP_PLATFORM_AMD__ -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda" -mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;
-    # gg_mmvf_ref: ignite's mmvf.cu as is, with ignite's compile flags (build-hip-therock compile_commands.json): the BF16
+build_one() {   # build_one NAME SOURCE [-DMACRO[=VALUE] ...]: build/NAME.hsaco from kernels/SOURCE with these defines
+    local name=$1 src=kernels/$2; shift 2
+    local out=build/$name.hsaco extra=() std=c++20
+    case "$name" in
+    # the builds of dec_q4x_gg.hip (caminus.engine.k3.GGUF_BUILDS; they include llama.cpp's ggml-cuda headers) and ref_gg_mv:
+    # LLVM's max-ilp machine scheduler (not occupancy-driven): the dense matvec loops issue their weight loads in batches
+    # instead of one wait per dependent pair (attn_qkv 29.7 -> 17.6 us, hc_*_down 15 -> 10), same instructions otherwise
+    # (bitwise); TP decode 13.56 -> 12.19 ms/token. It does not trade registers for occupancy: register-heavy code spills at
+    # the 96-VGPR cap sooner than under the default scheduler (check llvm-readelf after changes)
+    dec_q4x_*|dec_q35_arex*|dec_q35m_gg*|dec_q35m_hh*|dec_q3m_gg*|dec_q3n*|ref_gg_mv)
+        extra=(-DGGML_USE_HIP -D__HIP_PLATFORM_AMD__ -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda" -mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;
+    # ref_gg_mmvf: ignite's mmvf.cu as is, with ignite's compile flags (build-hip-therock compile_commands.json): the BF16
     # matvec reference of tests/test_k3_bf16_mv.py
-    *gg_mmvf_ref.hip) extra=(-DNDEBUG -fPIC -DGGML_USE_HIP -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 -DGGML_HIP_GRAPHS -DGGML_HIP_NO_VMM
-                             -DGGML_SCHED_MAX_COPIES=4 -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SHARED -D_GNU_SOURCE -D_XOPEN_SOURCE=600
-                             -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda"); std=gnu++17 ;;
+    ref_gg_mmvf) extra=(-DNDEBUG -fPIC -DGGML_USE_HIP -D__HIP_PLATFORM_AMD__=1 -D__HIP_ROCclr__=1 -DGGML_HIP_GRAPHS -DGGML_HIP_NO_VMM
+                        -DGGML_SCHED_MAX_COPIES=4 -DGGML_BACKEND_BUILD -DGGML_BACKEND_SHARED -DGGML_SHARED -D_GNU_SOURCE -D_XOPEN_SOURCE=600
+                        -I"$GG/include" -I"$GG/src" -I"$GG/src/ggml-cuda"); std=gnu++17 ;;
+    # dec_q35m, dec_q35m_kvq8*: max-memory-clause instead of the other own modules' max-ilp (XT, 35B, prefetch 16 x 16): the
+    # same bits; 79 / 83 -> 77 / 81 VGPRs, fewer spilled SGPRs; F16 short 4.75 -> 4.74 ms, Q8 32K 6.36 -> 6.38, Q8 128K
+    # 11.07 -> 10.94. The default scheduler: 5.27 / 7.18 / 13.08 (it issues the matvec loads one wait at a time)
+    dec_q35m|dec_q35m_kvq8*) extra=(-mllvm -amdgpu-sched-strategy=max-memory-clause); std=c++17 ;;
+    # the own decode modules: the GGUF builds' scheduler, no ggml headers
+    dec_q3m|dec_q3m_*|dec_q35_*) extra=(-mllvm -amdgpu-sched-strategy=max-ilp); std=c++17 ;;
+    # pf_q3m_mm / pf_q35m_mm (the 30B's and the 35B's wide prefill GEMM tiles): max-ilp too (a 2048-token chunk's
+    # 30B Q4_K GEMMs 216 -> 205 ms, the 35B's Q2_0 experts 92.3 -> 91.6 ms; the same bits); pf_q3m and pf_q35m
+    # stay on the default scheduler (their narrow GEMMs and attention spill under max-ilp)
+    pf_q3m_mm|pf_q35m_mm) extra=(-mllvm -amdgpu-sched-strategy=max-ilp) ;;
     esac
-    cmd=("$TR/bin/amdclang++" -x hip --rocm-path="$TR" --offload-arch="$ARCH" --offload-device-only --no-gpu-bundle-output
-         -mcode-object-version=5 -O3 -std=$std -Ikernels "${extra[@]}" -o "$out" "$src")
+    local -a cmd=("$TR/bin/amdclang++" -x hip --rocm-path="$TR" --offload-arch="$ARCH" --offload-device-only --no-gpu-bundle-output
+                  -mcode-object-version=5 -O3 -std=$std -Ikernels "${extra[@]}" "$@" -o "$out" "$src")
     logcmd "$out" "${cmd[*]}"
     slot "$out"; { "${cmd[@]}" > "$(joblog "$out")" 2>&1 && : > "$(jobok "$out")"; } &
+    # the own decode modules once more for a 4-workgroups-per-WGP grid (the XTX): <name>_w4, VGPR cap 192 instead of 144
+    # (kernels/dec_core.hip K3_PER_WGP); caminus.engine.k3 loads it on a card whose grid is 4 per WGP
+    case "$name" in
+    dec_q3m_gg*) ;;
+    dec_q3m|dec_q3m_*|dec_q35m|dec_q35m_kvq8*)
+        local o4=build/${name}_w4.hsaco; local -a c4=("${cmd[@]:0:${#cmd[@]}-3}" -DK3_PER_WGP=4 -o "$o4" "$src")
+        logcmd "$o4" "${c4[*]}"
+        slot "$o4"; { "${c4[@]}" > "$(joblog "$o4")" 2>&1 && : > "$(jobok "$o4")"; } & ;;
+    esac
+}
+for src in kernels/*.hip; do
+    name=$(basename "$src" .hip)
+    case "$name" in pf_gg_mmq|pf_gg_moe|pf_gg_dense) continue ;; esac   # below: their own pipeline
+    build_one "$name" "$name.hip"
 done
-# kernels/prefill_mmq.hip (the batched prefill's quantized GEMMs: ggml-cuda's MMQ vendored in kernels/ggml_mmq, MIT): one
+# kernels/objects.tsv: the objects built from another source with defines (OBJECT SOURCE DEFINES; the table's head says
+# how a row reads). A row's defines come first, then its SOURCE row's, as the include chain of define files did
+declare -A row_src row_defs; rows=()
+while IFS=$'\t' read -r obj src defs; do
+    case "$obj" in ''|'#'*) continue ;; esac
+    if [ -e "kernels/$obj.hip" ] || [ -n "${row_src[$obj]+x}" ] || [ -z "$defs" ]; then
+        echo "build.sh: kernels/objects.tsv row '$obj': a kernels/$obj.hip, a second row or no defines" >&2; exit 1
+    fi
+    row_src[$obj]=$src; row_defs[$obj]=$defs; rows+=("$obj")
+done < kernels/objects.tsv
+for obj in "${rows[@]}"; do
+    o=$obj; args=()
+    while [ -n "${row_src[$o]+x}" ]; do
+        IFS=';' read -ra ds <<< "${row_defs[$o]}"
+        for d in "${ds[@]}"; do case "$d" in *=*) args+=("-D$d") ;; *) args+=("-D$d=") ;; esac; done
+        o=${row_src[$o]}
+    done
+    [ -f "kernels/$o.hip" ] || { echo "build.sh: kernels/objects.tsv row '$obj': no kernels/$o.hip" >&2; exit 1; }
+    build_one "$obj" "$o.hip" "${args[@]}"
+done
+# kernels/pf_gg_mmq.hip (the batched prefill's quantized GEMMs: ggml-cuda's MMQ vendored in kernels/ggml_mmq, MIT): one
 # code object per format and one for the glue, each built the way ignite builds the same kernels (its compile_commands
 # flags; a full HIP compile, -c, whose device half goes through the offload driver's LTO; the gfx1100 object unbundled).
 # That is what makes the kernels' instructions equal to ignite's shipped ones (tests/test_prefill_mmq.py codegen):
@@ -104,24 +145,24 @@ pfbuild() {   # pfbuild OUT OBJ SRC DEFINE...: the pipeline above (a full HIP co
     slot "$out"; { { "${c1[@]}" && "${c2[@]}" && "${c3[@]}"; } > "$(joblog "$out")" 2>&1 && : > "$(jobok "$out")"; } &
 }
 for v in IQ2_S IQ3_S IQ3_XXS IQ4_NL IQ4_XS Q2_0 Q3_K Q4_K Q5_K Q6_K Q8_0 GLUE GLUE8; do
-    n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/prefill_mmq_$n; out=build/prefill_mmq_$n.hsaco
+    n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/pf_gg_mmq_$n; out=build/pf_gg_mmq_$n.hsaco
     case $v in GLUE) def=(-DK3_MMQ_GLUE) ;; GLUE8) def=(-DK3_MMQ_GLUE -DK3_MMQ_IDS_K=8) ;; *) def=(-DK3_MMQ_TYPE=GGML_TYPE_$v) ;; esac   # GLUE8: qwen35moe's top-8
-    pfbuild "$out" "$o" kernels/prefill_mmq.hip "${def[@]}"
+    pfbuild "$out" "$o" kernels/pf_gg_mmq.hip "${def[@]}"
 done
-# kernels/prefill_moe.hip (the batched prefill's own MoE grouped GEMMs; it compiles the vendored MMQ's per-format load_tiles /
-# vec_dot): the same pipeline and flags as prefill_mmq, one object per MoE format (the Coder's gate / up IQ2_S IQ3_S IQ3_XXS
+# kernels/pf_gg_moe.hip (the batched prefill's own MoE grouped GEMMs; it compiles the vendored MMQ's per-format load_tiles /
+# vec_dot): the same pipeline and flags as pf_gg_mmq, one object per MoE format (the Coder's gate / up IQ2_S IQ3_S IQ3_XXS
 # IQ4_XS, down IQ4_NL Q2_0) and one for the grouping
 for v in IQ2_S IQ3_S IQ3_XXS IQ4_XS IQ4_NL Q2_0 GLUE; do
-    n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/prefill_moe_$n; out=build/prefill_moe_$n.hsaco
+    n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/pf_gg_moe_$n; out=build/pf_gg_moe_$n.hsaco
     if [ "$v" = GLUE ]; then def=-DK3_MOE_GLUE; else def=-DK3_MOE_TYPE=GGML_TYPE_$v; fi
-    pfbuild "$out" "$o" kernels/prefill_moe.hip "$def"
+    pfbuild "$out" "$o" kernels/pf_gg_moe.hip "$def"
 done
-# kernels/prefill_dense.hip (the batched prefill's own dense quantized GEMMs, impl:q6k-dense; it compiles the vendored MMQ's
+# kernels/pf_gg_dense.hip (the batched prefill's own dense quantized GEMMs, impl:q6k-dense; it compiles the vendored MMQ's
 # load_tiles / vec_dot / write_back for its control variant and the tile helpers for ours): the same pipeline and flags as
-# prefill_mmq, one object per format (Q6_K)
+# pf_gg_mmq, one object per format (Q6_K)
 for v in Q6_K; do
-    n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/prefill_dense_$n; out=build/prefill_dense_$n.hsaco
-    pfbuild "$out" "$o" kernels/prefill_dense.hip -DK3_DENSE_TYPE=GGML_TYPE_$v
+    n=$(echo "$v" | tr 'A-Z' 'a-z'); o=build/obj/pf_gg_dense_$n; out=build/pf_gg_dense_$n.hsaco
+    pfbuild "$out" "$o" kernels/pf_gg_dense.hip -DK3_DENSE_TYPE=GGML_TYPE_$v
 done
 finish
 # BUILD_KERNELS_ONLY=1 stops here (tools/release/release_build.sh, the CI image): the runtime tests below are not shipped and

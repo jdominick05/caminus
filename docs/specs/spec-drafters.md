@@ -31,8 +31,8 @@ DRAFTERS INSIDE K3: spec for DFlash 2 and the model's MTP layer. Nothing was bui
   - **Coder IQ1_M: 68-70%** (DETAILS.md:1425). Q2_0 draft layer: 88.7% (NVFP4.md:201). vLLM probe: 0.89/0.86/0.85 per step (mtp.hpp:4).
   - sh0wie card: 44-68%. Our unsloth MTP Q8 sidecar: 52% (D-042). Its local file was not reachable, so a fresh 5.2 GB download is the weight source.
 - **K3 today:**
-  - GGUF types: IQ3_XXS, IQ4_NL, Q6_K, Q8_0 (k3_gguf_ops.h:8). The Coder port adds IQ2_S, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q2_0 and BF16.
-  - OP_ATTN_DEC handles any D <= 512 and any kv_heads, causal from position 0 (k3_gguf_ops.h:1027-1036). It has no window start and no non-causal mode.
+  - GGUF types: IQ3_XXS, IQ4_NL, Q6_K, Q8_0 (ops_gg.h:8). The Coder port adds IQ2_S, IQ3_S, IQ4_XS, Q4_K, Q5_K, Q2_0 and BF16.
+  - OP_ATTN_DEC handles any D <= 512 and any kv_heads, causal from position 0 (ops_gg.h:1027-1036). It has no window start and no non-causal mode.
   - OP_QK_NR does NeoX RoPE on n_rot dims with theta_scale (:961-965).
   - The head is split by vocab 0.6/0.4 across the cards (flashnext_tp.py:53). The host argmaxes [T, 248320] logits (spec.py:237).
   - Embedding and PLE rows are built on the host from the tokens (flashnext_tp.py:388-390). **So the host stays in the loop every pass**, drafters on-device or not.
@@ -175,4 +175,4 @@ Op list per pass (k = 3, nb = 4):
 - For the draft head: a full-vocab Q4_0 copy (+0.36 GB, no excluded tokens) or a subset?
 - Is a separate drafter launch cheap enough (under 0.15 ms) to stay unfused?
 
-Files: python/caminus/{dflash.py,spec.py,flashnext_tp.py}, kernels/k3_gguf_ops.h; the ignite-llama fork's src/models/{qwen4exp.cpp,dflash.cpp}, conversion/qwen4exp.py, common/speculative.cpp; Strata's include/strata/core/mtp.hpp, tools/{mtp_pack.py,mtp_rt.py,draft_vocab.py}.
+Files: python/caminus/{dflash.py,spec.py,flashnext_tp.py}, kernels/ops_gg.h; the ignite-llama fork's src/models/{qwen4exp.cpp,dflash.cpp}, conversion/qwen4exp.py, common/speculative.cpp; Strata's include/strata/core/mtp.hpp, tools/{mtp_pack.py,mtp_rt.py,draft_vocab.py}.
