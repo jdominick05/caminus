@@ -493,6 +493,7 @@ python -I tests/test_own_code.py --model $M                       # the own-code
 tools/guard.sh LOG 900  python -I tests/engine/test_q3moe_one.py $M
 tools/guard.sh LOG 1800 python -I benchmarks/q3moe_depth.py $M --depths 8,1024,4096,16384,32768,40900 --tokens 32 --rounds 5
 tools/guard.sh LOG 1800 python -I benchmarks/q3moe_prefill.py $M --lengths 512,4096,32768 --chunk 2048 --rounds 3
+# the long-context mode's speed: the same two with --yarn 4 (YaRN x4 from 32,768; depths and lengths up to 131,072)
 tools/guard.sh LOG 900  python -I tests/engine/test_q3moe_verify.py $M
 tools/guard.sh LOG 1800 python -I benchmarks/q3moe_verify.py $M --depths 512,4096,16384,40900 --trace 4 --accept 0.693,0.457,0.253
 tools/guard.sh LOG 2400 python -I tools/serve_smoke1.py --model $M --scratch DIR --card 0 --max-ctx 40960 \

@@ -11,7 +11,10 @@ per length in turn (interleaved), so the exchange's exposed cost is overlap or s
 --ab (one card): every round also on the narrow tiles (Ops.wide / gu / q8l False), interleaved, both arms' medians printed and
 the last attention layer's KV rows of the last round compared bitwise (RESULT FAIL if they differ).
 --kv q8: the engine and prefill with the KV cache as Q8_0 rows (Q3MoEOne(q8=True); with --cards 2 Q3MoETP(q8=True) and
-Q3MPrefillTP's Q8 path); runs alternated with an F16 run for the A/B (both caches do not fit at depth)."""
+Q3MPrefillTP's Q8 path); runs alternated with an F16 run for the A/B (both caches do not fit at depth).
+--yarn F: the long-context mode at YaRN factor F (the 30B: rope=caminus.rope.YarnMode(F, its native context 32,768, as
+caminus serve --long-context builds it): the decode module's YaRN build and pf_q3m's YaRN rope, one card or two; a qwen35moe
+file: Moe35Own(yarn=F), the prefill's YaRN rope); lengths up to F x the native window. The header line names the rope."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
 import numpy as np
@@ -25,10 +28,15 @@ ap.add_argument('--prefill-module', default=None, help='the prefill code object 
 ap.add_argument('--cards', type=int, default=1, choices=(1, 2)); ap.add_argument('--modes', default='overlap')
 ap.add_argument('--micro', type=int, default=None); ap.add_argument('--min-piece', type=int, default=None)
 ap.add_argument('--kv', default='f16', choices=('f16', 'q8'))
+ap.add_argument('--yarn', type=float, default=None, help='the YaRN factor: the long-context mode (the 30B: YarnMode(F, 32,768); '
+                'a qwen35moe file: Moe35Own(yarn=F))')
 ap.add_argument('--ab', action='store_true', help='one card: each round also on the narrow tiles (Ops.wide / gu False: the '
                 'pf_q3m_mm wide tiles and fused gate | up off), interleaved; the last layer\'s KV rows of both arms bitwise')
 A = ap.parse_args()
 Ls = [int(x) for x in A.lengths.split(',')]
+from caminus.arch import QWEN3MOE_ROPE
+from caminus.rope import YarnMode
+rope = YarnMode(A.yarn, QWEN3MOE_ROPE.native_ctx) if A.yarn is not None else None   # (the 30B's long-context mode)
 if A.cards == 2:
     from caminus.engine.q3moe_tp import Q3MoETP
     from caminus.prefill import q3m_tp
@@ -36,9 +44,9 @@ if A.cards == 2:
     modes = A.modes.split(',')
     print(torch.cuda.get_device_name(0), '+', torch.cuda.get_device_name(1), flush=True)
     eng = Q3MoETP(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, vram_extra_mib=q3m_tp.need_tp_mib(q3m_tp.tp_shapes(A.gguf), A.chunk),
-                  q8=A.kv == 'q8')
+                  q8=A.kv == 'q8', rope=rope)
     pf = q3m_tp.Q3MPrefillTP(eng, chunk=A.chunk, micro=A.micro or q3m_tp.MICRO, min_piece=A.min_piece or q3m_tp.MIN_PIECE)
-    print(f'two cards: max_ctx {eng.max_ctx}, KV {A.kv}, decode module {eng.module}, chunk {A.chunk}, micro {pf.micro} (pieces of a full chunk '
+    print(f'two cards: max_ctx {eng.max_ctx}, KV {A.kv}, rope {rope or "native"}, decode module {eng.module}, chunk {A.chunk}, micro {pf.micro} (pieces of a full chunk '
           f'{q3m_tp.micro_bounds(A.chunk, pf.micro, min_piece=pf.min_piece)}), expert rows {eng.exp_rows}, kv heads {eng.kvc}: '
           f'engine {eng.vram_mib[0]:.0f} / {eng.vram_mib[1]:.0f} MiB + prefill {pf.need_mib[0]:.0f} / {pf.need_mib[1]:.0f} MiB', flush=True)
     g = np.random.default_rng(0)
@@ -65,15 +73,15 @@ if ARCH == 'qwen35moe':
     from caminus.prefill import q35moe
     if A.ops or A.prefill_module: raise SystemExit('a qwen35moe file: no --ops / --prefill-module (the 30B\'s)')
     sh = q35moe.shapes_of(A.gguf)   # (the narrow arm's gate / up outputs projected with the engine when --ab runs it)
-    eng = Moe35Own(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8',
+    eng = Moe35Own(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8', yarn=A.yarn,
                    vram_extra_mib=q35moe.buffer_need_mib(sh, A.chunk) + (q35moe.narrow_need_mib(sh, A.chunk) if A.ab else 0))
     pf = q35moe.Q35MoEPrefill(eng, chunk=A.chunk); pf.ops = pf.O
-    print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, KV {A.kv}, decode module {eng.module}, prefill objects {pf.ops.module} + '
+    print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, KV {A.kv}, rope {eng.rope_key or "native"} (prefill YaRN {pf.yarn}), decode module {eng.module}, prefill objects {pf.ops.module} + '
           f'{q35moe.WIDE_MODULE}: prefill buffers {pf.need_mib:.0f} MiB', flush=True)
 else:
-    eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8')
+    eng = Q3MoEOne(A.gguf, max_ctx=A.max_ctx or max(Ls) + 8, q8=A.kv == 'q8', rope=rope)
     pf = Q3MPrefill(eng, chunk=A.chunk, module=A.prefill_module)
-    print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
+    print(f'max_ctx {eng.max_ctx}, chunk {A.chunk}, KV {A.kv}, rope {rope or "native"} (prefill YaRN {pf.yarn}), decode module {eng.module}, prefill object {pf.ops.module}: engine {eng.vram_mib:.0f} MiB + prefill buffers {pf.need_mib:.0f} MiB', flush=True)
 g = np.random.default_rng(0)
 arms = (True, False) if A.ab else (pf.ops.wide,)
 bad = False

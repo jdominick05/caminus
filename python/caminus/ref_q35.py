@@ -51,6 +51,9 @@ from caminus.bpe import BPE
 
 HEAD_ROWS = 16384            # the head is decoded and applied in pieces of this many rows
 DECODE_VALUES = 1 << 22      # a decode task: about this many values (numpy releases the lock: tasks run in parallel)
+ATTN_ROWS = 64               # the attention in pieces of this many query rows, in parallel: a piece's scores are [rows,
+                             # heads per kv head, positions] float64 (67 MB at 16,384 positions), so a 16K-token feed fits
+                             # the host; each row's statements are the same at any piece size (the same bits)
 
 
 def silu(y):
@@ -214,13 +217,17 @@ class Q35Ref:
         V = v if self.vc[il] is None else np.concatenate([self.vc[il], v])
         self.kc[il], self.vc[il] = K, V
         P = K.shape[0] - N                                                       # positions before this chunk
-        seen = np.arange(K.shape[0])[None, :] <= (P + np.arange(N))[:, None]     # [N, positions]: causal
         G = H // HKV; att = np.empty((N, H, HD))
-        for kv in range(HKV):
-            sc = np.einsum('nhd,td->nht', q[:, kv * G:(kv + 1) * G], K[:, kv]) / np.sqrt(HD)
-            sc = np.where(seen[:, None, :], sc, -np.inf)
-            pr = np.exp(sc - sc.max(axis=-1, keepdims=True)); pr /= pr.sum(axis=-1, keepdims=True)
-            att[:, kv * G:(kv + 1) * G] = np.einsum('nht,td->nhd', pr, V[:, kv])
+
+        def rows(r0):
+            r1 = min(N, r0 + ATTN_ROWS)
+            seen = np.arange(K.shape[0])[None, :] <= (P + np.arange(r0, r1))[:, None]   # [rows, positions]: causal
+            for kv in range(HKV):
+                sc = np.einsum('nhd,td->nht', q[r0:r1, kv * G:(kv + 1) * G], K[:, kv]) / np.sqrt(HD)
+                sc = np.where(seen[:, None, :], sc, -np.inf)
+                pr = np.exp(sc - sc.max(axis=-1, keepdims=True)); pr /= pr.sum(axis=-1, keepdims=True)
+                att[r0:r1, kv * G:(kv + 1) * G] = np.einsum('nht,td->nhd', pr, V[:, kv])
+        list(self.pool.map(rows, range(0, N, ATTN_ROWS)))
         att *= sigmoid(gate); self._see('attn_output input', att)
         return att.reshape(N, H * HD) @ self.W(p + 'attn_output.weight').T
 
