@@ -164,8 +164,10 @@ extern "C" __global__ void __launch_bounds__(256) q35mp_mm_q2_0_gu(
 // each step interleaved against the one before; the wide tile 117.0 ms): 128 x 128 workgroups of 8 waves 112.4; 128 x 64
 // of 4 waves 110.1 (30.5 KB of LDS: more workgroups resident); the scale step one token tile behind 107.6 (the wide tile
 // 117.0 in the same runs). Tried and slower: 128 x 256 (8 token tiles a wave, 113.6: 256 VGPRs, spills), 16 waves
-// (124.4). The scale step itself is ~12 % of the chunk (a measurement build with fp16(d q) staged and no scale step, not
-// bitwise: 99.5 against 112.4); FlyDSL's fp16 GEMM on dense operands runs these shapes in 85.8 ms with 64 x 64 a wave
+// (124.4). The scale step itself is ~7 % of the chunk: a correct fold (fp16(d q) staged, no scale step, not bitwise)
+// took 100.9 against 108.9, and was not kept: mean KLD +28 % (F16) / +102 % (Q8 KV) in tests/prefill/test_q35_prefill.py
+// for 1.03x end to end at 4,096 tokens (an earlier 99.5 against 112.4 came from a build with a wrong scale on half its
+// rows). FlyDSL's fp16 GEMM on dense operands runs these shapes in 85.8 ms with 64 x 64 a wave
 // (128 accumulator VGPRs, 4 spilled, no scale step). 16 accumulator tiles a wave here (8 token tiles x 2 row tiles)
 // took 256 VGPRs and spilled (2 in 8-wave workgroups, 18 in 4-wave ones); a 4 x 4 wave tile with the scale step's P and
 // four row tiles' B operands is estimated past 256 (not built). 208 VGPRs, 0 spills, 31,232 B of LDS.
