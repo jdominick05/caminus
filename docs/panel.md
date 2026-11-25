@@ -17,7 +17,7 @@ The panel is one screen, top to bottom:
 |---|---|
 | **Header** | `CAMINUS`, the version, and each card's memory in use. |
 | **running** | The server in use: its model, cards, port, context and how long it has run, then its live speed (decode and prefill tokens per second), its clients (Qwen Code sessions on it, and Ember sessions whose model is one of its model ids) and how much of the prompts came from the cache, with a line of its recent decode speed. A server started outside the panel (by a script, or `caminus serve` directly) shows too, marked "started outside the panel"; the panel watches it but never stops or restarts it (`s` says the command that stops it). With nothing running the card says `no server running · enter starts the selected model`. |
-| **models** | Every model Caminus knows, its download size and a mark: `●` running, `✓` on disk (yellow when its optional drafter is missing), `↓` not downloaded. Beside the list (below it in a narrow terminal), the selected model: what it is, how fast, its choices (cards, drafter, and for `qwen3-30b-a3b` the KV cache and the long-context mode), the context that fits your cards, any edited server options, and whether its last start failed, and when (the line goes once a later start of the model replaces it, or once its cause is gone, such as a missing code object that is now where a start would load it from). |
+| **models** | Every model Caminus knows, its download size and a mark: `●` running, `✓` on disk (yellow when its optional drafter is missing), `↓` not downloaded. Beside the list (below it in a narrow terminal), the selected model: what it is, how fast, its choices (cards, drafter, the KV cache for `qwen3-30b-a3b` and `qwen3.6`, and for `qwen3-30b-a3b` the long-context mode), the context that fits your cards, any edited server options, and whether its last start failed, and when (the line goes once a later start of the model replaces it, or once its cause is gone, such as a missing code object that is now where a start would load it from). |
 | **agents** | Ember (its sessions and how many work on a goal) and Qwen Code (its version, or what to do to set it up). |
 | **Hardware** | Shows up under the header only when something is wrong with your cards, for example a card in a slot that's too slow. |
 
@@ -65,7 +65,7 @@ Caminus keeps its own Qwen Code settings, so yours in `~/.qwen` stay untouched.
 
 The choices: **cards** is one or two cards where the model supports both. **drafter** is auto (the server's measured
 default for that model and card count), off, MTP or DFlash where supported at that card count. **KV cache**
-(`qwen3-30b-a3b`): auto (F16; in the long-context mode the mode picks Q8 where only it holds the context), F16 or Q8
+(`qwen3-30b-a3b`, `qwen3.6`): auto (F16; in the long-context mode the mode picks Q8 where only it holds the context), F16 or Q8
 (half the memory per token: [models](models.md)). **context** (`qwen3-30b-a3b`): native, or long (YaRN x4: up to 131,072
 tokens on two cards; on one card as far as it holds, measured 81,920 on an XTX with Q8, which the fit line shows for your
 cards; short texts can read slightly differently, so it is off by default). Only the architecture's supported modes are

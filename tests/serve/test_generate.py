@@ -320,5 +320,19 @@ class TestMockSession(unittest.TestCase):
         self.assertEqual(s.prefill(list(range(1, 20))).shape, (512,))
 
 
+class EosIds(unittest.TestCase):
+    """the ids that end a generation (serve.cli.eos_ids_of): the vocabulary's eos and <|endoftext|>, as Qwen's own
+    generation_config.json lists them (Qwen3.6-35B-A3B: 248046, 248044), whichever of the two the GGUF names its eos"""
+
+    def test_eos_and_endoftext(self):
+        from types import SimpleNamespace as NS
+        from caminus.serve.cli import eos_ids_of
+        self.assertEqual(eos_ids_of(NS(eos_id=248046, special={'<|endoftext|>': 248044})), (248046, 248044))
+        self.assertEqual(eos_ids_of(NS(eos_id=151645, special={'<|endoftext|>': 151643})), (151645, 151643))
+        self.assertEqual(eos_ids_of(NS(eos_id=248044, special={'<|endoftext|>': 248044})), (248044,))   # (one id once)
+        self.assertEqual(eos_ids_of(NS(eos_id=248046, special={})), (248046,))
+        self.assertEqual(eos_ids_of(NS(eos_id=-1, special={'<|endoftext|>': 248044})), (248044,))
+
+
 if __name__ == '__main__':
     unittest.main()

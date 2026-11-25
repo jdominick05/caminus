@@ -1017,7 +1017,7 @@ class Q35MoE(OneCard):
     def auto_need(self, opt, slots, cards=None):
         """max_ctx auto's projection: Moe35Own's own statics, not the ggml engine's. The inherited OneCard.auto_need builds
         Qwen35One's shape, which reads the embedding row on the host (this engine uploads the whole BF16 table) and counts
-        a q8 cache (this one is F16 only): 2.0 GiB low at 4096 and 4.3 GiB at 262,144, so the default serve could place a
+        sizes the KV cache its own way: 2.0 GiB low at 4096 and 4.3 GiB at 262,144, so the default serve could place a
         context the own build then refuses. The batched prefill's buffers (the same in every KV and rope mode) are
         counted as build allocates them."""
         self.kv_check(opt)
