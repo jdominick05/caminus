@@ -94,8 +94,9 @@ cache directories; synthetic conversations):
 ## The other models
 
 > [!NOTE]
-> Qwen3.6-35B-A3B (both files), Qwen3-Coder-Next and AREX-2 are **paused** for the next release (`caminus.models.PAUSED`). Their
-> rows below and in the two-card yardstick are from 2026-11-07 / 11-11 and are not rerun until they come back.
+> Qwen3.6-35B-A3B's HauhauCS file, Qwen3-Coder-Next and AREX-2 are **paused** for the next release (`caminus.models.PAUSED`). Their
+> rows below and in the two-card yardstick are from 2026-11-07 / 11-11 and are not rerun until they come back. The
+> Qwen3.6-35B-A3B GSQ file is served again, on own code: [its section](#qwen36-35b-a3b-gsq-hybrid-own-code-one-card).
 
 Measured 2026-11-07 on one card each (the RX 7900 XTX unless noted) or on both cards for Qwen3-Coder-Next; llama.cpp on
 the same card(s) with llama-bench (decode tg128, prompt pp2048). Speeds are decode (writing) or prefill (reading a
@@ -103,13 +104,40 @@ prompt), in tok/s.
 
 | Model | Caminus decode | llama.cpp decode | Caminus prefill 2K | llama.cpp prefill 2K | Accuracy gate |
 |---|---|---|---|---|---|
-| Qwen3.6-35B-A3B GSQ 2-bit | 174.9 (XT alone: 148.5) | 106.8 (XT: 90.9) | 5,227 | 3,239 | within llama.cpp's floor: prefill-then-decode G4 0.00077 / 0.00072 |
 | Qwen3.6-35B-A3B HauhauCS Q3_K_P | 192.5; 140.7 at 32K | 122.1; 107.7 at 32K | 4,136 | 2,923 | G4 0.00171 / 0.00181 |
 | AREX-2 Q4_K_M (dense 27B) | 41.0 | 36.3 | 928 | 910 | short-context KLD 0.0003, top-1 99.1 % (floor 0.0033 / 97.9 %); G4 0.00053 / 0.00048 |
 | Qwen3-Coder-Next UD-IQ3_S (both cards) | 136.5; 67.9 at 32K | 81.8; 72.6 at 32K | ~135 (one token per pass) | 2,787 | bitwise gates on the engine; no batched prefill yet |
 
 Qwen3-Coder-Next decodes slower than llama.cpp at 32K and reads prompts about 20 times slower: its batched prefill
 isn't written yet. Tools: `tests/prefill/test_q36_prefill.py` (ops, handoff, e2e, speed) and `tools/serve_smoke1.py`.
+
+### Qwen3.6-35B-A3B GSQ-hybrid (own code, one card)
+
+`Moe35Own` (`engine/q35_moe.py`) with its batched prefill (`prefill/q35moe.py`): own code from the GGUF file to the token
+(the served smoke's own-code check below). Measured 2026-11-24 on the RX 7900 XT alone; the RX 7900 XTX: pending the
+release window. llama.cpp on the same card: 90.9 tok/s decode (2026-11-07, not rerun).
+
+| | F16 KV | Q8 KV (`--kv q8`) |
+|---|---|---|
+| Decode, short context (positions 128 .. 191) | 210 tok/s (4.75 ms) | 202 tok/s (4.96 ms) |
+| Prefill, 2,048 positions from empty (chunk 2048 / 1024) | 6,571 / 6,013 tok/s | 6,346 / 5,829 tok/s |
+
+- Decode: `tools/guard.sh LOG 300 python -I tools/gates/q35_gmodel.py GGUF --ref REF.npz --speed 64 [--kv q8]` (the median
+  of 64 greedy passes after the 128 reference rows; two F16 runs agree to 0.01 ms).
+- Prefill: `tools/guard.sh LOG 300 python -I tests/prefill/test_q35_prefill.py GGUF --ref REF.npz --speed 2048 [--kv q8]`
+  (medians of 3).
+- Accuracy, decode (`tools/gates/q35_gmodel.py`, 128 positions against the float64 reference `tools/reference/q35_ref.py`;
+  printed, not gated: no llama.cpp one-token rows of these tokens): mean KLD 3.43e-4, top-1 128/128 (F16); 3.66e-4,
+  128/128 (Q8); YaRN x2 (`--yarn 2` against a YaRN x2 reference) 9.79e-5, 128/128 (F16) and 4.91e-4, 127/128 (Q8).
+- Accuracy, prefill then decode (`tests/prefill/test_q35_prefill.py --llama LL.bin`: positions 0 .. 63 prefilled, 64 .. 127
+  decoded): mean KLD 3.43e-4, top-1 64/64, against llama.cpp's own prefill-then-decode 9.29e-4, 63/64 (F16; PASS); Q8
+  3.41e-4, 64/64 (decode-only 2.69e-4). Chunk geometry and prompt-cache stops change no bit.
+- Served (`tools/guard.sh LOG 900 python -I tools/serve_smoke1.py --model GGUF --scratch DIR --card 1 --max-ctx 262144
+  --needle 250000 --block-imports gguf,tokenizers`, F16 KV, its full 262,144 context on the XT, 25 VRAM cache slots):
+  greedy decode 211 tok/s; a 6,760-token prompt at 5,935 tok/s (first token 1.15 s); the needle at 37 % of a
+  249,005-token prompt found, read at 1,501 tok/s (first token 166 s), then 89 tok/s decode at that depth (at 131,072:
+  119,378 tokens at 2,699 tok/s, 44 s, then 129 tok/s). The tool round trip, Anthropic route and abort pass; the server
+  loads only own-code objects and never imports gguf-py or tokenizers.
 
 ### Swift 1.5 Q4_K_M (dense 27B, own code)
 

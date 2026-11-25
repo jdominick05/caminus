@@ -95,7 +95,7 @@ ALL = (
     _model('coder', 'Qwen3.8-Flash-Next Coder IQ1_M + DFlash2', 'qwen4exp', ('coder-1', 'coder-2', 'dflash'), 'k3-coder',
            '~104 tok/s decode, 123-203 with DFlash; prefill ~2,800 tok/s (both cards)', '262K context'),
     _model('qwen3.6', 'Qwen3.6-35B-A3B GSQ-hybrid (2-bit)', 'qwen35moe-own', ('qwen3.6',), 'qwen3.6',   # (own code: Moe35Own)
-           '163 tok/s decode, 5,453 tok/s prefill 2K (one XT)', 'fits either card at 262K'),
+           '210 tok/s decode, 6,571 tok/s prefill 2K (one XT)', 'fits either card at 262K'),
     _model('qwen3.6-hauhau', 'Qwen3.6-35B-A3B HauhauCS Q3_K_P', 'qwen35moe', ('qwen3.6-hauhau',), 'qwen3.6',
            '192 tok/s decode, 4,136 tok/s prefill 2K (one XTX)', 'the 24 GB card only'),
     _model('arex-2', 'AREX-2 27B dense Q4_K_M', 'qwen35', ('arex-2',), 'arex-2',

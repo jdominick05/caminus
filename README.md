@@ -80,7 +80,7 @@ are welcome too.
 | Swift 1.5 27B Q4_K_M (19.5 GB) | 1 (24 GB); or 2 | 42 tok/s; 64 on two cards | 37 tok/s; 44 on two cards (`-sm tensor`) |
 | ThinkingCap 27B RCO 4.2 bpw (16.4 GB) | 1; or 2 | 47 tok/s; 69 on two cards | 40 tok/s; 46 on two cards (`-sm tensor`) |
 | Qwen3.8-27B GSQ-RCO IQ3_S (14.2 GB) | 1 | 55 tok/s | not measured yet |
-| Qwen3.6-35B-A3B GSQ-hybrid 2-bit (12.2 GB) | 1 | 163 tok/s (measured on an XT; the XTX at the release) | not measured yet |
+| Qwen3.6-35B-A3B GSQ-hybrid 2-bit (12.2 GB, 262K context) | 1 | 210 tok/s (measured on an XT; XTX: pending the release window) | not measured yet |
 
 **Paused for this release:** Qwen3.6-35B-A3B's HauhauCS file, Qwen3-Coder-Next and AREX-2 ([models](docs/models.md#the-models)).
 

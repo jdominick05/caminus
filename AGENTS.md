@@ -6,8 +6,9 @@ CLAUDE.md imports this file.
 ## What this is
 
 - Caminus: an inference engine for AMD RDNA3 (gfx1100) written from the kernels up; CLI and Python package `caminus`.
-- It serves five models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
-  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, Swift 1.5, ThinkingCap and Qwen3-30B-A3B also on two; on
+- It serves six models through an OpenAI / Anthropic API (`caminus serve`): the Qwen3.8-Flash-Next GSQ-RCO Coder (two
+  cards, with the DFlash2 drafter), the plain Qwen3.8-27B GSQ-RCO IQ3_S (one card, dense), Qwen3.6-35B-A3B GSQ-hybrid (one
+  card, own code: `arch.Q35MoE`, `engine/q35_moe.py`), Qwen3-30B-A3B Q4_K_M, Swift 1.5 27B Q4_K_M and ThinkingCap 27B RCO 4.2 bpw (dense; each on one card, Swift 1.5, ThinkingCap and Qwen3-30B-A3B also on two; on
   Caminus's own code from the GGUF file to the token: docs/dev/qwen3-30b-a3b.md; Swift: `arch.Dense35`). Swift 1.5 and ThinkingCap also take
   `--draft mtp` (their own multi-token-prediction block; `decode/mtp35.py`) and `--draft dflash` (its base
   model's DFlash2 drafter; `decode/dflash35.py`), on one card or two. `python/caminus/models.py` is the catalog.
@@ -160,9 +161,10 @@ CLAUDE.md imports this file.
   the installed runtime set, and every other registry entry refuses `q8` (`Arch.kv_check`). Detail: docs/dev/q8-kv.md.
 - `kernels/ggml_mmq/`: llama.cpp's MMQ, vendored (`tools/release/vendor_mmq.py --check`); build.sh compiles it the way the
   fork does, one object per format. Don't move it to the `--offload-device-only` path or merge formats: the code changes.
-- Paused: Qwen3.6-35B-A3B (GSQ, HauhauCS), Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them
+- Paused: Qwen3.6-35B-A3B's HauhauCS file, Qwen3-Coder-Next and AREX-2. Their engines and kernels stay; `models.PAUSED` keeps them
   out of the catalog, the panel and `caminus pull` / `start` (and the brain / hands team), and `arch.PAUSED` makes
-  `caminus serve` refuse their architectures (qwen35moe, qwen3next, qwen35). `CAMINUS_ALLOW_PAUSED=1` lifts both (development
+  `caminus serve` refuse their architectures (qwen35moe, qwen3next, qwen35; the catalog's Qwen3.6 GSQ file serves on
+  `qwen35moe-own`, so only another qwen35moe file is refused). `CAMINUS_ALLOW_PAUSED=1` lifts both (development
   and gates). Re-enabling one: remove it from both, then rerun its benchmarks.md rows.
 - `python/caminus/arch.py`: the architecture registry (`ARCHS`); serve, replay and the CLI never branch on the architecture.
   Placement, auto context and `caminus fit` share its context projection and room calculation. Keep the allocator margin
