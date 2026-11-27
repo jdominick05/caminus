@@ -560,6 +560,112 @@ Each drafter's x is against its own run's plain arm (the DFlash runs' plain arms
   2.10x / 2.16x a decode step.
 - Two cards: no two-card form of its decode module yet.
 
+### Dense 27B: decode time against file size
+
+Are decode time and file size the same target for the dense 27B line on this engine? Measured on 11-27 (testing after
+0.4.0; one card at a time) on Swift 1.5 Q4_K_M, ThinkingCap RCO 4.2 bpw, Qwen3.8-27B GSQ-RCO IQ3_S and Swift 1.5
+GSQ-RCO IQ3_S, at both clock settings: **high** (DPM high through `gpu-high`, the convention of every other row on
+this page) and **auto** (the driver's own clocks, as the server runs: the same commands with
+`CAMINUS_GPU_HIGH=/usr/bin/env`, so the guard runs them without `gpu-high`; each step checked the level in
+`power_dpm_force_performance_level` first). Short answer: they differ. Below about 3.4 bits a weight, fewer bytes buy
+little time, and some 2-bit stages take longer than 3-bit ones with more bytes. The headline table in time-equivalent
+bits and the planner's error are in [q35-format-plan.md](q35-format-plan.md#measured-time-against-size).
+
+- **Plain decode, ms per token** (`tools/guard.sh LOG 1500 python -I benchmarks/q35_verify.py GGUF --depths 512,4096
+  --rounds 7`, then `--depths 32768` as its own run; the "fixed" column, every step at the depth with commit 0; the
+  "walk" column is within 0.1-0.6 ms):
+
+  | file | card, clock | 512 | 4,096 | 32,768 |
+  |---|---|---:|---:|---:|
+  | Swift 1.5 Q4_K_M | XT, high / auto | 26.36 / 26.16 | 27.08 / 26.82 | does not fit |
+  | Swift 1.5 Q4_K_M | XTX, high / auto | 22.30 / 22.35 | 22.97 / 23.02 | 28.82 / 28.78 |
+  | ThinkingCap RCO 4.2 | XT, high / auto | 23.49 / 23.03 | 24.30 / 23.83 | 30.70 / 29.92 |
+  | Qwen3.8-27B GSQ-RCO IQ3_S | XT, high / auto | 21.41 / 20.68 | 22.19 / 21.41 | 28.61 / 27.37 |
+  | Swift 1.5 GSQ-RCO IQ3_S | XT, high / auto | 21.41 / 20.63 | 22.20 / 21.39 | 28.53 / 27.52 |
+
+  The XT's high rows at 512 are within 0.1 ms of the published short-context ones above (26.4, 23.59, 21.48 ms); the
+  XTX's 22.30 is 0.4 ms below its published 22.7. On the XT, auto is *faster* than high, most for the codebook files
+  (GSQ-RCO -3 to -4 %; the clocks themselves were not logged, so why is unmeasured). On the XTX the two are within 0.2
+  %. Swift at 32,768 positions was not run on the XT (the XTX run peaked at 19,706 MiB).
+- **Where one token's time goes inside the decode kernel** (`tools/guard.sh LOG 900 python -I
+  benchmarks/q3moe_trace.py GGUF --engine dense35 --modules MODULE_trace MODULE --warm 8 --tokens 15 --dump PREFIX`,
+  the module's `K3_TRACE` build; XT, short context, medians of 15 tokens; `--dump` writes every segment's times for
+  the analysis below):
+
+  | file (weight bytes a token) | token, high / auto | weight reads in flight | their rate (share of 774 GB/s) | no weight read in flight |
+  |---|---:|---:|---:|---:|
+  | Swift 1.5 Q4_K_M (16.47 GB) | 26.76 / 26.14 ms | 24.83 / 24.49 ms | 663 / 672 GB/s (86 / 87 %) | 1.93 / 1.65 ms |
+  | ThinkingCap (13.58 GB) | 23.86 / 22.79 ms | 21.85 / 21.04 ms | 622 / 645 GB/s (80 / 83 %) | 2.01 / 1.75 ms |
+  | Qwen3.8 GSQ-RCO (11.39 GB) | 21.75 / 20.30 ms | 19.74 / 18.54 ms | 577 / 615 GB/s (75 / 79 %) | 2.00 / 1.77 ms |
+  | Swift GSQ-RCO (11.39 GB) | 21.74 / 20.32 ms | 19.76 / 18.56 ms | 577 / 614 GB/s (75 / 79 %) | 1.98 / 1.77 ms |
+
+  GSQ-RCO against Swift Q4_K_M: 31 % fewer bytes, 19 % less time at high, 22 % at auto. Sibling stages (gate and up, q
+  / k / v, qkv / gate / alpha / beta) do not read in parallel: the grid claims the second sibling's tasks as the
+  first's drain, so a sibling group's wall time (first claim to last publish) is the unit below. The time with no
+  weight read in flight (high, every file): the 129 add+norm stages (one workgroup each) 0.94 ms, attention at short
+  context 0.24 ms, the embedding row 8-11 us, and the rest of the glue (Gated DeltaNet conv / l2 / step / save / norm,
+  SwiGLU, q / k norms, the KV append, the gate multiply) 0.74-0.82 ms.
+- **Per stage, inside the decode kernel**, us per matrix, high / auto (XT, short context; from the same dumps: a stage
+  alone in its group as measured; ffn_gate / ffn_up each half of their group's wall (the fused gate | up stage on
+  Swift's module, two sibling stages of equal bytes on the others); attn_qkv + attn_gate their group's wall; mean over
+  every such stage of the four files; groups of mixed formats are left out):
+
+  | format | bits | ffn_gate / ffn_up [17408 x 5120], each | ffn_down [5120 x 17408] | attn_qkv + attn_gate [10240 + 6144 x 5120], group | ssm_out / attn_output [5120 x 6144] | output [248320 x 5120] |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Q8_0 | 8.50 |  | 139.5 / 139.2 | 163.1 / 161.2 | 54.2 / 54.0 | 1826.6 / 1849.6 |
+  | Q6_K | 6.56 |  | 105.9 / 106.2 | 105.7 / 105.3 | 44.8 / 44.2 | 1388.9 / 1399.3 |
+  | Q5_K | 5.50 |  | (two tiles, below) |  | 37.6 / 37.0 |  |
+  | Q4_K | 4.50 | 70.5 / 70.1 | 73.8 / 72.2 | 77.2 / 75.0 | 32.5 / 31.7 | 950.8 / 955.6 |
+  | IQ4_XS | 4.25 | 68.0 / 67.0 | 73.9 / 73.6 | 75.4 / 73.0 | 32.5 / 31.6 |  |
+  | IQ3_S | 3.44 | 62.2 / 56.7 | 65.6 / 62.6 | 71.5 / 65.5 | 29.4 / 27.7 |  |
+  | IQ3_XXS | 3.06 | 61.5 / 54.1 | 64.4 / 58.0 | 71.5 / 62.8 | 29.2 / 28.4 |  |
+  | Q2_K | 2.62 |  | 58.8 / 54.3 |  |  |  |
+  | IQ2_S | 2.56 | 61.6 / 56.1 | 61.9 / 56.1 | 69.8 / 64.9 | 28.7 / 27.0 |  |
+  | IQ2_XS | 2.31 |  | 64.2 / 53.0 |  |  |  |
+
+  - ssm_out takes 3-6 us longer than attn_output at the same shape and format (high: IQ3_S 31.0 against 25.6, Q4_K
+    34.1 against 28.7); the column is the mean over every stage of that format at that shape in the four files.
+  - The same Q5_K ffn_down [5120 x 17408] runs two tiles: 90 us on ThinkingCap's module (the one-round-trip tile) and
+    385 us on Swift's (the general rows tile, `OP_OWN_MV16`), 0.58 ms of Swift's token.
+  - Mixed groups show the same order: on the Qwen3.8 GSQ-RCO file at auto, ffn_gate IQ2_XS + ffn_up IQ2_XXS (48.7 MB)
+    take 119.8 us, the IQ3_XXS pair (68.2 MB) 106.0 us.
+  - ssm_alpha / ssm_beta (F32, 48 x 5120) start with attn_qkv / attn_gate and end before them: they add nothing to the
+    group's wall.
+- **Standalone tiles** (`tools/guard.sh LOG 600 python -I benchmarks/own_mv_census.py GGUF --rounds 7 --min-set-mib
+  512` with `--q8 u2` (the Q8_0 tile the decode modules run) and, on Swift, `--q5k general`; one launch per matvec,
+  each group padded with copies past the Infinity Cache; XT, high): the own tile's share of the same-run read kernel's
+  rate over the same bytes, median over matrices whose read takes 15 us or more: Q4_K 0.92, Q6_K 0.92, Q8_0 0.88,
+  IQ4_XS 0.84, Q2_K 0.82, IQ3_S 0.79, IQ3_XXS 0.74, IQ2_S 0.68, IQ1_M 0.62, IQ2_XS 0.62, IQ2_XXS 0.56. The own Q4_K
+  and IQ2_XXS rows are new (`bench_own_mv_q35`'s `own_mv_q4_k_k3` / `own_mv_iq2xxs_k3`, the decode modules' runtime-K
+  form). At auto the standalone ratios do not repeat between runs (IQ2_S 1.25x then 1.58x the high time, IQ2_XS 1.65x
+  then 1.17x, with the read kernel at 1.00-1.03x both times): between launches the clocks drop, so standalone auto
+  numbers are not a property of the tile; inside the kernel the same formats are faster at auto (ffn_down: IQ2_XS
+  0.83x, Q2_K 0.92x). The census's default Q8_0 arm (`--q8 gen`) is the general rows tile, not the one the modules
+  run: 0.60 of the read rate there.
+- **Attention at depth** (`tools/guard.sh LOG 900 python -I benchmarks/q35_verify_trace.py GGUF --depth D --prefill
+  --passes 7`, ThinkingCap, XT; `--prefill` reaches the depth with the own prefill; the module is the verify tape's
+  trace build at T = 1, not the plain decode tape, which has no trace build at depth; us per token, summed over the 16
+  attention layers, high / auto):
+
+  | | depth 512 | depth 32,768 | increment |
+  |---|---:|---:|---:|
+  | ATTN_PART (the split KV reads) | 300 / 265 | 6,264 / 5,810 | +5,964 / +5,545 |
+  | ATTN_COMB (the splits' combine) | 67 / 59 | 1,270 / 1,119 | +1,203 / +1,060 |
+  | the other 56 segment kinds, summed | | | -0.09 / +0.25 ms |
+  | the traced T = 1 pass | 25.29 / 23.45 ms | 32.40 / 30.25 ms | +7.11 / +6.80 ms |
+
+  The verify tape at T = 1 is 1.8 / 0.4 ms slower than the plain decode step at 512 (23.49 / 23.03 ms), but its
+  increment matches the plain step's (`q35_verify.py` above: +7.21 / +6.89 ms). The two attention ops are 101 / 97 %
+  of the increment, 83 % of it the KV reads. The extra 2.11 GB of KV (f16, 64 KiB a position over the 16 layers) is
+  read at 295 / 320 GB/s over both ops (354 / 381 GB/s by ATTN_PART alone), 38-49 % of the card's 774. ATTN_COMB grows
+  19x with the depth, from 4 to 79 us a layer; why it grows that much is not measured. The line through the two depths
+  (fixed 15.8 us a layer + the KV at 295 GB/s, high) gives +0.79 ms from 512 to 4,096 positions against the plain
+  step's measured +0.81 ms.
+- **Q2_0, standalone** (`--formats Q2_0 --q2_0`; no dense module holds this tile; synthetic blocks at the file's
+  shapes): own 521-610 GB/s against the read kernel's 633-694 on the large shapes (high), about IQ4_XS's share. Its
+  error column read about 7e-8 against the other rows' ~1.5e-4 because its float64 reference took the fp16-rounded
+  activations; the reference now takes the fp32 ones, as the other rows do (that change is not rerun on a GPU yet).
+
 ### Swift 1.5 and ThinkingCap on two cards (tensor parallel, own code end to end)
 
 Measured 2026-11-11, rerun for 0.4.0 on 11-25, on an RX 7900 XTX + RX 7900 XT (`caminus serve --cards 2`; that serve drafts by default, so the plain rows pass `--draft off`). Each card holds half of every layer's heads

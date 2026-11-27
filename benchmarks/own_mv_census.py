@@ -220,11 +220,11 @@ if A.q2_0:   # (no dense module holds this tile: standalone only, on synthetic b
         capacity.check([0], [ncop * mat_bytes / 2 ** 20 + 64], f'census Q2_0 [{rows} x {K}] x {ncop}')
         w0 = torch.from_numpy(raw.copy()).to(dev); Ws = [w0] + [w0.clone() for _ in range(ncop - 1)]
         v = rng.standard_t(3, K); v[rng.choice(K, 8, replace=False)] *= 20; v = v / np.sqrt((v ** 2).mean())
-        x16 = torch.tensor(v, dtype=torch.float32, device=dev).half(); out = torch.zeros(rows, dtype=torch.float32, device=dev)
+        x32 = torch.tensor(v, dtype=torch.float32, device=dev); x16 = x32.half(); out = torch.zeros(rows, dtype=torch.float32, device=dev)
         run_q2 = lambda w: Q2.own_mv_q2_0_k3(((rows + 15) // 16,), (256,), w, ctypes.c_int(rows), ctypes.c_int(K), x16, out)
         srows = np.sort(rng.choice(rows, min(256, rows), replace=False)); rb = K // 64 * 18
         W64 = own_dequant.dequant(np.ascontiguousarray(raw.reshape(rows, rb)[srows]).reshape(-1), 'Q2_0', len(srows) * K).astype(np.float64).reshape(len(srows), K)
-        yref = W64 @ x16.double().cpu().numpy(); sc = np.sqrt((yref ** 2).mean())
+        yref = W64 @ x32.double().cpu().numpy(); sc = np.sqrt((yref ** 2).mean())   # (fp32 x, as the other rows: the error includes the fp16 activations)
         out.zero_(); run_q2(Ws[0]); torch.cuda.synchronize()
         e = np.abs(out.double().cpu().numpy()[srows] - yref) / sc
         arms = {'read': lambda w: run_read(w, sink), 'own': run_q2}
