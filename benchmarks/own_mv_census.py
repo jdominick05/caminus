@@ -15,7 +15,12 @@ Per distinct (role, format, rows, K):
                   own (own_mv_q4_k_1rt / own_mv_q6_k_pl: fp16 activations; Q6_K in our plane layout)
 Then the token: the sum over the 1,393 matvecs per arm (launch gaps included as measured: one launch each), and the
 bytes / bandwidth floor. The router (F32, 128 x 2048) is listed apart (no quantized kernel).
-  tools/guard.sh LOG 1800 python -I benchmarks/own_mv_census.py GGUF [--rounds 5] [--layers N]
+--q2_0 (the dense line): also the own Q2_0 tile (kernels/bench_own_mv_q2_0.hip own_mv_q2_0_k3), which no dense decode
+module holds, so STANDALONE only: at every distinct matrix shape of the file, on synthetic Q2_0 blocks of that shape
+(random fp16 scales and 2-bit codes: no file of the line is Q2_0), cold over as many copies as the file reads that shape
+a token (at least 512 MiB in all), against own_read of the same bytes; error vs fp64 as above. Not in the token's sums.
+--formats Q2_0 --q2_0 times it alone.
+  tools/guard.sh LOG 1800 python -I benchmarks/own_mv_census.py GGUF [--rounds 5] [--layers N] [--q2_0]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, ctypes, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -38,6 +43,7 @@ ap.add_argument('--q5k', choices=('1rt', 'general'), default='1rt', help='dense:
 ap.add_argument('--q8', choices=('gen', 'u2', 'u4', 'u8'), default='gen', help='dense: the Q8_0 tile (own_rows_q8_0, or own_rows_q8_0_1rt with UP 2 / 4 / 8 block steps per pass; the 1rt arms are checked bitwise against the general tile)')
 ap.add_argument('--formats', default=None, help='comma-separated formats to time (default: all)')
 ap.add_argument('--log', default=None, help='append the result lines to this file too')
+ap.add_argument('--q2_0', action='store_true', help='dense: also the standalone own Q2_0 tile on synthetic blocks at each shape')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
 OWN = Module('bench_own_mv')
@@ -187,6 +193,45 @@ for role in ROLES:
 say(f'token ({sum(PER_TOKEN.values()) if DENSE else 1393:,} matvecs, one launch each): read {token["read"] / 1e3:.3f} ms | llama {token["llama"] / 1e3:.3f} ms | '
     f'own {token["own"] / 1e3:.3f} ms;  bytes per token {token_bytes / 2**30:.3f} GiB (router excluded)')
 if missing: say('no own kernel yet for: ' + '; '.join(missing))
+if A.q2_0:   # (no dense module holds this tile: standalone only, on synthetic blocks of each shape the file reads)
+    if not DENSE: raise SystemExit('own_mv_census: --q2_0 is for the dense qwen35 line')
+    Q2 = Module('bench_own_mv_q2_0')
+    shp = {}
+    for role in ROLES:
+        for t, _ in mats(role):
+            rows, K, _ = shape_of(t); shp.setdefault((rows, K), [role, 0])[1] += 1
+    say('Q2_0 own_mv_q2_0_k3, STANDALONE (in no dense decode module), synthetic blocks; per shape (first role reading it):')
+    for (rows, K), (role, per) in shp.items():
+        if K % 64: say(f'  {role} [{rows} x {K}]: K % 64 != 0, skipped'); continue
+        nb = rows * K // 64; mat_bytes = nb * 18
+        blk = np.empty((nb, 18), dtype=np.uint8)
+        blk[:, 0:2] = (rng.standard_normal(nb) * 1e-2).astype(np.float16).view(np.uint8).reshape(nb, 2)
+        blk[:, 2:] = rng.integers(0, 256, (nb, 16), dtype=np.uint8)
+        raw = blk.reshape(-1)
+        ncop = min(400, max(per, -(-512 * 2 ** 20 // mat_bytes)))
+        capacity.check([0], [ncop * mat_bytes / 2 ** 20 + 64], f'census Q2_0 [{rows} x {K}] x {ncop}')
+        w0 = torch.from_numpy(raw.copy()).to(dev); Ws = [w0] + [w0.clone() for _ in range(ncop - 1)]
+        v = rng.standard_t(3, K); v[rng.choice(K, 8, replace=False)] *= 20; v = v / np.sqrt((v ** 2).mean())
+        x16 = torch.tensor(v, dtype=torch.float32, device=dev).half(); out = torch.zeros(rows, dtype=torch.float32, device=dev)
+        run_q2 = lambda w: Q2.own_mv_q2_0_k3(((rows + 15) // 16,), (256,), w, ctypes.c_int(rows), ctypes.c_int(K), x16, out)
+        srows = np.sort(rng.choice(rows, min(256, rows), replace=False)); rb = K // 64 * 18
+        W64 = own_dequant.dequant(np.ascontiguousarray(raw.reshape(rows, rb)[srows]).reshape(-1), 'Q2_0', len(srows) * K).astype(np.float64).reshape(len(srows), K)
+        yref = W64 @ x16.double().cpu().numpy(); sc = np.sqrt((yref ** 2).mean())
+        out.zero_(); run_q2(Ws[0]); torch.cuda.synchronize()
+        e = np.abs(out.double().cpu().numpy()[srows] - yref) / sc
+        arms = {'read': lambda w: run_read(w, sink), 'own': run_q2}
+        ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]; tm = {k: [] for k in arms}
+        for r in range(A.rounds + 1):
+            for k, fn in arms.items():
+                torch.cuda.synchronize(); ev[0].record()
+                for w in Ws: fn(w)
+                ev[1].record(); torch.cuda.synchronize()
+                if r: tm[k].append(ev[0].elapsed_time(ev[1]) * 1e3 / len(Ws))
+        line = f'{role:14s} Q2_0  [{rows:6d} x {K:5d}] {mat_bytes / 2**20:7.3f} MiB x {per:5d}/token ({ncop} copies) |'
+        for k in ('read', 'own'):
+            us = float(np.median(tm[k])); line += f' {k} {us:8.2f} us {mat_bytes / us / 1e3:6.1f} GB/s |'
+        say(line + f' err own {e.mean():.1e}/{np.percentile(e, 99):.1e} (STANDALONE, synthetic)')
+        del Ws, w0; torch.cuda.empty_cache()
 if A.log:
     with open(A.log, 'a') as f: f.write('\n'.join(OUT) + '\n')
 print(('RESULT PASS (the Q8_0 1rt tile bitwise the general tile on every shape)' if all(Q8_SAME) else 'RESULT FAIL (the Q8_0 1rt tile differs from the general tile)') if Q8_SAME else 'RESULT DONE')
