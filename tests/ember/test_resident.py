@@ -114,7 +114,7 @@ def pdf(*runs):
 
 
 class Endpoint(http.server.BaseHTTPRequestHandler):
-    queues={};seen=[];judges={};judge_seen=[];models={};props={};gets=[];status={};web_hits={}
+    queues={};seen=[];judges={};judge_seen=[];reflects={};reflect_seen=[];models={};props={};gets=[];status={};web_hits={}
     def log_message(self,*args):pass
     def respond(self,value,status=200):
         raw=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -151,6 +151,15 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
             self.respond(dict(input_tokens=len(json.dumps(body))//4));return
         key=self.path.split('/')[1]
         msgs=body.get('messages') or [{}]
+        if str(msgs[0].get('content','')).startswith('REFLECT'):
+            # the post-goal reflection (#341) has its own queue and its own record, like the judge: a goal test's
+            # replies and its view of the conversation stay its own. The default proposes nothing, so the tests
+            # written before it existed see the same SIM log they saw then.
+            self.reflect_seen.append((key,body))
+            rq=self.reflects.get(key)
+            answer=rq.popleft() if rq else dict(skip=True,reason='the fixture proposes nothing')
+            self.respond(dict(choices=[dict(message=dict(role='assistant',content=json.dumps(answer)),finish_reason='stop')],
+                              usage=dict(prompt_tokens=30,completion_tokens=10)));return
         if not str(msgs[0].get('content','')).startswith('JUDGE'):self.seen.append((key,body))
         else:
             self.judge_seen.append((key,body))
@@ -208,6 +217,11 @@ class Resident(unittest.TestCase):
         return json.loads(p.stdout)
     def replies(self,*messages):Endpoint.queues[self.key]=deque(messages)
     def verdicts(self,*values):Endpoint.judges[self.key]=deque(values)
+    def reflect(self,*values):Endpoint.reflects[self.key]=deque(values)
+    def reflect_on(self):
+        """Write reflect true: the end-of-goal reflection is off unless a session opts in (#383)."""
+        conf=json.loads((self.home/'config.json').read_text());conf['reflect']=True
+        (self.home/'config.json').write_text(json.dumps(conf))
     def steers(self,gid):
         import sqlite3
         db=sqlite3.connect(self.home/'agent.sqlite3');db.row_factory=sqlite3.Row
@@ -2564,6 +2578,12 @@ for line in sys.stdin:
         self.assertEqual(out['record']['status'],'proposed')
         both=self.cmd('sim',[])
         self.assertEqual({r['status'] for r in both['records']},{'observed','proposed'})
+        # --status filters the export exactly as it filters the list: `--status proposed` is the queue a person
+        # hands on, and an export that silently dropped the filter would disagree with `list` about one log
+        # (#383 review P2)
+        queued=self.cmd('sim',['--export','--status','proposed','--out',str(self.home/'queue.jsonl')])
+        self.assertEqual(queued['records'],1)
+        self.assertEqual(json.loads((self.home/'queue.jsonl').read_text().strip())['status'],'proposed')
         # a record without a prediction is refused: there is nothing CI could contradict
         self.cmd('sim',['--record','--change','no prediction'],code=1)
         # a prediction is append-only: naming an existing id cannot rewrite it (only observe adds a version)
@@ -8874,6 +8894,876 @@ for line in sys.stdin:
         msg=str(erm.exception)
         self.assertIn('mkdir -p',msg);self.assertIn('chmod 2770',msg)
         self.assertIn('sudo',msg)
+
+    def test_a_finished_goal_leaves_one_proposed_record_from_a_cheap_call(self):
+        # #341: at the end of a graded goal, one short call asks what harness change would have made it faster or
+        # more reliable, and writes the answer as a 'proposed' SIM record: a queue a person reads, never a change.
+        # The reflection is off by default (#383): the session opts in, so this test turns it on like a user would.
+        self.gates_on()
+        self.reflect_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect(dict(problem_group='delegate · a child that runs away',
+                          change='caps on by default',rationale='a runaway child bills and stalls the parent',
+                          predicted='CI green and a capped child reports partial'))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed','the reflection never changes how the goal ended')
+        seen=[b for k,b in Endpoint.reflect_seen if k==self.key]
+        self.assertEqual(len(seen),1,'exactly one reflection call')
+        self.assertTrue(seen[0]['messages'][0]['content'].startswith('REFLECT'))
+        self.assertNotIn('tools',seen[0],'the reflection call has no tools')
+        self.assertEqual(seen[0]['max_tokens'],4096,'a short call: thinking off, room for a JSON answer')
+        rec=self.cmd('sim',['--status','proposed'])['records'][0]
+        self.assertEqual((rec['status'],rec['goal']),( 'proposed',goal['id']))
+        self.assertEqual(rec['brain'],dict(provider='',model='fixture',effort=''))
+        self.assertIn('delegate · a child that runs away',rec['problem_group'])
+        self.assertIn('judge met',rec['eval_context'],'the call sees how the finish judge read the goal')
+        self.assertEqual(rec['observed'],'','a proposal carries no outcome: nothing has run yet')
+        # the proposal is a queue: the CLI lists only proposals while asked, and observing it later is allowed
+        self.assertEqual([r['id'] for r in self.cmd('sim',['--status','proposed'])['records']],[rec['id']])
+        out=self.cmd('sim',['--observe',rec['id'],'--observed','the reviewer rejected the default; kept opt-in'])
+        self.assertEqual(out['record']['status'],'observed')
+
+    def test_the_reflection_is_retried_strictly_then_recorded_as_failed(self):
+        # a reply that is not the JSON asked for is asked once more, with the shape spelled out; a second unreadable
+        # reply is an event on a completed goal, never a failed goal.
+        self.gates_on()
+        self.reflect_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect('I think the harness is fine actually.', 'Still not JSON.')
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        seen=[b for k,b in Endpoint.reflect_seen if k==self.key]
+        self.assertEqual(len(seen),2,'unreadable once, asked once more')
+        self.assertIn('Answer with only the JSON object',seen[1]['messages'][-1]['content'])
+        events=[e for e in self.cmd('events') if e['kind']=='reflection_failed']
+        self.assertEqual(len(events),1)
+        self.assertIn('could not be read',events[0]['data']['reason'])
+        self.assertEqual(self.cmd('sim',[])['records'],[])
+
+    def test_the_reflection_is_off_until_the_session_turns_it_on(self):
+        # #383: a reflection is a paid model call per graded goal whose only product is a proposal, so it is off by
+        # default for every session; `agent reflect --on` is the documented switch (and the running resident takes
+        # it at its next turn, as it takes `sim`).
+        self.gates_on()
+        cfg=json.loads((self.home/'config.json').read_text())
+        self.assertNotIn('reflect',cfg,'a fresh session leaves the default alone instead of writing it')
+        # a fresh session: a graded goal completes with no reflection call, even with an answer waiting
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect(dict(problem_group='x',change='y',predicted='z'))
+        self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
+        self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'default: no reflection call')
+        self.assertEqual(self.cmd('sim',[])['records'],[],'default: no proposed record')
+        # the switch: --on writes config reflect true and the next graded goal reflects once
+        self.assertEqual(self.cmd('reflect',['--on'])['reflect'],True)
+        self.assertTrue(json.loads((self.home/'config.json').read_text())['reflect'])
+        self.assertEqual(self.cmd('reflect',[])['reflect'],True,'no flag: report the setting, change nothing')
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
+        self.assertEqual(len([b for k,b in Endpoint.reflect_seen if k==self.key]),1,'reflect on: one call')
+        self.assertEqual(len(self.cmd('sim',['--status','proposed'])['records']),1)
+        # a running resident follows the key at its next turn (runtime._follow_config), like it follows sim
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            rt.model=Endpoint
+            self.assertTrue(rt.config.get('reflect'))
+            self.cmd('reflect',['--off'])
+            rt._follow_config()
+            self.assertFalse(rt.config.get('reflect'),'a daemon sees --off without a restart')
+            gid=rt.store.enqueue('x');rt.store.update(gid,done_check='test -f x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+        finally:rt.mail.close();rt.store.close()
+        self.assertFalse(json.loads((self.home/'config.json').read_text())['reflect'])
+        self.assertEqual(self.cmd('reflect',['--on','--off'],code=1)['error'],'use --on or --off, not both')
+
+    def test_the_reflect_switch_names_a_config_it_cannot_read(self):
+        # #383 review P2-1: with config.json unreadable, `agent reflect --on` answered with the decoder's own
+        # "Expecting value: line 1 column 12" and, on a missing file, a FileNotFoundError trace. The person needs
+        # the file and the repair, and a refused read must not be written over: atomic_json replaces the whole
+        # file, so a write after it would take every other key with it.
+        self.gates_on()
+        cfg_path=self.home/'config.json'
+        before=cfg_path.read_text()
+        cfg_path.write_text('{"model": "fixture", ')
+        r=self.cmd('reflect',['--on'],code=1)
+        self.assertIn('config.json is not valid JSON',r['error'])
+        self.assertIn('will not rewrite a file it cannot read',r['error'])
+        self.assertEqual(cfg_path.read_text(),'{"model": "fixture", ','a refused read rewrote the file')
+        # a missing file never reaches the handler: the guard above answers it with the init instruction
+        cfg_path.unlink()
+        r=self.cmd('reflect',['--on'],code=1)
+        self.assertEqual(r['error'],'agent not initialized; run agent init first')
+        cfg_path.write_text(before)
+        self.assertEqual(self.cmd('reflect',[])['reflect'],False,'the restored config still reads')
+
+    def test_a_flag_misuse_is_answered_before_an_unreadable_config(self):
+        # #383 review P2: the `--on --off` check ran after the config read, so a caller with a broken config.json was
+        # told about the file when the complaint was the flags they typed. A misuse needs no config to answer, so it
+        # goes first; the file is still left alone.
+        self.gates_on()
+        cfg_path=self.home/'config.json'
+        cfg_path.write_text('{"model": "fixture", ')
+        r=self.cmd('reflect',['--on','--off'],code=1)
+        self.assertIn('use --on or --off, not both',r['error'])
+        self.assertNotIn('config.json is not valid JSON',r['error'],'the file’s problem hid the caller’s')
+        self.assertEqual(cfg_path.read_text(),'{"model": "fixture", ','a misuse rewrote the file')
+
+    def test_a_reflection_call_that_never_answers_is_a_skip_not_a_failure(self):
+        # #383 review P2-2: a slow endpoint makes _bounded raise TimeoutError, and the outer handler recorded that
+        # as `reflection_failed` - a row the person scanning the event log reads as a harness defect. The endpoint
+        # not answering is the same kind of nothing as a stop-cut call: a skip.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        import threading as _threading
+        aborted=_threading.Event()
+        class Model:
+            config={'model':'claude-haiku-5-5'}   # (priced, so the skip's unpriced bound is a figure, not None)
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def abort(self):aborted.set()
+            def complete(self,*a,**k):
+                Model.calls+=1
+                aborted.wait(10)                # never answers: only the attempt's own deadline ends it
+                raise OSError('the socket was closed')
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            with unittest.mock.patch.object(reflect,'TIMEOUT',.2):
+                self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1,'the retry ran after a timed-out first call')
+            events=rt.store.events()
+            self.assertEqual([e for e in events if e['kind']=='reflection_failed'],[],'a slow endpoint is not a defect')
+            skipped=[e for e in events if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1)
+            self.assertIn('the endpoint did not answer in time',skipped[0]['data']['reason'])
+            # #383 review P2: an abandoned call cannot be priced by the caller, so the skip carries what the ledger
+            # is missing instead - an upper bound from what was sent, never a measurement. It is a real figure on a
+            # priced model (None when the price is unknown), and the same bound is debited to spend.json ONCE, on
+            # this thread, counted apart as `est_usd`/`goals_est` and with no `turns`: a total that reads low by a
+            # call no metering site saw would let the next turn spend past a budget, and a reader must be able to
+            # tell a bound from a priced turn.
+            bound=skipped[0]['data']['unpriced']
+            self.assertIsInstance(bound,float,'a priced model\'s abandoned call reported no upper bound')
+            self.assertGreater(bound,0)
+            import datetime
+            day=json.loads((self.home/'spend.json').read_text())['days'][datetime.date.today().isoformat()]
+            self.assertEqual(day['turns'],0,'a bound was counted as a priced turn')
+            self.assertAlmostEqual(day['est_usd'],bound,places=6,msg='the abandoned call\'s bound was not debited')
+            self.assertAlmostEqual(day['usd'],bound,places=6,msg='the bound did not join the day\'s total')
+            goals=json.loads((self.home/'spend.json').read_text())['goals_est']
+            self.assertAlmostEqual(goals[gid],bound,places=6,msg='the bound was not kept with its goal')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_off_sim_log_or_a_free_stretch_asks_for_no_reflection(self):
+        # the reflection writes into the SIM log, so an off arm records nothing (an A/B's off arm must not learn
+        # here) even when the session turned reflection on; free time is not graded work and is not reflected on.
+        self.gates_on()
+        self.reflect_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False;cfg['reflect']=True
+        (self.home/'config.json').write_text(json.dumps(cfg))
+        self.assertEqual(self.cmd('once',['--goal','Create the file.'])['state'],'completed')
+        self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'sim off: no reflection call')
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        cfg['sim']=True;cfg['reflect']=False
+        (self.home/'config.json').write_text(json.dumps(cfg))
+        self.assertEqual(self.cmd('once',['--goal','Create the file again.'])['state'],'completed')
+        self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'reflect false: no reflection call')
+        # free time is not graded work: the log and the reflection are on, and a stretch still asks for none
+        cfg['reflect']=True;(self.home/'config.json').write_text(json.dumps(cfg))
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Free time.',kind='free')
+            self.assertIsNone(reflect.maybe(rt,gid,'rested',''))
+            self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'free time: no reflection call')
+            # graded work only: a goal with no done check has no standard it was measured against, so a proposal
+            # from it would restate the goal (and a plain two-turn conversation stays two model calls)
+            gid=rt.store.enqueue('No done check.')
+            rt.store.update(gid,state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'done',''))
+            self.assertEqual([b for k,b in Endpoint.reflect_seen if k==self.key],[],'no done check: no reflection call')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_failed_reflection_is_an_event_and_never_loses_the_finished_goal(self):
+        # a model outage at goal end must not turn a completed goal into an error: the goal stays completed and
+        # the failure is on the record.
+        self.gates_on()
+        self.reflect_on()
+        self.replies(call('define_done',dict(check='the file exists')),
+                     call('verify',dict(evidence='ls showed the file')),
+                     call('finish',dict(summary='Done.')))
+        self.reflect(dict(problem_group='x',change='y',predicted='z'))
+        goal=self.cmd('once',['--goal','Create the file.'])
+        self.assertEqual(goal['state'],'completed')
+        from caminus.ember.resident import reflect
+        class Dead:
+            config={}
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):raise ValueError('the server is gone')
+        rt=Runtime(self.home)
+        try:
+            rt.model=Dead()
+            gid=rt.store.enqueue('Judge me.')
+            rt.store.update(gid,done_check='x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(rt.store.goal(gid)['state'],'working','the reflection touches no goal state')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_reflection_does_not_spend_past_the_brain_that_took_the_goal(self):
+        # #383 review P2: the call is priced into the goal's spend like a turn, and the fallback's daily budget gates
+        # its work turns (brains._allowed). A goal whose last turn the fallback served must not reflect past that
+        # budget: the runtime would spend through this call what it just refused to spend on the goal's own turns.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
+        class FakeBrains:
+            budget=0.5
+            def __init__(self,model):self.fallback=model;self.cfg=dict(budget_usd=self.budget);self.spent=0.0
+            def spent_today(self):return self.spent
+            def _allowed(self,gid):return self.spent < self.cfg['budget_usd']   # the runtime's own gate, copied here
+        rt=Runtime(self.home)
+        try:
+            model=Model();rt.model=model;rt.brains=FakeBrains(model)
+            rt.brains.spent=0.6
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,0,'past the allowance: no call')
+            events=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(events),1,'the skip is on the record with its reason')
+            self.assertIn('allowance is spent',events[0]['data']['reason'])
+            # under the allowance again the same goal reflects once
+            rt.brains.spent=0.1
+            self.assertIsNotNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1)
+            # the primary is the brain the user chose: its allowance is not this guard's (a fallback-only budget)
+            rt.model=object.__new__(type('P',(),{}))
+            rt.model.complete=Model().complete;rt.brains.fallback=object()
+            self.assertTrue(reflect._may_spend(rt,gid),'the fallback is not in force: no budget applies')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_reflection_never_spends_on_a_brain_the_runtime_would_refuse(self):
+        # #383 review P1: _may_spend restated the runtime's gate and drifted - it checked only spent_today() <
+        # budget_usd, so an unpriced remote fallback (which brain._allowed refuses outright: "an unpriced remote
+        # fallback cannot be limited") still served a billed reflection past the cap the runtime enforces on the
+        # goal's own turns. It calls brains._allowed now, so every reason the runtime has for refusing a turn is a
+        # reason this call does not happen, and the skip says which brain and why.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.brain import Brains
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            remote=object.__new__(type('R',(),{'config':{'model':'a-relay-name-nobody-priced'},'remote':True}))
+            remote.static=False
+            remote.complete=lambda *a,**k:self.fail('an unpriced remote must not be called')
+            class Free:
+                def is_free(self,gid):return False
+            class FakeBrains(Brains):
+                def __init__(self):self.fallback=remote;self.cfg=dict(budget_usd=0.5);self.rt=rt;self.spent=0.0
+                def spent_today(self):return self.spent
+            brains=FakeBrains();rt.brains=brains;rt.model=remote
+            rt.free=Free()
+            self.assertFalse(brains._allowed(gid),'the runtime itself refuses an unpriced remote fallback')
+            self.assertFalse(reflect._may_spend(rt,gid),'so the reflection may not call it either')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1,'the skip is on the record')
+            self.assertIn('allowance is spent',skipped[0]['data']['reason'])
+            # and the budget cannot buy an unpriced brain: the refusal is about the price, not the allowance
+            brains.spent=0.0
+            self.assertFalse(brains._allowed(gid),'still unpriced: the budget does not make it refusable-but-callable')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_gate_that_raises_is_recorded_as_a_defect_not_a_spent_allowance(self):
+        # #383 review P2: when the fallback is in force and _allowed itself raises, the fail-closed skip said only
+        # "allowance is spent", so a defect in the gate read as a spent budget and nobody went looking for it. The
+        # skip carries the gate's own reason now: a raised gate and a spent allowance are told apart where the
+        # queue is read, and the failure is not sticky (a gate that can be read again lets the same goal reflect).
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
+        class FakeBrains:
+            def __init__(self,model):
+                self.fallback=model;self.cfg=dict(budget_usd=0.5);self.spent=0.0;self.raises=True
+            def spent_today(self):return self.spent
+            def _allowed(self,gid):
+                if self.raises:
+                    raise RuntimeError('the cap ledger is unreadable')
+                return True
+        rt=Runtime(self.home)
+        try:
+            model=Model();rt.model=model;rt.brains=FakeBrains(model)
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            self.assertFalse(reflect._may_spend(rt,gid),'fail closed: a gate that raises does not spend')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,0,'the gate could not be read: no call')
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1,'the skip is on the record')
+            reason=skipped[0]['data']['reason']
+            self.assertIn('gate raised',reason)
+            self.assertIn('RuntimeError',reason)
+            self.assertNotIn('allowance is spent',reason,'a raised gate must not read as a spent budget')
+            rt.brains.raises=False
+            self.assertIsNotNone(reflect.maybe(rt,gid,'Done.',''),'a readable gate lets the reflection run again')
+            self.assertEqual(Model.calls,1)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_reflection_stops_before_the_retry_once_the_first_call_spent_the_allowance(self):
+        # #383 review P1: the first call's own cost is priced into spent_today (brains.account in _ask), so the retry
+        # could start out over the allowance the runtime refuses the goal's next turn on. The gate is read again
+        # before the retry: crossing it ends the reflection instead of billing a second call past the cap.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                if Model.calls==1:
+                    return {'content':'not json'}
+                return {'content':json.dumps(dict(problem_group='x',change='y',predicted='z'))}
+        class FakeBrains:
+            cfg=dict(budget_usd=0.5)
+            spent=0.1
+            def __init__(self,model):self.fallback=model
+            def spent_today(self):return self.spent
+            def _allowed(self,gid):return self.spent < self.cfg['budget_usd']
+            def account(self,gid):
+                # what _ask does after every call: this one alone costs the rest of the allowance
+                self.spent=0.75
+        rt=Runtime(self.home)
+        try:
+            model=Model();rt.model=model;rt.brains=FakeBrains(model)
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1,'the retry billed a second call past the allowance the first one spent')
+            self.assertEqual([e for e in rt.store.events() if e['kind']=='reflection_failed'],[])
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1,'the skip is on the record with its reason')
+            self.assertIn('allowance is spent before the retry',skipped[0]['data']['reason'])
+        finally:rt.mail.close();rt.store.close()
+
+
+    def test_the_brief_says_which_of_its_counters_span_every_episode(self):
+        # #383 review P2: every block of the brief is bounded by _episode_start except the counts sentence, and that
+        # sentence drew its steers from store.steers, which is keyed by goal: a goal steered twice in each of two
+        # episodes reflected "4 steer(s)" for one episode. The numbers stay whole-goal on purpose -- `steps` and
+        # `approach_changes` are goal-row counters a resume does not reset, so scoping only the steers would leave
+        # the rest of the same sentence still claiming one episode -- so the sentence says what it counts.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.update(gid,steps=7,approach_changes=1)
+            rt.store.add_steer(gid,'first episode one');rt.store.add_steer(gid,'first episode two')
+            rt.store.event('tool_result',dict(name='early_tool',call_id='c1',result=dict(output='before')),gid)
+            with rt.store.transaction():rt.store.update(gid,state='paused',error='stop')
+            resume_goal(rt.store,gid)
+            rt.store.add_steer(gid,'this episode one');rt.store.add_steer(gid,'this episode two')
+            rt.store.event('tool_result',dict(name='late_tool',call_id='c2',result=dict(output='after')),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('ACROSS ITS EPISODES',text,'the whole-goal numbers are not labelled as such')
+            self.assertIn('7 MODEL TURNS',text)
+            self.assertIn('1 times',text)
+            self.assertIn('4 steer(s)',text,'all four steers are counted, both episodes’')
+            self.assertNotIn('early_tool',text,'the calls stay this episode’s even though the counts do not')
+            self.assertIn('late_tool',text)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_reopened_goals_reflection_reads_only_this_episodes_judge(self):
+        # #383 review P2: the brief and the record's eval_context took the newest `judged` event for the goal. A
+        # reopened goal that finished again without a judge this episode would quote the earlier verdict, which
+        # describes a different episode. Both lookups are scoped to the episode now, and the episode begins at the
+        # resume (`send --continue` writes `episode_resumed`), not at a list of stop kinds.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('judged',dict(verdict='unmet',reason='the old episode'),gid)
+            rt.store.event('finished',dict(summary='first episode'),gid)
+            with rt.store.transaction():   # what send --continue writes on a finished goal
+                rt.store.update(gid,state='working',summary='',error='',deadline=None,step_limit=None)
+                rt.store.event('goal_continued',{},gid)
+                rt.store.event('episode_resumed',dict(state='completed'),gid)
+            # this episode's own finish: _finish writes it before it calls the reflection (runtime._finish)
+            rt.store.event('finished',dict(summary='second episode'),gid)
+            since=reflect._episode_start(rt,gid)
+            self.assertGreater(since,0,'the resume that began this episode bounds it')
+            self.assertEqual(reflect._judge(rt,gid,since),(None,''),'the earlier verdict is not this episode’s')
+            self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
+            rt.store.event('judged',dict(verdict='met',reason='this episode'),gid)
+            self.assertEqual(reflect._judge(rt,gid,reflect._episode_start(rt,gid)),('met','this episode'),'a verdict this episode is seen')
+            self.assertIn('THE FINISH JUDGE: met — this episode',reflect.brief(rt,gid,'Done.',''))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_any_stop_kind_then_a_resume_starts_a_new_episode(self):
+        # #383 review P2: _episode_start listed the event kinds that end an episode, and the list was already
+        # incomplete (the watchdog, the plain-text guard, the emergency stop, either oneshot budget -- two wrote no
+        # event at all -- a model truncation, a refused model and delegate_row_missing all stop a goal). A goal
+        # stopped by a kind the list never named kept its stopped episode's judge and tool calls in the next
+        # reflection. The boundary is written on the resume now (cli.resume_goal, and `send --continue` on a finished
+        # goal), not at the stop, so a new stop kind cannot break it.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            for kind,data in (('watchdog',dict(reason='no progress')),('runtime_error',dict(error='ValueError: boom')),
+                              ('paused',dict(by='owner')),('model_truncated',dict(error='length')),
+                              ('model_refused',dict(error='no')),('model_gave_up',dict(error='no')),
+                              ('plain_text_pause',dict()),('emergency_stop',dict())):
+                gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+                rt.store.event('tool_result',dict(name='early_tool',call_id='c1',result=dict(output='before')),gid)
+                rt.store.event('judged',dict(verdict='unmet',reason='the stopped episode'),gid)
+                with rt.store.transaction():
+                    rt.store.update(gid,state='paused',error='stop')
+                    rt.store.event(kind,data,gid)
+                resume_goal(rt.store,gid)
+                self.assertEqual(rt.store.goal(gid)['state'],'working','%s: the goal is resumed' % kind)
+                self.assertGreater(reflect._episode_start(rt,gid),0,'%s: the resume wrote no episode boundary' % kind)
+                rt.store.event('tool_result',dict(name='late_tool',call_id='c2',result=dict(output='after')),gid)
+                text=reflect.brief(rt,gid,'Done.','')
+                self.assertNotIn('early_tool',text,'%s: the stopped episode leaked into the next reflection' % kind)
+                self.assertNotIn('the stopped episode',text,'%s: the old verdict leaked into the next reflection' % kind)
+                self.assertIn('late_tool',text,'%s: this episode’s own call is missing from the reflection' % kind)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_resume_marker_records_the_state_the_resume_leaves(self):
+        # #383 review P2: resume_goal wrote `episode_resumed` with `dict(state=g['state'])`, and `g` was fetched
+        # before the update, so the event said 'paused' about a goal the row now says is 'working'. Nothing reads
+        # the field yet (reflect._episode_start takes only the seq), but an event that disagrees with the row it
+        # describes is a stale field waiting for its first reader.
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.')
+            with rt.store.transaction():
+                rt.store.update(gid,state='paused',error='stop')
+            resume_goal(rt.store,gid)
+            row=rt.store.db.execute("SELECT data FROM events WHERE goal=? AND kind='episode_resumed' "
+                                    'ORDER BY seq DESC LIMIT 1',(gid,)).fetchone()
+            self.assertEqual(json.loads(row['data'])['state'],'working','the marker agrees with the row it describes')
+            self.assertEqual(rt.store.goal(gid)['state'],'working')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_no_op_resume_writes_no_episode_marker(self):
+        # #383 review P2: resume_goal wrote `episode_resumed` on every call, so `resume` (or `send --goal-id`) on a
+        # goal already `working` moved reflect._episode_start past the live episode's own judge and tool rows, and the
+        # next reflection read an empty episode. Only a resume that actually starts an episode writes the marker.
+        from caminus.ember.resident.cli import resume_goal
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.')
+            rt.store.update(gid,state='working')
+            resume_goal(rt.store,gid)                  # (already working: nothing starts over)
+            self.assertEqual(reflect._episode_start(rt,gid),0,'a no-op resume wrote an episode boundary')
+            self.assertEqual(rt.store.goal(gid)['state'],'working')
+            with rt.store.transaction():
+                rt.store.update(gid,state='paused',error='stop')
+            resume_goal(rt.store,gid)                  # (a real resume still writes one)
+            self.assertGreater(reflect._episode_start(rt,gid),0,'a real resume wrote no episode boundary')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_reflection_that_outlived_its_episode_records_nothing(self):
+        # #383 review P2: maybe() read the episode only when it recorded, after a 60-120 s call. A `send --continue`
+        # in that window starts a new episode, so the in-flight reply was stamped with the NEW episode's
+        # eval_context ("judge not run") while it answered the old one, and the new episode proposes again at its own
+        # finish. The episode is captured before the call now, and a move discards the reply as a skip.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        answer=json.dumps(dict(problem_group='g',change='c',rationale='r',predicted='p'))
+        class Model:
+            config={'model':'claude-haiku-5-5'}
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):return dict(content=answer)
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            real=reflect._ask
+            def ask_after_continue(*a,**k):
+                out=real(*a,**k)
+                with rt.store.transaction():
+                    rt.store.event('episode_resumed',dict(state='working'),gid)   # (a `send --continue` lands)
+                return out
+            with unittest.mock.patch.object(reflect,'_ask',ask_after_continue):
+                self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            events=rt.store.events()
+            self.assertEqual([e for e in events if e['kind']=='reflection_failed'],[],'a continued goal is not a defect')
+            skipped=[e for e in events if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1)
+            self.assertIn('continued while the reflection was in flight',skipped[0]['data']['reason'])
+            self.assertEqual(reflect.sim._load(rt,gid),[],'a reply for the old episode was recorded')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_judged_verdict_outside_the_known_set_never_reaches_the_reflection(self):
+        # #383 review P2: _judge returned `d.get('verdict')` verbatim, so a foreign or hand-edited `judged` row put
+        # a verdict no judge can give into the reflection prompt ("THE FINISH JUDGE: unmet"), where judge.verdict
+        # would have normalized the same text to nothing. The reader is bounded to the stored set now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            for bad in ('unmet','MET','impossible','met ','' ,None,42):
+                rt.store.event('judged',dict(verdict=bad,reason='foreign'),gid)
+                self.assertIsNone(reflect._judge(rt,gid,0)[0],'%r is not a verdict a judged event may carry' % (bad,))
+                self.assertNotIn('THE FINISH JUDGE',reflect.brief(rt,gid,'Done.',''))
+            for good in ('met','not_yet','wait','unread'):
+                rt.store.event('judged',dict(verdict=good,reason='ours'),gid)
+                self.assertEqual(reflect._judge(rt,gid,0)[0],good,'%r is one of the stored verdicts' % (good,))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_tool_failure_shaped_ok_false_reaches_the_reflection(self):
+        # #383 review P2: the brief counted a failed call only when its result carried 'error', so a tool that reports
+        # {'ok': False} with no 'error' key never reached the reflection's evidence. Both shapes count now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('tool_result',dict(name='error_tool',call_id='c1',result=dict(error='it broke')),gid)
+            rt.store.event('tool_result',dict(name='ok_tool',call_id='c2',result=dict(ok=False)),gid)
+            rt.store.event('tool_result',dict(name='fine_tool',call_id='c3',result=dict(ok=True)),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('2 of those calls failed',text,'the ok=False failure was invisible')
+            self.assertIn('it broke',text)
+            self.assertIn('ok_tool: ok=False',text,'the ok=False result is named with its shape')
+            self.assertNotIn('fine_tool: ',text,'a successful call is not reported as failed')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_nonzero_exit_reaches_the_reflection(self):
+        # #383 review P1: brief() kept its own copy of the failure rule ('error' or ok is False), so a `terminal` or
+        # `sandbox` result that answered with exit_code=1 and output (no 'error' key) read as a success and never
+        # reached the reflection, while the model's repeat-failure watchdog did see it. One classifier now.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt.store.event('tool_result',dict(name='terminal',call_id='c1',
+                result=dict(command='pytest -q',exit_code=1,output='2 failed, 4 passed\n')),gid)
+            rt.store.event('tool_result',dict(name='sandbox',call_id='c2',
+                result=dict(command='make',exit_code=2,output='error: no target\n')),gid)
+            rt.store.event('tool_result',dict(name='terminal',call_id='c3',
+                result=dict(command='ls',exit_code=0,output='f.txt\n')),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('2 of those calls failed',text,'a non-zero exit was invisible to the reflection')
+            self.assertIn('terminal: exit 1: 2 failed, 4 passed',text)
+            self.assertIn('sandbox: exit 2: error: no target',text)
+            self.assertNotIn('terminal: exit 0',text,'a successful command is not reported as failed')
+            # the same classifier the watchdog uses, so the two cannot drift: the model sees the exit too
+            self.assertEqual(rt._failure_text(dict(exit_code=1,output='2 failed\n')),'exit 1: 2 failed')
+            self.assertEqual(rt._failure_text(dict(ok=False)),'ok=False')
+            self.assertEqual(rt._failure_text(dict(exit_code=0,output='ok\n')),'')
+            self.assertEqual(rt._failure_text(dict(ok=True,output='ok\n')),'')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_churning_goal_keeps_its_failures_in_the_brief(self):
+        # #383 review P2: the tool-call summary is keyed by name, so a goal that called a long tail of one-off
+        # tools pushed the failure list below it out of the prompt's practical window. Past NAMES_MAX distinct
+        # names the singletons go, the count of them is said, and a name seen more than once (the failures)
+        # stays.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Churn.');rt.store.update(gid,done_check='x',state='working')
+            for i in range(reflect.NAMES_MAX+5):
+                rt.store.event('tool_result',dict(name='oneoff_%d'%i,call_id='o%d'%i,result=dict(ok=True)),gid)
+            rt.store.event('tool_result',dict(name='flaky_tool',call_id='f1',result=dict(error='it broke')),gid)
+            rt.store.event('tool_result',dict(name='flaky_tool',call_id='f2',result=dict(error='it broke again')),gid)
+            text=reflect.brief(rt,gid,'Done.','')
+            self.assertIn('flaky_tool×2',text,'the repeated tool name went with the singletons')
+            self.assertNotIn('oneoff_0',text,'a one-off name crowded the summary')
+            self.assertIn('(and %d names seen once)' % (reflect.NAMES_MAX+5),text,'the drop count is not said')
+            self.assertIn('2 of those calls failed',text)
+            self.assertIn('it broke again',text,'the newest failure fell out of the brief')
+            # under the cap every name is still listed, singletons included
+            small=rt.store.enqueue('Small.');rt.store.update(small,done_check='x',state='working')
+            rt.store.event('tool_result',dict(name='only_once',call_id='s1',result=dict(ok=True)),small)
+            rt.store.event('tool_result',dict(name='again',call_id='s2',result=dict(ok=True)),small)
+            rt.store.event('tool_result',dict(name='again',call_id='s3',result=dict(ok=True)),small)
+            small_text=reflect.brief(rt,small,'Done.','')
+            self.assertIn('only_once×1',small_text)
+            self.assertIn('again×2',small_text)
+            self.assertNotIn('seen once',small_text,'a brief under the cap dropped names anyway')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_tool_result_failure_contract_allows_no_ok_false(self):
+        # #383 review P1: `_failure_text` reads `ok: False` as a FAILED call, and that classifier feeds the
+        # repeat-failure watchdog (three repeats pause the goal), but the rule that a neutral no-op must answer
+        # `ok: True` or omit the key was only a sentence in docs/resident-agent.md. A test enforces it now: a tool
+        # that says "nothing to do" with `ok: False` fails here instead of pausing a healthy goal in the field.
+        import ast
+        pkg=ROOT/'python'/'caminus'/'ember'/'resident'
+        files=sorted(pkg.glob('*.py'))
+        self.assertGreater(len(files),10,'the glob reads the resident package')
+        # The one legitimate `ok=False` in the tree: catalog.refresh's per-provider status, which is a provider
+        # report and never a tool result. Everything else must omit `ok` or answer `ok: True`.
+        allow={('catalog.py','refresh')}
+        hits=[]
+        for f in files:
+            tree=ast.parse(f.read_text())
+            # the enclosing function of every node, so a hit names where a tool author would look
+            where={}
+            for fn in [n for n in ast.walk(tree) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))]:
+                for sub in ast.walk(fn):
+                    where.setdefault(id(sub),fn.name)
+            for node in ast.walk(tree):
+                pairs=[]
+                if isinstance(node,ast.Dict):
+                    pairs=[(k.value,v.value) for k,v in zip(node.keys,node.values)
+                           if isinstance(k,ast.Constant) and k.value=='ok' and isinstance(v,ast.Constant)]
+                elif isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='dict':
+                    pairs=[(kw.arg,kw.value.value) for kw in node.keywords
+                           if kw.arg=='ok' and isinstance(kw.value,ast.Constant)]
+                for key,value in pairs:
+                    if key=='ok' and value is False:
+                        hits.append((f.name,where.get(id(node),'?'),node.lineno))
+        bad=[h for h in hits if (h[0],h[1]) not in allow]
+        self.assertEqual(bad,[],'a resident result says ok: False; per docs/resident-agent.md (## Tools) that means '
+                                'the call FAILED and feeds the repeat-failure watchdog. Answer a neutral no-op with '
+                                'ok: True or omit the key: ' + repr(bad))
+        # the arm itself stays: the contract is `ok: False` means failed, not that the key is ignored
+        rt=Runtime(self.home)
+        try:
+            self.assertEqual(rt._failure_text(dict(ok=False)),'ok=False')
+            self.assertEqual(rt._failure_text(dict(ok=True)),'')
+            self.assertEqual(rt._failure_text({}),'')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_reflection_stops_before_the_retry_when_the_daemon_is_going(self):
+        # #383 review P2: stopping() was read once before the first call; a SIGTERM while an unreadable reply was in
+        # flight let the retry spend another 60 s timeout — the wait stopping()'s docstring warns about. It is read
+        # again before the retry now. The flag flips exactly when _ask returns (not inside complete()), because
+        # _bounded also reads it while the call is in flight: a flip in there ends the FIRST call as a stop-skip,
+        # which is a different arm and would not show whether the retry guard was read.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                return {'content':'not json'}
+        rt=Runtime(self.home)
+        stop=[False]
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            rt._stop=lambda:stop[0]
+            real=reflect._ask
+            def ask_then_stop(*a,**k):
+                try:return real(*a,**k)
+                finally:stop[0]=True
+            with unittest.mock.patch.object(reflect,'_ask',ask_then_stop):
+                self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertEqual(Model.calls,1,'the retry spent another timeout after the stop')
+            failed=[e for e in rt.store.events() if e['kind']=='reflection_failed']
+            self.assertEqual(len(failed),1)
+            self.assertIn('stopping before the retry',failed[0]['data']['reason'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_hung_reflection_call_ends_when_the_daemon_stops(self):
+        # #383 review P2: the socket timeout given to complete() bounds each read, not the call, so a stream that
+        # trickled just under it held the loop past SIGTERM's shutdown budget. The call now runs under _bounded,
+        # which closes the socket (Model.abort) when the stop flag is read. Here the model blocks until aborted.
+        self.gates_on()
+        self.reflect_on()
+        from caminus.ember.resident import reflect
+        started, aborted = threading.Event(), threading.Event()
+        class Model:
+            config={}
+            calls=0
+            def context_size(self):return 65536
+            def tokens(self,m,t):return 1
+            def complete(self,*a,**k):
+                Model.calls+=1
+                started.set()
+                aborted.wait(10)          # blocks like a read that never returns more bytes
+                raise OSError('the socket was closed')
+            def abort(self):aborted.set()
+        rt=Runtime(self.home)
+        try:
+            rt.model=Model()
+            gid=rt.store.enqueue('Judge me.');rt.store.update(gid,done_check='x',state='working')
+            flag=[]
+            rt._stop=lambda:bool(flag)  # the stop must arrive while the call is blocked, like SIGTERM
+            def stop_it():
+                started.wait(5);flag.append(1)
+            threading.Thread(target=stop_it,daemon=True).start()
+            t0=time.monotonic()
+            self.assertIsNone(reflect.maybe(rt,gid,'Done.',''))
+            self.assertLess(time.monotonic()-t0,5,'the reflection held the loop until its 60 s read timeout')
+            self.assertTrue(aborted.is_set(),'the hung call was not aborted')
+            self.assertEqual(Model.calls,1,'the retry ran after the stop')
+            # #383 review P2-1: a call cut short by the stop is a skipped reflection, not a failing one - a
+            # `reflection_failed` row would read as a harness defect to the person scanning the event log
+            self.assertEqual([e for e in rt.store.events() if e['kind']=='reflection_failed'],[])
+            skipped=[e for e in rt.store.events() if e['kind']=='reflection_skipped']
+            self.assertEqual(len(skipped),1)
+            self.assertIn('stopping: the reflection was cut short',skipped[0]['data']['reason'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_reflection_call_over_its_own_timeout_is_aborted(self):
+        # The whole-attempt bound, directly: a call that ignores the stop flag and never answers is aborted at its
+        # own deadline instead of at the socket's per-read timeout (which a trickling stream never reaches).
+        from caminus.ember.resident import reflect
+        aborted=threading.Event()
+        class Rt:
+            model=type('M',(),dict(abort=lambda s:aborted.set()))()
+            def stopping(self):return False
+        def never():aborted.wait(10);raise OSError('closed')
+        t0=time.monotonic()
+        with self.assertRaises(TimeoutError) as e:
+            reflect._bounded(Rt(),never,seconds=.2)
+        self.assertLess(time.monotonic()-t0,5)
+        self.assertTrue(aborted.is_set(),'the call was not aborted at its deadline')
+        self.assertIn('no reply in 0.2s',str(e.exception))
+        # and a call that raises hands its own exception back, not a timeout
+        def boom():raise ValueError('the server said no')
+        with self.assertRaises(ValueError):
+            reflect._bounded(Rt(),boom,seconds=5)
+
+    def test_an_abandoned_call_debits_its_bound_once_to_both_ledgers(self):
+        # #383 review P2: the abandoned call is never *priced* (the test above), so the caller debits the bound
+        # `_unpriced` computed, at abandonment, on the loop thread: spend.json (`_meter_estimate`) and the fallback's
+        # allowance (`account_estimate`), so neither ledger reads low by a call no metering site ever saw. Both get
+        # the same figure once; a stub runtime with neither method is not an error, and neither is a ledger that
+        # raises (losing a finished goal to a spend bookkeeping failure would be far worse than a low total).
+        from caminus.ember.resident import reflect
+        got=[]
+        class Brains:
+            def account_estimate(self,gid,usd):got.append(('account',gid,usd))
+        class Rt:
+            brains=Brains()
+            def _meter_estimate(self,gid,usd):got.append(('meter',gid,usd))
+        reflect._charge_estimate(Rt(),'g1',0.25)
+        self.assertEqual(got,[('meter','g1',0.25),('account','g1',0.25)])
+        got.clear()
+        class Bare: pass
+        reflect._charge_estimate(Bare(),'g2',0.25)          # (a stubbed runtime: nothing to debit, nothing raised)
+        self.assertEqual(got,[])
+        class Angry:
+            def _meter_estimate(self,gid,usd):raise OSError('disk')
+        reflect._charge_estimate(Angry(),'g3',0.25)         # (never raises)
+
+    def test_the_reflection_aborts_only_its_own_call(self):
+        # #383 review P2: `abort()` closed every tracked socket, so a reflection that missed its deadline could cut
+        # the turn that shares rt.model. Model.abort(thread=...) closes only the sockets that thread opened, and a
+        # stop request (abort() with no thread) still closes everything, as before.
+        from caminus.ember.resident import reflect
+        from caminus.ember.resident.model import Model
+        shut=[]
+        class Sock:
+            def __init__(self,n):self.n=n
+            def fileno(self):return self.n
+            def shutdown(self,how):shut.append(self.n)
+        m=Model.__new__(Model)
+        m._sockets_lock=threading.Lock()
+        m._sockets={Sock(7):11,Sock(8):99}      # (7 was opened by the reflection's worker, 8 by the turn)
+        m.abort(thread=11)
+        self.assertEqual(shut,[7],'abort(thread=) closed another call’s socket')
+        self.assertEqual([s.n for s in m._sockets],[8],'abort(thread=) dropped another call’s socket')
+        m.abort()
+        self.assertEqual(shut,[7,8],'abort() did not close everything')
+        self.assertEqual(m._sockets,{})
+        # a deadline names the worker thread, so only that call's sockets are closed
+        seen,done=[],threading.Event()
+        class M2:
+            def abort(self,thread=None):seen.append(thread);done.set()
+        class Rt:
+            model=M2()
+            def stopping(self):return False
+        with self.assertRaises(TimeoutError):
+            reflect._bounded(Rt(),done.wait,seconds=.2)
+        self.assertEqual(len(seen),1,'_bounded did not abort the call at its deadline')
+        self.assertIsInstance(seen[0],int,'_bounded did not name the worker thread')
+
+    def test_an_abandoned_reflection_call_is_not_priced_by_the_caller(self):
+        # #383 review P2: _ask() prices its call only after _bounded() RETURNS it, on this thread. A call abandoned
+        # at its deadline raises out of _bounded, so neither brains.account nor _meter runs: the abandoned call is
+        # never charged from a last_usage its own daemon thread has not written yet, and cannot be charged twice
+        # when it finally does. This asserts the contract at the call site (the totals tests only cover the normal
+        # arm), so a later change that meters inside _bounded, or before it returns, fails here.
+        from caminus.ember.resident import reflect
+        calls=[]
+        class Brains:
+            def account(self,gid):calls.append(('account',gid))
+        aborted=threading.Event()
+        class Model:
+            def abort(self):aborted.set()
+            def complete(self,msgs,**k):
+                aborted.wait(10)                 # never answers: the deadline closes the socket instead
+                raise OSError('closed')
+        class Rt:
+            model=Model();brains=Brains();stopping=lambda s:False
+            def _meter(self,gid):calls.append(('meter',gid))
+        with unittest.mock.patch.object(reflect,'TIMEOUT',.2):
+            with self.assertRaises(TimeoutError):
+                reflect._ask(Rt(),'g1',[dict(role='user',content='x')])
+        self.assertEqual(calls,[],'an abandoned call was priced by the caller')
+        # the answered arm is priced exactly once, in this order
+        class Answered(Model):
+            def complete(self,msgs,**k):return dict(content='{}')
+        rt=Rt();rt.model=Answered()
+        reflect._ask(rt,'g2',[dict(role='user',content='x')])
+        self.assertEqual(calls,[('account','g2'),('meter','g2')])
+
 
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""

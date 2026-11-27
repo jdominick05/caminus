@@ -84,7 +84,7 @@ it; the durable blocks replace it when the turn lands.
 | `/rewind` | pick "undo from step N on": files the edit tools changed from that step go back and the transcript is cut there (two presses; terminal side effects are not undone) |
 | `/model`, `/effort` | the models overlay (every provider's models, windows, prices) and the reasoning level; a running resident takes them at its next turn |
 | `/context`, `/memory` | what the agent's context holds, its brain, window and where compaction starts; its memory file, in a scrolling view |
-| `/sim` | the SIM log: each harness change's prediction, what CI and the reviews showed, and the brain that wrote it (`caminus ember agent sim NAME --on/--off` switches it for a session; `--record` / `--observe` / `--export` from the CLI) |
+| `/sim` | the SIM log: each harness change's prediction, what CI and the reviews showed, and the brain that wrote it (`caminus ember agent sim NAME --on/--off` switches it for a session; `--record` / `--observe` / `--export` from the CLI). The end-of-goal reflection that proposes a record is off unless the session asks: `caminus ember agent reflect NAME --on` (config `reflect`, default false) |
 | `/studio` | what free time made (the shelf, the journal, the studio); the "while you were away" card shows on its own |
 | `/panel` | the Caminus panel (models, servers, the cards) full screen inside Ember; Esc, q or e comes back to the chat as it was |
 | `/compact`, `/remember TEXT` | compact now; add to memory |
@@ -250,6 +250,7 @@ one call waits for output), `discover`, the loop's tools and the bridge
 | `remember`, `history_search` | A one-fact note with its index line; full-text search over the agent's own past goals, results, journal and notes |
 | `sim` | The SIM log when the session has it on (config.json `sim`, default on; `ember agent sim NAME --on/--off`): `record` a prediction before a harness change (problem group, change, rationale, predicted, eval context), `observe` it after CI and the reviews (observed, eval context, the prediction error if known), `list` the records with `history_search` finding them by text. Append-only: a recorded prediction is never rewritten; a second `observe` only adds the observation. Nothing automatic reads it, and the agent's tool has no export (the CLI has `--export`) |
 | `wait` | Block without model calls until a time, a file, a port, a process, a terminal session or a message; a message, cancellation or new work ends it early |
+| end-of-goal reflection | A graded goal that ends may get one extra model call (`REFLECT`) whose answer is a `proposed` SIM record a person reads. It is **off by default** (`config.json` `reflect` false): it costs a call per graded goal and its only product is a proposal, so the session opts in with `caminus ember agent reflect NAME --on` (`--off` turns it off; the running resident takes it at its next turn). It never runs with the SIM log off, in free time, or when the runtime was asked to stop |
 | `machine` | GPUs, memory, disk, load, the model servers, its sessions, peers and leases |
 | `lease` | A visible, expiring claim on GPU cards and memory, checked against the human's GPU windows; a claim, not a lock |
 | `report`, `budget`, `schedule` | fyi or need_you to the human; what the goal has used and has left; park the goal and wake it later |
@@ -262,6 +263,14 @@ one call waits for output), `discover`, the loop's tools and the bridge
 A tool result past about 8K tokens has its large text saved under `~/outputs/`;
 the model gets the head, the tail and the path. Web pages, search results and MCP
 results are marked as data, never instructions.
+
+What counts as a failed call is fixed here because it feeds the repeat-failure
+watchdog (three repeats of the same failure pause the goal): a result carrying
+`error`, a non-zero `exit_code`, or `ok: False`. So `ok: False` means the call
+FAILED. A tool whose normal answer is a neutral no-op (nothing to cancel, already
+answered) must answer `ok: True` or carry no `ok` key at all — `ok: False` is not
+a way to say "nothing to do" (#383 review). A tool that adds a result shape
+outside this table should say which arm it belongs to.
 
 ## Memory
 

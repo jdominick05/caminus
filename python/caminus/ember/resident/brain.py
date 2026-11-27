@@ -105,6 +105,28 @@ class Brains:
         day['turns'] += 1
         atomic_json(self.path, state)
 
+    def account_estimate(self, gid, usd):
+        """debit an abandoned call's upper bound while the fallback is the brain in force (#383 review P2).
+
+        `account` prices a call whose own last_usage the call wrote; an abandoned one never writes it, so the
+        allowance would read low and `_allowed` would let the fallback spend past `budget_usd`. The bound joins the
+        day's usd (the gate is conservative: it may stop a turn early, never late) and is counted apart in est_usd,
+        so `spent_today` and a reader can both tell a bound from a priced turn. No `turns` increment; the same
+        guards as `account`: the fallback must be the brain in force, and a free-time turn is priced elsewhere."""
+        try:
+            if self.rt.model is not self.fallback or self.rt.free.is_free(gid):
+                return
+            usd = float(usd)
+        except (TypeError, ValueError):
+            return
+        if usd <= 0:
+            return
+        state = self._state()
+        day = state.setdefault(datetime.date.today().isoformat(), dict(usd=0.0, turns=0))
+        day['usd'] = round(day['usd'] + usd, 6)
+        day['est_usd'] = round(day.get('est_usd', 0.0) + usd, 6)
+        atomic_json(self.path, state)
+
     # ---- choosing ------------------------------------------------------------------------------------------
 
     def _primary_up(self):

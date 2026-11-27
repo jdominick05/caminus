@@ -307,7 +307,7 @@ class Cancelled(Exception):
 class Model:
     def __init__(self, config, opener=urllib.request.urlopen):
         self.config, self.opener = config, opener
-        self._sockets, self._sockets_lock = set(), threading.Lock()
+        self._sockets, self._sockets_lock = {}, threading.Lock()   # (sock -> the thread that opened it)
         if opener is urllib.request.urlopen:
             self.opener = _recording_opener(self._held)   # (abort() can then close an open call: see abort)
 
@@ -339,15 +339,29 @@ class Model:
 
     def _held(self, sock):
         with self._sockets_lock:
-            self._sockets = {s for s in self._sockets if s.fileno() != -1}   # (closed ones out)
-            self._sockets.add(sock)
+            # (closed ones out; the value is the thread that opened it, so abort() can close one call's sockets only)
+            self._sockets = {s: t for s, t in self._sockets.items() if s.fileno() != -1}
+            self._sockets[sock] = threading.get_ident()
 
-    def abort(self):
-        """Close every open call's connection. A cancelled or interrupted turn stops here and on the server: abandoning
-        the call left the server generating the reply (up to the reply limit) and holding its slot; caminus serve stops
-        a job when its client's socket closes, also during prefill."""
+    def abort(self, thread=None):
+        """Close every open call's connection, or only the ones one call's thread opened.
+
+        A cancelled or interrupted turn stops here and on the server: abandoning the call left the server generating
+        the reply (up to the reply limit) and holding its slot; caminus serve stops a job when its client's socket
+        closes, also during prefill. That is why the default closes everything: the turn being interrupted is the
+        whole turn, and a stop request means nothing else should keep a server busy either.
+
+        thread: the ident of the thread that ran the call (`reflect._bounded` runs a side call on its own). Then only
+        the sockets THAT thread opened are closed, so a side call that missed its deadline cannot cut the turn that
+        shares this Model (#383 review P2). A socket whose thread has already exited is not held (`_held` drops the
+        closed ones, and a dead thread's connection is closed by its own frame)."""
         with self._sockets_lock:
-            held, self._sockets = self._sockets, set()
+            if thread is None:
+                held, self._sockets = list(self._sockets), {}
+            else:
+                held = [s for s, t in self._sockets.items() if t == thread]
+                for s in held:
+                    self._sockets.pop(s, None)
         for s in held:
             try:
                 s.shutdown(socket.SHUT_RDWR)
@@ -382,10 +396,14 @@ class Model:
             headers['Authorization'] = 'Bearer ' + (key or 'caminus-local')
         return headers
 
-    def request(self, url, body=None, session=None):
+    def request(self, url, body=None, session=None, timeout=None):
+        """One JSON request. `timeout` is the socket timeout for THIS read - the same per-read rule complete() states,
+        falling back to the config's `timeout` (900 s) when a caller passes none: it bounds each blocked read, not
+        the whole call, so a stream that trickles holds its caller until the whole-call bound in reflect._bounded
+        closes it (#383 review P2)."""
         req = urllib.request.Request(url, None if body is None else json.dumps(body).encode(), self.headers(session=session))
         try:
-            with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
+            with self.opener(req, timeout=float(timeout or self.config.get('timeout', 900))) as r:
                 raw = r.read(16 * 1024 * 1024 + 1)
                 if len(raw) > 16 * 1024 * 1024:
                     raise ModelError('model response exceeds16MiB')
@@ -474,17 +492,20 @@ class Model:
         to 64K, a paid one 4096 (its catalog maximum, up to 64K, is set when it is picked)."""
         return effort.reply_limit(self.config, self.remote)
 
-    def complete(self, messages, tools=None, max_tokens=None, model=None, on_delta=None, session=None):
+    def complete(self, messages, tools=None, max_tokens=None, model=None, on_delta=None, session=None, timeout=None):
         """One reply. With on_delta(kind, value) the reply streams: kind is 'reasoning', 'content' or 'tool'
         (a tool call's name starts), value is the text or the name. on_delta returning False cancels: the
         stream is closed and Cancelled is raised, so a cancelled turn stores no reply and runs no tool.
-        session: the conversation's id, sent to an OpenCode plan (headers)."""
+        session: the conversation's id, sent to an OpenCode plan (headers). timeout: this call's own socket
+        timeout in seconds, per read and not for the whole call (a streaming reply reads many times): a side call
+        that must not hold its caller for the 900 s a turn may take bounds the call itself, as reflect._bounded
+        does for the reflection."""
         remaining = self.context_size() - self.tokens(messages, tools or []) - 256
         if remaining < 1:
             raise ModelContextError('request exceeds the model context; compact or shorten the goal')
         if self.api == 'anthropic':
             return self._anthropic(messages, tools, min(max_tokens or self.reply_limit(), remaining), model, on_delta,
-                                   session)
+                                   session, timeout)
         limit = min(max_tokens or self.reply_limit(), remaining)
         # the effort in force (effort.py): a local model takes it as the server's model id for the level, a provider
         # with reasoning_effort as that field; a short side call (the judge's) runs with thinking off
@@ -517,8 +538,10 @@ class Model:
             # usage in the final chunk gives the generated token count for a client-measured decode speed (a Caminus
             # server's own timings replace it: _speed)
             body['stream_options'] = dict(include_usage=True)
-            return self._stream(body, on_delta, session)
-        result = self.request(self.base + '/chat/completions', body, **({'session': session} if session else {}))
+            return self._stream(body, on_delta, session, timeout)
+        result = self.request(self.base + '/chat/completions', body,
+                              **({'session': session} if session else {}),
+                              **({'timeout': timeout} if timeout else {}))
         self.last_usage = result.get('usage') or {}
         # no decode window without streamed pieces: only a server's own timings give a speed here
         self.last_speed = self._speed(result.get('timings'))
@@ -549,7 +572,7 @@ class Model:
             raise ValueError('empty assistant response')
         return out
 
-    def _stream(self, body, on_delta, session=None):
+    def _stream(self, body, on_delta, session=None, timeout=None):
         """read the SSE reply, hand each piece to on_delta, assemble the message complete() would return.
         A backend that answers with one whole JSON body instead of a stream is accepted and reported once."""
         req = urllib.request.Request(self.base + '/chat/completions', json.dumps(body).encode(),
@@ -559,7 +582,7 @@ class Model:
         t_first = t_last = None    # decode window: first choice-chunk to the last chunk read, prefill excluded
         done_seen = False
         try:
-            with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
+            with self.opener(req, timeout=float(timeout or self.config.get('timeout', 900))) as r:
                 for raw in r:
                     line = raw.decode('utf-8', 'replace').strip()
                     if not line or line.startswith(':'):
@@ -898,7 +921,7 @@ class Model:
             body['fallbacks'] = self.config['fallbacks']
         return body
 
-    def _anthropic(self, messages, tools, max_tokens, model, on_delta, session=None):
+    def _anthropic(self, messages, tools, max_tokens, model, on_delta, session=None, timeout=None):
         body = self._to_anthropic(messages, tools, model)
         body['max_tokens'] = max_tokens
         body['stream'] = True
@@ -915,9 +938,9 @@ class Model:
                 body['output_config']['effort'] = effort.nearest(body['output_config']['effort'], have)
             else:
                 body.pop('output_config')
-        return self._anthropic_stream(body, on_delta or (lambda kind, value: None), session)
+        return self._anthropic_stream(body, on_delta or (lambda kind, value: None), session, timeout)
 
-    def _anthropic_stream(self, body, on_delta, session=None):
+    def _anthropic_stream(self, body, on_delta, session=None, timeout=None):
         """read a Messages API event stream into the reply shape complete() returns"""
         req = urllib.request.Request(self.base + '/messages', json.dumps(body).encode(),
                                      self.headers(stream=True, beta=FALLBACK_BETA if 'fallbacks' in body else None,
@@ -929,7 +952,7 @@ class Model:
         t_first = t_last = None
         done = False
         try:
-            with self.opener(req, timeout=float(self.config.get('timeout', 900))) as r:
+            with self.opener(req, timeout=float(timeout or self.config.get('timeout', 900))) as r:
                 request_id = (getattr(r, 'headers', None) or {}).get('request-id')
                 for raw in r:
                     line = raw.decode('utf-8', 'replace').strip()

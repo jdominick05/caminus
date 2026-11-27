@@ -218,9 +218,12 @@ def render(rec):
     return lines
 
 
-def text(rt, gid=None, limit=20):
-    recs = _load(rt, gid, limit)
+def text(rt, gid=None, limit=20, statuses=None):
+    recs = _load(rt, gid, limit, statuses)
     if not recs:
+        if statuses:
+            return ['no SIM records with status ' + ', '.join(sorted(statuses)) + ': list without a status filter '
+                    'to see them all']
         return ['no SIM records yet: sim records a prediction before a harness change, and the observation after CI']
     out = []
     for rec in recs:
@@ -233,15 +236,18 @@ def path_for(home):
     return Path(home) / 'sim.jsonl'
 
 
-def export(rt, gid=None, path=None):
+def export(rt, gid=None, path=None, statuses=None):
     """Write the records as JSONL (one record per line, newest version only) and return (path, count, bytes).
 
     Reached by the CLI alone (`caminus ember agent sim NAME --export`), which a human runs. The agent's tool has
     no export, so the model never names a file and no export can overwrite one, in plan mode or anywhere else.
+    `statuses` filters like `list` does: `--export --status proposed` is the queue a person hands on, and a filter
+    the list applies silently dropped by the export would make the two views disagree about the same log (#383
+    review P2).
     """
     from pathlib import Path
     from .store import atomic_write
-    recs = _load(rt, gid, limit=100000)
+    recs = _load(rt, gid, limit=100000, statuses=statuses)
     p = Path(path).expanduser() if path else path_for(rt.home)
     if not p.is_absolute():
         p = rt.home / p
@@ -267,7 +273,15 @@ def tool(rt, gid, args):
                       args.get('prediction_error', ''))
         return dict(record=rec)
     if action == 'list':
-        recs = _load(rt, args.get('goal') and gid or None, args.get('limit', 20))
-        return dict(records=recs, lines=text(rt, args.get('goal') and gid or None, args.get('limit', 20)))
+        # status: the proposal queue is `list` with status proposed; _load keeps each id's newest version first,
+        # so one filter on it names a record once, at its current status. Without a goal (gid is None when the
+        # caller passes no goal) that queue is every goal of the session on purpose: a person reads what the
+        # harness proposes across all of them; pass the goal to see only its own (#383 review P2).
+        status = str(args.get('status') or '').strip()
+        if status and status not in STATUSES:
+            raise ValueError('status must be one of ' + ', '.join(STATUSES))
+        statuses = (status,) if status else None
+        recs = _load(rt, args.get('goal') and gid or None, args.get('limit', 20), statuses)
+        return dict(records=recs, lines=text(rt, args.get('goal') and gid or None, args.get('limit', 20), statuses))
     raise ValueError('action must be record, observe or list; the JSONL export is the CLI\'s: '
                      '`caminus ember agent sim NAME --export`')

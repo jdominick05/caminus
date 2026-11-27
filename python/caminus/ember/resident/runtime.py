@@ -33,6 +33,7 @@ from .brain import Brains
 from . import planning
 from . import sandbox
 from . import sim
+from . import reflect
 from . import browser
 
 TODO_STATES = ('pending', 'in_progress', 'done')
@@ -895,7 +896,19 @@ class Runtime:
     @staticmethod
     def _failure_text(result):
         """What made this call a failure, or '' when it was not one. A command exiting non-zero failed even
-        though the tool itself answered; the model needs to see it as a repeated failure too."""
+        though the tool itself answered; the model needs to see it as a repeated failure too. A tool that answers
+        only {'ok': False} failed as well: one classifier for the model and the reflection (#383 review).
+
+        The `ok: False` arm is a contract, not a guess (#383 review P2): `ok: False` means the call FAILED. A tool
+        whose normal answer is a neutral no-op (nothing to cancel, already answered) must answer `ok: True` or carry
+        no `ok` key at all, because this same classifier feeds the repeat-failure watchdog that pauses a goal after
+        three repeats. No tool in the tree answers `ok: False` today - the only `ok=False` dict is
+        `catalog.refresh`'s per-provider status, which is not a tool result - so narrowing the arm to a name list
+        would only re-split the one rule this class exists to keep whole. The same contract is stated for tool
+        authors in docs/resident-agent.md (## Tools), next to the tool table, and
+        tests/ember/test_resident.py::test_the_tool_result_failure_contract_allows_no_ok_false enforces it: a tool
+        result that gains a literal `ok: False` fails that test and names the site, so a neutral no-op cannot start
+        pausing goals through the watchdog."""
         if not isinstance(result, dict):
             return ''
         if result.get('error'):
@@ -904,6 +917,8 @@ class Runtime:
         if isinstance(code, int) and code != 0:
             tail = (result.get('output') or '')[-300:]
             return 'exit %d: %s' % (code, tail.strip())
+        if result.get('ok') is False:
+            return 'ok=False'
         return ''
 
     @staticmethod
@@ -1255,6 +1270,15 @@ class Runtime:
                                               approach_changes=goal.get('approach_changes') or 0), gid)
         if self.store.goal(gid)['state'] == 'completed':
             sandbox.end(self.home, gid, self.store)   # its box ends with it
+            # Post-goal reflection (#341): one cheap call outside the transaction, writing a 'proposed' SIM
+            # record; it reads the goal it just closed, and never raises. On this thread it can hold the loop for
+            # up to ~120 s (one 60 s attempt, plus a second only when the first reply could not be read): the goal
+            # is already committed, and stopping() cuts the wait short. Fine while 'reflect' defaults off; if that
+            # default ever flips, the call moves to a worker thread that carries its own store connection and its
+            # own Model: one sqlite connection belongs to this thread (a cross-thread read raises), and last_usage
+            # is single-valued, so two calls sharing one Model would misattribute each other's spend
+            # (#383 review P2).
+            reflect.maybe(self, gid, summary, open_work)
 
     def _action(self, action):
         refused = False
@@ -2018,6 +2042,35 @@ class Runtime:
                 goals.pop(k)
         atomic_json(path, state)
 
+    def _meter_estimate(self, gid, usd):
+        """A bound, not a measurement: what an abandoned call may have cost, into spend.json.
+
+        The reflection's abandoned call cannot be priced (reflect._bounded's contract), and a total that reads low
+        is worse than one that says how much of it is a bound: the amount joins the day's `usd` (so the status line
+        is not low by it) and is counted apart in `est_usd`/`goals_est`, so a reader can tell the two apart. No
+        `turns` increment: a bound is not a priced turn. Called on the loop thread only (#383 review P2)."""
+        try:
+            usd = float(usd)
+        except (TypeError, ValueError):
+            return
+        if usd <= 0:
+            return
+        import datetime
+        path = self.home / 'spend.json'
+        try:
+            state = json.loads(path.read_text())
+        except (OSError, ValueError):
+            state = {}
+        day = state.setdefault('days', {}).setdefault(datetime.date.today().isoformat(), dict(usd=0.0, turns=0))
+        day['usd'] = round(day['usd'] + usd, 6)
+        day['est_usd'] = round(day.get('est_usd', 0.0) + usd, 6)
+        goals_est = state.setdefault('goals_est', {})
+        goals_est[gid] = round(goals_est.get(gid, 0.0) + usd, 6)
+        if len(goals_est) > 500:              # bounded, as goals is: the oldest totals go first
+            for k in list(goals_est)[:len(goals_est) - 500]:
+                goals_est.pop(k)
+        atomic_json(path, state)
+
     def _gate_check(self, gid, g):
         """The goal's gate after a turn that changed something (an edit, a write, a terminal command), before the next
         model call. The agent hears only a change: the gate starting to fail (with its output) or passing again. The
@@ -2213,6 +2266,9 @@ class Runtime:
             if k in fresh:
                 if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
                     self._tools = None        # an off session is not offered the sim tool, and an on one is
+                self.config[k] = fresh[k]
+        for k in ('reflect',):                    # `agent reflect`: the next finished goal reflects, or does not
+            if k in fresh:
                 self.config[k] = fresh[k]
         for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
             if k in fresh:
