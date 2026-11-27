@@ -5,9 +5,14 @@ dependency) summed per op kind; medians over --tokens traced tokens after --warm
 step() wall time against the launch's GPU time (events) on the plain module.
   tools/guard.sh LOG 900 python -I benchmarks/q3moe_trace.py GGUF [--warm 8] [--tokens 10]
 --engine dense35: the same for the dense qwen35 line's Dense35Own (engine/q35_dense.py; Swift 1.5, module
-dec_q35_swift_trace): per-stage hop and span in Caminus's own persistent engine, the stage cost a model is sized on.
+dec_q35_swift_trace; ThinkingCap's dec_q35_tcap_trace and the GSQ-RCO files' dec_q35_gsq_trace through --modules): per-stage
+hop and span in Caminus's own persistent engine, the stage cost a model is sized on.
 --engine q35moe: the same for the qwen35moe line's Moe35Own (engine/q35_moe.py; Qwen3.6-35B-A3B, module
 dec_q35m_kvq8_trace: its Q8 KV tape; the segments carry the tensor names the engine built the tape with).
+--dump PREFIX: also every segment of each _trace module's tape to PREFIX.<module>.npz (its name: the tensor the engine
+named it by, else the op; op, format, N, K, tasks, the two dependencies, whether it carries a fused second matrix; and per
+traced token each segment's start, end and its dependencies' end, us from the token's first claim), so stages that run
+side by side (siblings on one dependency) can be measured off the critical path.
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, os, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'python'))
@@ -24,6 +29,7 @@ ap.add_argument('--detail', type=int, default=None, help='print this layer\'s se
 ap.add_argument('--modules', nargs='+', default=None, help='one engine per run: the card holds one copy (default: the '
                                                            'engine\'s _trace module)')
 ap.add_argument('--engine', choices=('q3moe', 'dense35', 'q35moe'), default='q3moe')
+ap.add_argument('--dump', default=None, help='PREFIX: every segment\'s times per traced token to PREFIX.<module>.npz')
 A = ap.parse_args()
 if A.modules is None: A.modules = ['dec_q35_swift_trace' if A.engine == 'dense35' else
                                    'dec_q35m_kvq8_trace' if A.engine == 'q35moe' else 'dec_q3m_trace']
@@ -84,6 +90,18 @@ for module in A.modules:
                     print(f'  {s_:4d} {names[s_]:18s} {E.segs[s_].ntask:5d} {int(ran.sum()):4d} | {c.min():8.1f} {np.median(c):8.1f} | '
                           f'{w.min():8.1f} {np.median(w):8.1f} | {f.min():8.1f} | {end[s_]:8.1f} | {dd[s_]:8.1f} | WG done '
                           f'p50 {np.median(p7):8.1f} p90 {np.percentile(p7, 90):8.1f} | 1st task op p50/p90/max {q(op1)} | publish {q(pb1)}')
+        if A.dump:   # (every segment, not only the critical path: siblings on one dependency run side by side)
+            sn = getattr(eng, 'seg_names', None) or {}
+            opn = [OPN.get(sg.op, str(sg.op)) for sg in E.segs]
+            fmt = [k3.OWN_FMT_NAME.get(sg.work, str(sg.work)) if o == 'OWN_MV' else k3.GG_FMT_NAME.get(sg.work, str(sg.work))
+                   if o == 'OWN_MV16' else '' for sg, o in zip(E.segs, opn)]
+            np.savez(f'{A.dump}.{module}.npz', name=np.array([sn.get(i, opn[i].lower()) for i in range(S)]), op=np.array(opn),
+                     fmt=np.array(fmt), N=np.array([sg.N for sg in E.segs]), K=np.array([sg.K for sg in E.segs]),
+                     ntask=np.array([sg.ntask for sg in E.segs]), dep=np.array([sg.dep for sg in E.segs]),
+                     dep2=np.array([sg.dep2p1 - 1 for sg in E.segs]), fused=np.array([bool(sg.aux) for sg in E.segs]),
+                     start=np.stack([p[0] for p in per_seg]), end=np.stack([p[1] for p in per_seg]),
+                     depend=np.stack([p[2] for p in per_seg]), total=np.array(totals), grid=G, device=torch.cuda.get_device_name(0))
+            print(f'segments written to {A.dump}.{module}.npz', flush=True)
         st = np.median(np.stack([p[0] for p in per_seg]), 0); en = np.median(np.stack([p[1] for p in per_seg]), 0)
         de = np.median(np.stack([p[2] for p in per_seg]), 0)
         # critical path from the last-finishing segment back through the later-finishing dependency

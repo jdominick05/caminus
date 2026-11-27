@@ -27,6 +27,7 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_iq4xs_k3(const uint8_t 
 }
 Q35_IQG(iq3xxs, 0)
 Q35_IQG(iq3s, 1)
+Q35_IQG(iq2xxs, 2)   // (the Qwen3.8-27B GSQ-RCO files: its grid staged as the GSQ module stages it)
 extern "C" __global__ void __launch_bounds__(256) own_mv_iq2s_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
         float * out) {
     iq2s_stage(threadIdx.x);
@@ -51,6 +52,11 @@ extern "C" __global__ void __launch_bounds__(256) own_mv_iq1m_k3(const uint8_t *
 extern "C" __global__ void __launch_bounds__(256) own_mv_q5_k_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
         float * out) {
     Q35_ROW0; if (row0 < nrows) own_rows_q5k_1rt<0, 2, 1, 1>(W, row0, nrows, x16, out, threadIdx.x & 31, K);
+}
+// Q4_K (Swift 1.5's main format; GGUF blocks in place), the decode module's form (kernels/ops_own.h own_1rt_acc)
+extern "C" __global__ void __launch_bounds__(256) own_mv_q4_k_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
+        float * out) {
+    Q35_ROW0; if (row0 < nrows) own_rows_q4k_1rt<0, 2, 1, 1>(W, row0, nrows, x16, out, threadIdx.x & 31, K);
 }
 extern "C" __global__ void __launch_bounds__(256) own_mv_q6_k_pl_k3(const uint8_t * W, int nrows, int K, const _Float16 * x16,
         float * out) {
