@@ -586,9 +586,9 @@
       "us": 0.0,
       "bytes": 983040,
       "fixed_us": 0.0,
-      "measured": true,
+      "measured": "in-group",
       "source": "docs/dev/benchmarks.md#dense-27b-decode-time-against-file-size",
-      "note": "ssm_alpha / ssm_beta run inside the attn_qkv / attn_gate group (they start with it and end before it); that group's wall is in the 10240x5120 / 6144x5120 entries, so these stages add nothing on their own."
+      "note": "ssm_alpha / ssm_beta run inside the attn_qkv / attn_gate group (they start with it and end before it); that group's wall is in the 10240x5120 / 6144x5120 entries, so these stages add nothing on their own. An allocation like the group-split shares (its own span is not 0), so it is flagged."
     },
     {
       "stage": "norm",

@@ -60,7 +60,9 @@ caps, with tied optima), and the refusals (unsupported pair, split fusion group,
     stage's time as `us` + `bytes` with the fixed part in `us`. A stage alone in its group is `measured: true`; a share
     of a sibling group's wall split by bytes (attn_qkv / attn_gate, unfused ffn_gate / ffn_up) is `measured:
     "group-split"` and flagged. A (format, shape) that runs two tiles on different modules (Q5_K 5120x17408) has no
-    entry; the table has no module key;
+    entry; the table has no module key. The F32 ssm_alpha / ssm_beta stages (48x5120) are priced at 0, as they start
+    and end inside the attn_qkv / attn_gate group: an allocation too, `measured: "in-group"`, flagged. Every attn_q / k /
+    v group of the four files mixes formats, so q / k / v have no entries and stay on the flagged `'*'` entry;
   - XT add + norm 7.29 µs (one workgroup, 129 a token), XT embedding row, and XT attention (fixed 15.8 µs a layer + the
     KV at 295 GB/s: the line through depths 512 and 32,768 of the verify tape at T = 1) — the same section;
   - XTX norm 3.6 µs, attention 11.9 µs at 8 positions — docs/dev/qwen3-30b-a3b.md "Where the remaining time is",
@@ -180,7 +182,7 @@ attention line between its two depths) and the depth rows of the files whose att
 Swift files: the attention entry comes from ThinkingCap's verify tape at T = 1). The remaining error at high is the glue
 class, still unmeasured and counted as 0 (0.74-0.82 ms short), less the verify tape's slower attention at 512 (0.37 ms
 against the plain tape's 0.24), plus the stages still on the flagged `'*'` entry (Swift's Q5_K ffn_down on its rows
-tile, 0.6 ms short; the GSQ-RCO files' mixed-format groups). At auto the errors are -2.2 to +1.9 %: the table is
+tile, 0.6 ms short; the q / k / v groups and the GSQ-RCO files' other mixed-format groups). At auto the errors are -2.2 to +1.9 %: the table is
 the high clock's, and the engine serves at auto. The XTX has no entries of its own yet; its rows are the shipped table's.
 
 ## What is unmeasured, and what GPU work fills it
