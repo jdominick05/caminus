@@ -20,6 +20,8 @@ module holds, so STANDALONE only: at every distinct matrix shape of the file, on
 (random fp16 scales and 2-bit codes: no file of the line is Q2_0), cold over as many copies as the file reads that shape
 a token (at least 512 MiB in all), against own_read of the same bytes; error vs fp64 as above. Not in the token's sums.
 --formats Q2_0 --q2_0 times it alone.
+--min-set-mib N: every group's rotation padded with clones of its copies to at least N MiB (a group of a few small
+matrices otherwise fits the Infinity Cache and times warm); each line prints its set's size.
   tools/guard.sh LOG 1800 python -I benchmarks/own_mv_census.py GGUF [--rounds 5] [--layers N] [--q2_0]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, ctypes, os, sys
@@ -43,6 +45,8 @@ ap.add_argument('--q5k', choices=('1rt', 'general'), default='1rt', help='dense:
 ap.add_argument('--q8', choices=('gen', 'u2', 'u4', 'u8'), default='gen', help='dense: the Q8_0 tile (own_rows_q8_0, or own_rows_q8_0_1rt with UP 2 / 4 / 8 block steps per pass; the 1rt arms are checked bitwise against the general tile)')
 ap.add_argument('--formats', default=None, help='comma-separated formats to time (default: all)')
 ap.add_argument('--log', default=None, help='append the result lines to this file too')
+ap.add_argument('--min-set-mib', type=int, default=0, help='pad each group\'s cold rotation with clones to at least this many MiB '
+                '(default 0: one copy per tensor, as before; a small group otherwise reads from the Infinity Cache)')
 ap.add_argument('--q2_0', action='store_true', help='dense: also the standalone own Q2_0 tile on synthetic blocks at each shape')
 A = ap.parse_args()
 dev = torch.device('cuda:0')
@@ -133,10 +137,14 @@ for role in ROLES:
         # copies for the cold rotation: one matrix per layer (experts: 8 per layer, rotated)
         sel = [(t, (rng.choice(ne, KU, replace=False) if ne > 1 else [None])) for t in ts]
         copies = [(t, e) for t, es in sel for e in es][:max(1, min(len(ts) * (KU if ne > 1 else 1), 400))]
-        need = 2 * len(copies) * mat_bytes / 2 ** 20 + 64
+        nset = min(400, max(len(copies), -(-A.min_set_mib * 2 ** 20 // mat_bytes)))   # (--min-set-mib: clones past the Infinity Cache)
+        need = 2 * nset * mat_bytes / 2 ** 20 + 64
         capacity.check([0], [need], f'census {role} {fmt}')
         Wl = [to_dev(slice_bytes(t, e, rows, K), fmt, rows, K, False) for t, e in copies]
         Wo = [to_dev(slice_bytes(t, e, rows, K), fmt, rows, K, True) for t, e in copies] if kown else []
+        n0 = len(Wl)   # (the padding: the same bytes at other addresses, so every timed read comes from memory)
+        Wl += [Wl[i % n0].clone() for i in range(n0, nset)]
+        if Wo: Wo += [Wo[i % n0].clone() for i in range(n0, nset)]
         v = rng.standard_t(3, K); v[rng.choice(K, 8, replace=False)] *= 20; v = v / np.sqrt((v ** 2).mean())
         x32 = torch.tensor(v, dtype=torch.float32, device=dev); x16 = x32.half(); yq = G.quantize_q8_1(x32)
         out = torch.zeros(rows, dtype=torch.float32, device=dev)
@@ -179,7 +187,7 @@ for role in ROLES:
                 for w in Ws: fn(w)
                 ev[1].record(); torch.cuda.synchronize()
                 if r: tm[k].append(ev[0].elapsed_time(ev[1]) * 1e3 / len(Ws))   # us per matvec
-        line = f'{role:14s} {fmt:5s} [{rows:6d} x {K:5d}] {mat_bytes / 2**20:7.3f} MiB x {per:5d}/token |'
+        line = f'{role:14s} {fmt:5s} [{rows:6d} x {K:5d}] {mat_bytes / 2**20:7.3f} MiB x {per:5d}/token, set {len(Wl)} = {len(Wl) * mat_bytes / 2**20:6.0f} MiB |'
         for k in ('read', 'llama', 'own'):
             if k in tm:
                 us = float(np.median(tm[k])); token[k] += per * us
