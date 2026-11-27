@@ -391,7 +391,8 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
     """the exact minimum of the predicted decode time per token over the menu, under the VRAM and quality caps: a
     branch-and-bound over the variables, each option's cost / bytes / quality precomputed (group_options), dominated
     options dropped, bounded by the suffix minima and a suffix dynamic program over the quality cap (a valid lower
-    bound: option losses are floored to a grid of `grid` cells, which can only relax the cap). Returns
+    bound: option losses are floored to a grid of `grid` cells, which can only relax the cap). Visited states are
+    memoized only when neither cap can bind below them, so equal keys have identical feasible completion sets. Returns
     dict(choice, total_us, by_kind, stages, weights_bytes, vram, quality, binding, unconstrained_us, unmeasured).
     Raises PlanError when no assignment satisfies the caps (which cap, and its minimum possible value)."""
     variables = [(name, _drop_dominated(opts)) for name, opts in _variables(inv, costs, sens, card, depth)]
@@ -422,10 +423,13 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
     variables = [variables[i] for i in order]
     min_cost = [min_cost[i] for i in order]; min_bytes = [min_bytes[i] for i in order]; min_qual = [min_qual[i] for i in order]
     suf_cost = [0.0] * (n + 1); suf_bytes = [0.0] * (n + 1); suf_qual = [0.0] * (n + 1)
+    suf_bmax = [0.0] * (n + 1); suf_qmax = [0.0] * (n + 1)
     for i in range(n - 1, -1, -1):
         suf_cost[i] = suf_cost[i + 1] + min_cost[i]
         suf_bytes[i] = suf_bytes[i + 1] + min_bytes[i]
         suf_qual[i] = suf_qual[i + 1] + min_qual[i]
+        suf_bmax[i] = suf_bmax[i + 1] + max(o['bytes'] for o in variables[i][1])
+        suf_qmax[i] = suf_qmax[i + 1] + max(o['quality'] for o in variables[i][1])
     # the suffix DP over the quality cap: LB[i][q] = the least cost of variables i.. with floored losses summing to <= q
     delta = quality_cap / grid if quality_cap > 0 else 1.0
     Q = int(quality_cap / delta) if quality_cap > 0 else 0
@@ -469,8 +473,16 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
             return
         if byts + suf_bytes[i] > vram_cap or qual + suf_qual[i] > quality_cap:
             return
-        # when the VRAM cap cannot bind below this node, the completions depend only on (i, qacc)
-        key = (i, qacc) if byts + suf_bytes[i] <= vram_cap else (i, qacc, byts)
+        # a cap that cannot bind below this node (even the largest remaining options fit) drops out of the memo
+        # key; otherwise the exact running bytes / loss stay in it, so equal keys have identical completion sets
+        if byts + suf_bmax[i] <= vram_cap and qual + suf_qmax[i] <= quality_cap:
+            key = (i,)
+        elif byts + suf_bmax[i] <= vram_cap:
+            key = (i, qual)
+        elif qual + suf_qmax[i] <= quality_cap:
+            key = (i, byts)
+        else:
+            key = (i, byts, qual)
         if seen.get(key, INF) <= cost + 1e-9:
             return
         seen[key] = cost
