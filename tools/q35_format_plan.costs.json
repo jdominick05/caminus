@@ -1,0 +1,154 @@
+{
+  "schema": "q35-format-plan.costs/1",
+  "what": "the default cost table of tools/q35_format_plan.py: per card, per format, per shape class, the time a decode stage costs as a fixed part plus a per-byte part. Every number cites the published figure it comes from; entries that are not measured say so (fixed_us / per_byte_us null, measured false or \"total-only\" or \"other-model\"), and every prediction that uses them is flagged in the output. Predicted times are a model, never a measurement.",
+  "cards": {
+    "XTX": {
+      "read_Bps": 858000000000,
+      "measured": true,
+      "guard_line_mib": 23800,
+      "reserve_mib": 512,
+      "guard_source": "docs/dev/benchmarks.md:97 (the XTX's guard line 23,800 MiB with a 512 MiB reserve kept; python/caminus/serve/stats.py PhysicsConfig guard_mib / reserve_mib defaults)",
+      "source": "docs/dev/qwen38-27b.md:32 (\"the 858 GB/s the RX 7900 XTX's memory delivers to this kind of read\"; the decode-floor study's sustained rate, docs/dev/qwen3-30b-a3b.md#decode-how-fast-it-writes). The card's read peak 952 GB/s (docs/dev/yardsticks.md:476) is not used: a token cannot sustain the peak."
+    },
+    "XT": {
+      "read_Bps": 774000000000,
+      "measured": true,
+      "assumption": "the streaming rate is used for matvec reads; the XT's decode-read rate is not published (docs/dev/yardsticks.md: \"the XT's read peak is not measured\")",
+      "guard_line_mib": 19850,
+      "reserve_mib": 0,
+      "guard_source": "docs/dev/benchmarks.md:97 (the XT's guard line 19,850 MiB; no display reserve on it)",
+      "source": "python/caminus/arch.py:46 CARD_BW (measured streaming bandwidth, XT)"
+    }
+  },
+  "entries": [
+    {
+      "stage": "mv",
+      "card": "*",
+      "format": "*",
+      "shape": "*",
+      "fixed_us": 5.0,
+      "measured": true,
+      "source": "docs/dev/qwen3-30b-a3b.md#where-the-remaining-time-is (\"Every weight stage of a layer costs 3 to 5 us on top of its bytes, whatever its size\")",
+      "note": "the top of the published 3-5 us range. The output head's measured stage (300.6 us for 255 MB against 297.5 us at bus speed, 99% of the bound) sits inside the range."
+    },
+    {
+      "stage": "mv",
+      "card": "XT",
+      "format": "IQ2_S",
+      "shape": "17408x5120",
+      "us": 63.2,
+      "bytes": 28549120,
+      "fixed_us": 0.0,
+      "measured": "total-only",
+      "source": "docs/dev/benchmarks.md:517 (the 0.4.0 IQ2_S census alone on the XT, own tile: ffn_gate 63.2 us; ffn_up 61.5 us in the same row)",
+      "note": "per-byte only: the fixed / per-byte split is not measured at this shape; fixed counted as 0. 451.7 GB/s over the 28,549,120 bytes."
+    },
+    {
+      "stage": "mv",
+      "card": "XT",
+      "format": "IQ2_S",
+      "shape": "5120x17408",
+      "us": 66.7,
+      "bytes": 28549120,
+      "fixed_us": 0.0,
+      "measured": "total-only",
+      "source": "docs/dev/benchmarks.md:517 (ffn_down 66.7 us, XT, 0.4.0 census)",
+      "note": "428.0 GB/s."
+    },
+    {
+      "stage": "mv",
+      "card": "XT",
+      "format": "IQ2_S",
+      "shape": "10240x5120",
+      "us": 42.5,
+      "bytes": 16793600,
+      "fixed_us": 0.0,
+      "measured": "total-only",
+      "source": "docs/dev/benchmarks.md:517 (attn_qkv 42.5 us, XT, 0.4.0 census)",
+      "note": "395.1 GB/s."
+    },
+    {
+      "stage": "mv",
+      "card": "XT",
+      "format": "IQ2_S",
+      "shape": "6144x5120",
+      "us": 29.9,
+      "bytes": 10076160,
+      "fixed_us": 0.0,
+      "measured": "total-only",
+      "source": "docs/dev/benchmarks.md:517 (attn_gate 29.9 us, XT, 0.4.0 census)",
+      "note": "337.0 GB/s."
+    },
+    {
+      "stage": "mv",
+      "card": "XT",
+      "format": "IQ2_S",
+      "shape": "5120x6144",
+      "us": 30.7,
+      "bytes": 10076160,
+      "fixed_us": 0.0,
+      "measured": "total-only",
+      "source": "docs/dev/benchmarks.md:517 (ssm_out 30.7 us, XT, 0.4.0 census)",
+      "note": "328.2 GB/s. The same table's interleaved old/new columns (docs/dev/benchmarks.md:507-517) and the \"about 60% of the read ceiling\" figure for IQ2_S's matvec are the same measurement family."
+    },
+    {
+      "stage": "norm",
+      "card": "*",
+      "format": "*",
+      "shape": "*",
+      "fixed_us": 3.6,
+      "measured": "other-model",
+      "source": "docs/dev/qwen3-30b-a3b.md#where-the-remaining-time-is (\"Add + norm (twice) ... 3.6 us each\", one traced token's add_rms16)",
+      "note": "measured on Qwen3-30B-A3B's module (48 blocks); the qwen35 line's add + norm is not measured."
+    },
+    {
+      "stage": "attn",
+      "card": "*",
+      "format": "*",
+      "shape": "*",
+      "fixed_us": 11.9,
+      "measured": "other-model",
+      "source": "docs/dev/qwen3-30b-a3b.md#where-the-remaining-time-is (\"Attention, 8 positions ... 11.9 us\")",
+      "note": "measured on the 30B at 8 positions; the per-position KV bytes are added at the card's read rate (kv_pos_bytes x depth), not in this fixed part. The qwen35 line's attention fixed cost is not measured (its split pair at short context: docs/dev/qwen38-27b.md)."
+    },
+    {
+      "stage": "glue",
+      "card": "*",
+      "format": "*",
+      "shape": "*",
+      "fixed_us": null,
+      "measured": false,
+      "source": "docs/dev/qwen3-30b-a3b.md#where-the-remaining-time-is (\"the stages that read no weights take 1.09 ms per token\" in total on the 30B: attention, two adds and norms, the router's top 8 \u2014 not split per op)",
+      "note": "unmeasured per op for the qwen35 line: the GDN conv / l2 / step / save / norm, qk_nr, kv_append, gate_mul, SwiGLU segments. Counted as 0 and flagged."
+    },
+    {
+      "stage": "emb",
+      "card": "*",
+      "format": "*",
+      "shape": "*",
+      "fixed_us": null,
+      "measured": false,
+      "source": "unmeasured: no published figure for the embedding row's segment (docs/dev/qwen38-27b.md counts its bytes in the 16.48 GB a token reads, not its fixed cost)",
+      "note": "counted as 0 and flagged; the row's bytes are charged at the read rate."
+    }
+  ],
+  "reference_tokens": {
+    "note": "published whole-token decode times, printed by the tool as a yardstick only (never used by the cost model)",
+    "Qwen3.8-27B GSQ-RCO IQ3_S, short context, 0.4.0": {
+      "XTX": {
+        "ms_per_token": 18.03,
+        "source": "docs/dev/benchmarks.md, the Qwen3.8-27B GSQ-RCO IQ3_S section (55.5 tok/s, tests/engine/test_q35_dense.py)"
+      },
+      "XT": {
+        "ms_per_token": 21.48,
+        "source": "docs/dev/benchmarks.md, the same section (46.6 tok/s)"
+      }
+    },
+    "Swift 1.5 Q4_K_M bandwidth bound, XTX": {
+      "XTX": {
+        "ms_per_token": 19.2,
+        "source": "docs/dev/qwen38-27b.md:32-34 (one token reads 16.48 GB at 858 GB/s: 52 tok/s is the bound from the weights alone)"
+      }
+    }
+  }
+}

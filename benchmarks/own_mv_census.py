@@ -26,6 +26,7 @@ from caminus.device import capacity
 from caminus.device.hip import Module
 from caminus.engine import gguf as G            # (llama.cpp's gg_mv_* launchers: the yardstick arm; puts gguf-py on the path)
 from caminus.engine.own_layout import q6k_planes, iq_records, IQ_REC, q2k_records, iq1m_records
+from caminus.engine.q35_file import CENSUS_DENSE_ROLES, mat_tensors   # (the dense line's header->role map, from engine/q35_file.py)
 from caminus import own_dequant                 # (the float64 oracle: our decoders, bitwise gguf-py's: tests/io/test_own_dequant.py)
 
 ap = argparse.ArgumentParser()
@@ -58,6 +59,7 @@ def say(s):
 
 def mats(role):
     """[(tensor, expert or None)] of one role over the layers (experts: all of them; the timing picks 8 per layer)"""
+    if DENSE: return mat_tensors(F, role)     # (the shared header map: engine/q35_file.py mat_tensors)
     if role == 'head': return [(F.T['output.weight'], None)]
     return [(F.T[f'blk.{il}.{role}.weight'], None) for il in range(NL) if f'blk.{il}.{role}.weight' in F.T]
 
@@ -99,7 +101,7 @@ def to_dev(raw, fmt, rows, K, own):
     return torch.from_numpy(b.copy()).to(dev)
 
 
-ROLES = (['attn_qkv', 'attn_gate', 'ssm_out', 'attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate', 'ffn_up', 'ffn_down', 'head'] if DENSE else
+ROLES = (list(CENSUS_DENSE_ROLES) if DENSE else
          ['attn_q', 'attn_k', 'attn_v', 'attn_output', 'ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps', 'head'])
 if A.roles: ROLES = [r for r in ROLES if r in A.roles.split(',')]
 PER_TOKEN = ({r: len(mats(r)) for r in ROLES} if DENSE else

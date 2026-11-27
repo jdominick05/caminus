@@ -35,40 +35,9 @@ from ..device import capacity
 from . import k3, upload
 from .own_layout import q6k_planes, iq_records, IQ_REC, IQ_PAD, q2k_records, iq1m_records
 from .q3moe_one import card_per_wgp
-
-MODULE = 'dec_q35_swift'
-MODULE_TCAP = 'dec_q35_tcap'   # (ThinkingCap's formats: kernels/ops_q35_tcap.h)
-MODULE_GSQ = 'dec_q35_gsq'     # (the Qwen3.8-27B GSQ-RCO files: ThinkingCap's formats + IQ2_XS, Q2_K, IQ1_M, IQ2_XXS, Q4_K)
-GSQ_ONLY_FMT = frozenset({'IQ2_XS', 'Q2_K', 'IQ1_M', 'IQ2_XXS'})   # (a trunk matrix in one of these: the GSQ module)
-SWIFT_FMT = frozenset({'Q4_K', 'Q6_K', 'Q8_0', 'Q5_K', 'F32'})   # (the matrices the Swift module's tiles read)
-
-
-def module_of(F):
-    """the decode module a file's formats need: the Swift module when every trunk matrix is Q4_K / Q6_K / Q8_0 / Q5_K (or
-    F32) and the embedding Q4_K; the GSQ module when a trunk matrix is IQ2_XS / Q2_K / IQ1_M / IQ2_XXS (the Qwen3.8-27B
-    GSQ-RCO files: ThinkingCap's formats plus those and Q4_K); else the ThinkingCap module (its matrices IQ4_XS / IQ3_XXS /
-    IQ3_S / IQ2_S / Q5_K / Q6_K / Q8_0, BF16 alpha / beta, an IQ2_S or Q4_K embedding)"""
-    nl = trunk_blocks(F); mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
-    fm = {t.type for t in F.tensors if not t.name.startswith(mtp) and len(t.shape) == 2 and t.name != 'token_embd.weight'}
-    if fm <= SWIFT_FMT and F.T['token_embd.weight'].type == 'Q4_K': return MODULE
-    return MODULE_GSQ if fm & GSQ_ONLY_FMT else MODULE_TCAP
-RECURRENT = ('conv', 'convx', 'gdn')   # the state kinds reset() zeroes (the KV rows are written before any pass reads them)
-
-
-def kv_module(F, module=None, q8=False):
-    """Resolve staged cache-specialized objects separately from weight-format selection."""
-    if type(q8) is not bool:
-        raise ValueError('Dense35Own: q8 must be a bool')
-    selected = module or module_of(F)
-    if q8:
-        if selected in k3.Q35_KV_Q8_MODULES:
-            return selected
-        if selected not in k3.Q35_KV_Q8_OF:
-            raise ValueError(f'Dense35Own: no Q8 KV specialization for {selected}')
-        return k3.Q35_KV_Q8_OF[selected]
-    if selected in k3.Q35_KV_Q8_MODULES:
-        raise ValueError(f'Dense35Own: {selected} requires q8=True')
-    return selected
+from .q35_file import (MODULE, MODULE_TCAP, MODULE_GSQ, GSQ_ONLY_FMT, SWIFT_FMT, RECURRENT, module_of, kv_module,
+                       trunk_blocks, block_kinds, _shapes, attn_part_elems, upload_bytes, _projection_terms, _projection_bytes,
+                       gu_fused)   # (the file-level facts, pure: engine/q35_file.py; re-exported here for the existing imports)
 
 
 WSUM_WORDS = 1 << 20   # int32 words per checksum chunk: its int64 cast is the only scratch (8 MiB, inside the 256 MiB working allowance)
@@ -94,51 +63,6 @@ def _wsum_np(b):
     pad = (-b.size) % 4
     if pad: b = np.concatenate([b, np.zeros(pad, np.uint8)])
     return int(b.view(np.int32).astype(np.int64).sum())
-
-
-def trunk_blocks(F):
-    """the number of blocks of the model's forward: block_count less the multi-token-prediction blocks after them"""
-    return int(F.hp('block_count')) - int(F.hp('nextn_predict_layers') or 0)
-
-
-def block_kinds(F):
-    """per trunk block: True = Gated DeltaNet, False = gated attention (attention.recurrent_layers where the file has
-    it; without that key every block but each full_attention_interval-th)"""
-    rec = F.hp('attention.recurrent_layers'); fai = int(F.hp('full_attention_interval', 4))
-    return [bool(rec[i]) if rec is not None else (i + 1) % fai != 0 for i in range(trunk_blocks(F))]
-
-
-def _shapes(F):
-    """the header's shapes the engine and its projection read"""
-    hp = F.hp
-    return dict(nl=trunk_blocks(F), D=int(hp('embedding_length')), ffn=int(hp('feed_forward_length')), nh=int(hp('attention.head_count')),
-                nkv=int(hp('attention.head_count_kv')), hd=int(hp('attention.key_length')), nrot=int(hp('rope.dimension_count')),
-                S=int(hp('ssm.state_size')), NK=int(hp('ssm.group_count')), NV=int(hp('ssm.time_step_rank')),
-                d_conv=int(hp('ssm.conv_kernel')), d_inner=int(hp('ssm.inner_size')))
-
-
-def attn_part_elems(T, heads, cells):
-    """floats of the split attention pair's records (kernels/ops_attn_split.h, the own split modules: k3.Q35_SPLIT_MODULES)
-    for T pass rows of `heads` query heads over lists of up to `cells` cache rows: one record of k3.ATTN_RS floats per
-    (row, head, ATTN_SS-cell split); one buffer shared by a tape's attention blocks (they run one after another)"""
-    return int(T) * int(heads) * ((int(cells) + k3.ATTN_SS - 1) // k3.ATTN_SS) * k3.ATTN_RS
-
-
-def _projection_bytes(F, max_ctx, spec_T=1, q8=False):
-    """bytes the engine allocates on its card: every trunk tensor (the embedding and the head too), the selected KV cache of
-    every attention block, the Gated DeltaNet states (with spec_T tokens' saved inputs: Dense35Own's spec_T), the decode
-    tape's split attention records (attn_part_elems)"""
-    c = _shapes(F); nl = c['nl']
-    mtp = tuple(f'blk.{i}.' for i in range(nl, int(F.hp('block_count'))))
-    w = sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp))
-    w += sum(t.n_bytes for t in F.tensors if not t.name.startswith(mtp) and t.type == 'BF16')   # (widened to F32 on load)
-    w += IQ_PAD * sum(1 for t in F.tensors if not t.name.startswith(mtp) and (t.type in IQ_REC or t.type in ('Q2_K', 'IQ1_M')))   # (the record layout's tail)
-    w += sum(t.n_bytes // 56 * 10 for t in F.tensors if not t.name.startswith(mtp) and t.type == 'IQ1_M')   # (its records: 66 bytes per 56-byte block)
-    n_attn = sum(1 for g in block_kinds(F) if not g)
-    CH = 2 * c['S'] * c['NK'] + c['S'] * c['NV']
-    gdn = (nl - n_attn) * (k3.gdn_block_size(c['NV'], c['S'], c['NK'], spec_T) + CH * 3 + spec_T * CH) * 4
-    part = 4 * attn_part_elems(1, c['nh'], int(max_ctx) + spec_T - 1)
-    return w + n_attn * (int(max_ctx) + spec_T - 1) * k3.kv_pos_bytes(c['nkv'] * c['hd'], q8) + gdn + part + (4 if q8 else 0)
 
 
 class Q35Host:
@@ -598,7 +522,7 @@ class Dense35Own(Q35Host):
             n2 = E.own_add_rms16(s['x'], d['post_norm'], s['h'], s['h16'], self.eps, d=s['blk'], slots=1, dep=o_)
             if fc is not None: E.also(n2, fc)
             fg, fu = d['fg'], d['fu']
-            if self.gu and fg['fmt'] == fu['fmt'] and fg['fmt'] in k3.OWN_1RT_FMT and self.rpt % 16 == 0 and self.rpt <= 64:
+            if gu_fused(self.module, fg['fmt'], fu['fmt'], self.gu, self.rpt):
                 sw = mv(fg, s['h16'], s['a16'], n2, up=fu)
             else:   # (the two matrices in different formats, or one without a one-round-trip tile: three segments)
                 g_ = mv(fg, s['h16'], s['g'], n2); u_ = mv(fu, s['h16'], s['u'], n2)
