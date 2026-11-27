@@ -124,14 +124,26 @@ def test_sens(path, per_tensor=None):
     return path
 
 
-def brute_force(inv, costs, sens, card, depth, vram_cap, quality_cap):
+def const_terms(inv, F, sens, variables, max_ctx):
+    """what every assignment pays regardless of the choice: the non-variable tensors' bytes and loss, plus the
+    projection's KV / GDN / record terms at max_ctx (the same constants solve() carries)"""
+    var_names = {k for _, opts in variables for o in opts for k in o['fmts']}
+    terms = q35_file._projection_terms(F, max_ctx)
+    cb = sum(q35_file.upload_bytes(r['t'], r['fmt']) for n_, r in inv['recs'].items() if n_ not in var_names)
+    cb += terms['kv'] + terms['gdn'] + terms['part'] + terms['extra']
+    cq = sum(q35_plan.loss_of(sens, n_, r['fmt']) for n_, r in inv['recs'].items() if n_ not in var_names)
+    return cb, cq
+
+
+def brute_force(inv, F, costs, sens, card, depth, vram_cap, quality_cap, max_ctx=512):
     """enumerate every assignment of every variable (small cases only): the min option-cost sum over the feasible
     ones, then the predicted total_us of that assignment; None when none is feasible"""
     variables = q35_plan._variables(inv, costs, sens, card, depth)
+    cb, cq = const_terms(inv, F, sens, variables, max_ctx)
     best = None
     for combo in itertools.product(*[opts for _, opts in variables]):
-        byts = sum(o['bytes'] for o in combo)
-        qual = sum(o['quality'] for o in combo)
+        byts = cb + sum(o['bytes'] for o in combo)
+        qual = cq + sum(o['quality'] for o in combo)
         if byts > vram_cap or qual > quality_cap:
             continue
         c = sum(o['cost_us'] for o in combo)
@@ -144,7 +156,7 @@ def brute_force(inv, costs, sens, card, depth, vram_cap, quality_cap):
     return (q35_plan.predict(inv, choice, costs, card, depth)['total_us'], choice)
 
 
-def brute_force_pruned(variables, vram_cap, quality_cap):
+def brute_force_pruned(variables, vram_cap, quality_cap, const_bytes=0.0, const_qual=0.0):
     """exhaustive enumeration of every feasible assignment (small instances), with only cap-feasibility pruning:
     returns (min option-cost sum, how many assignments reach it within 1e-9, one such assignment) or None"""
     n = len(variables)
@@ -170,7 +182,7 @@ def brute_force_pruned(variables, vram_cap, quality_cap):
             for k in o['fmts']:
                 del assign[k]
 
-    rec(0, 0.0, 0.0, 0.0)
+    rec(0, 0.0, const_bytes, const_qual)
     return (best[0], best[1], best[2]) if best[0] is not None else None
 
 
@@ -216,16 +228,17 @@ def randomized_solver_checks(inv, F, scratch, n_instances=320, seed=0x51A7):
                        "default": None, "tensors": tensors}, f)
         sens = q35_plan.load_sensitivity(sp)
         variables = q35_plan._variables(inv, costs, sens, 'XTX', 128)
-        min_b = sum(min(o['bytes'] for o in opts) for _, opts in variables)
-        max_b = sum(max(o['bytes'] for o in opts) for _, opts in variables)
-        min_q = sum(min(o['quality'] for o in opts) for _, opts in variables)
-        max_q = sum(max(o['quality'] for o in opts) for _, opts in variables)
+        cb, cq = const_terms(inv, F, sens, variables, 512)
+        min_b = cb + sum(min(o['bytes'] for o in opts) for _, opts in variables)
+        max_b = cb + sum(max(o['bytes'] for o in opts) for _, opts in variables)
+        min_q = cq + sum(min(o['quality'] for o in opts) for _, opts in variables)
+        max_q = cq + sum(max(o['quality'] for o in opts) for _, opts in variables)
         vmode = rng.choice(['free', 'bind', 'inf'])
         qmode = rng.choice(['free', 'bind', 'inf'])
         vram_cap = {'free': 1e18, 'bind': min_b + (max_b - min_b) * rng.random(), 'inf': min_b - 1.0}[vmode]
         qcap = {'free': 1e18, 'bind': min_q + (max_q - min_q) * rng.random(), 'inf': min_q - 1e-12}[qmode]
         modes_seen[(vmode, qmode)] = modes_seen.get((vmode, qmode), 0) + 1
-        bf = brute_force_pruned(variables, vram_cap, qcap)
+        bf = brute_force_pruned(variables, vram_cap, qcap, cb, cq)
         try:
             res = q35_plan.solve(inv, F, costs, sens, 'XTX', 128, 512, vram_cap, qcap)
             got = ('ok', res)
@@ -337,7 +350,7 @@ def main():
     check(len(vars_) <= 12 and n_opts <= 1000000, f'solver test setup: small enough to enumerate ({len(vars_)} variables, {n_opts} assignments)')
     for vram_cap, qcap in [(10 ** 12, 1.0), (10 ** 12, 1.2e-3), (30 * 2 ** 20, 1.0), (24 * 2 ** 20, 1.5e-3)]:
         res = q35_plan.solve(invs, F, costs, sens, 'XTX', 128, 512, vram_cap, qcap)
-        bf = brute_force(invs, costs, sens, 'XTX', 128, vram_cap, qcap)
+        bf = brute_force(invs, F, costs, sens, 'XTX', 128, vram_cap, qcap)
         check(bf is not None and abs(res['total_us'] - bf[0]) < 1e-9,
               f'solver == brute force (vram cap {vram_cap}, quality cap {qcap}): {res["total_us"]:.6f} vs {bf[0] if bf else None:.6f}')
         check(res['vram'] <= vram_cap and res['quality'] <= qcap + 1e-12,

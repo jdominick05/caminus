@@ -396,6 +396,14 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
     Raises PlanError when no assignment satisfies the caps (which cap, and its minimum possible value)."""
     variables = [(name, _drop_dominated(opts)) for name, opts in _variables(inv, costs, sens, card, depth)]
     n = len(variables)
+    # the tensors that are not variables (the 1-D glue / norm vectors) still count towards the caps, at their own
+    # format, and so do the projection's KV / GDN-state / attention-record terms at max_ctx: carry all of that as
+    # constants of every assignment, so the VRAM constraint is the full projection (vram_bytes) against the cap
+    var_names = {k for _, opts in variables for o in opts for k in o['fmts']}
+    terms = q35_file._projection_terms(F, max_ctx)
+    const_bytes = sum(q35_file.upload_bytes(r['t'], r['fmt']) for n_, r in inv['recs'].items() if n_ not in var_names)
+    const_bytes += terms['kv'] + terms['gdn'] + terms['part'] + terms['extra']
+    const_qual = sum(loss_of(sens, n_, r['fmt']) for n_, r in inv['recs'].items() if n_ not in var_names)
     min_cost = [min(o['cost_us'] for o in opts) for _, opts in variables]
     min_bytes = [min(o['bytes'] for o in opts) for _, opts in variables]
     min_qual = [min(o['quality'] for o in opts) for _, opts in variables]
@@ -404,12 +412,12 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
         suf_cost[i] = suf_cost[i + 1] + min_cost[i]
         suf_bytes[i] = suf_bytes[i + 1] + min_bytes[i]
         suf_qual[i] = suf_qual[i + 1] + min_qual[i]
-    if suf_bytes[0] > vram_cap:
-        raise PlanError(f'infeasible VRAM cap {vram_cap} B: the menu\'s minimum is {suf_bytes[0]:.0f} B '
-                        f'(the smallest format of every tensor)')
-    if suf_qual[0] > quality_cap:
-        raise PlanError(f'infeasible quality-loss cap {quality_cap}: the menu\'s minimum loss is {suf_qual[0]} '
-                        f'(the smallest loss the sensitivity table gives)')
+    if const_bytes + suf_bytes[0] > vram_cap:
+        raise PlanError(f'infeasible VRAM cap {vram_cap} B: the minimum is {const_bytes + suf_bytes[0]:.0f} B '
+                        f'(the projection at max_ctx plus the smallest format of every matrix)')
+    if const_qual + suf_qual[0] > quality_cap:
+        raise PlanError(f'infeasible quality-loss cap {quality_cap}: the minimum total loss is {const_qual + suf_qual[0]} '
+                        f'({const_qual} of fixed tensors plus the smallest loss the sensitivity table gives)')
     order = sorted(range(n), key=lambda i: -(max(o['cost_us'] for o in variables[i][1]) - min_cost[i]))
     variables = [variables[i] for i in order]
     min_cost = [min_cost[i] for i in order]; min_bytes = [min_bytes[i] for i in order]; min_qual = [min_qual[i] for i in order]
@@ -435,9 +443,9 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
                     v = opts[oi]['cost_us'] + nxt[q - qq]
                     if v < b: b = v
             row[q] = b
-    # a greedy feasible assignment as the first upper bound
+    # a greedy feasible assignment as the first upper bound (starting from the constants)
     best = [None]
-    c = b = q = 0.0; qi = 0; assign = {}
+    c = 0.0; b = const_bytes; q = const_qual; qi = int(const_qual // delta) if quality_cap > 0 else 0; assign = {}
     for i, (name, opts) in enumerate(variables):
         cand = [o for o in opts if b + o['bytes'] <= vram_cap and q + o['quality'] <= quality_cap
                 and qi + min(qf[i]) <= Q]
@@ -474,7 +482,7 @@ def solve(inv, F, costs, sens, card, depth, max_ctx, vram_cap, quality_cap, grid
             rec(i + 1, cost + o['cost_us'], byts + o['bytes'], qual + o['quality'], qacc + qq, {**assign, **o['fmts']})
 
     sys.setrecursionlimit(max(10000, 4 * n + 1000))
-    rec(0, 0.0, 0.0, 0.0, 0, {})
+    rec(0, 0.0, const_bytes, const_qual, int(const_qual // delta) if quality_cap > 0 else 0, {})
     if best[0] is None:
         raise PlanError(f'infeasible: no assignment in the menu satisfies the VRAM cap {vram_cap} B and the '
                         f'quality-loss cap {quality_cap}')
