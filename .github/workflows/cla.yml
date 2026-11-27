@@ -27,7 +27,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+      # A pull request the owner opens passes without signatures: the owner vouches for every commit in it, including
+      # ones an agent such as Mistral Vibe authored under its shared account. Anyone else's pull request still needs
+      # each committer's signature. Fixed text only; no event field reaches the shell.
+      - name: Owner's pull request
+        if: (github.event.pull_request.user.login || github.event.issue.user.login) == 'jdominick05'
+        run: echo "Opened by the owner; the CLA check is not needed."
+      - if: (github.event.pull_request.user.login || github.event.issue.user.login) != 'jdominick05'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
