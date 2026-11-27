@@ -3,7 +3,7 @@ T = 1 and T = 4 on the same state: per segment kind (op and format, a matvec wit
 workgroup past the wait -> its last publish), medians over --passes traced passes after --warm untraced ones, and what
 T = 4 adds over T = 1 per kind (the T-token tiles' extra cost per token is arithmetic, not bytes). Every pass at position
 --depth with commit 0 (the state the steps before it left: no replay).
-  tools/guard.sh LOG 1200 python -I benchmarks/q35_verify_trace.py GGUF [--depth 512] [--passes 7]
+  tools/guard.sh LOG 1200 python -I benchmarks/q35_verify_trace.py GGUF [--depth 512] [--passes 7] [--prefill]
 Swift's module is dec_q35_swift_ver_trace, ThinkingCap's dec_q35_tcap_ver_trace (chosen from the file).
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>)."""
 import argparse, collections, os, sys
@@ -14,17 +14,24 @@ from caminus.device import capacity
 from caminus.engine import k3
 from caminus.engine.q35_dense import Dense35Own
 from caminus.engine.q35_dense_verify import Dense35Verify
+from caminus.prefill.q35own import Q35OwnPrefill, buffer_need_mib, shapes_of
 
 ap = argparse.ArgumentParser(); ap.add_argument('gguf'); ap.add_argument('--depth', type=int, default=512)
 ap.add_argument('--passes', type=int, default=7); ap.add_argument('--warm', type=int, default=3)
+ap.add_argument('--prefill', action='store_true', help='reach --depth with the own prefill (chunks of 512) instead of '
+                'one decode step per position (a pass reads the cache, not its values: the same work, minutes faster at 32K)')
 A = ap.parse_args()
 OPN = {v: k[3:] for k, v in vars(k3).items() if k.startswith('OP_') and isinstance(v, int)}
 mc = A.depth + 16
-eng = Dense35Own(A.gguf, max_ctx=mc, spec_T=4, vram_extra_mib=2 * Dense35Verify.need_mib(4, max_ctx=mc) + 64)
+PF_MIB = buffer_need_mib(shapes_of(A.gguf), 512) if A.prefill else 0
+eng = Dense35Own(A.gguf, max_ctx=mc, spec_T=4, vram_extra_mib=2 * Dense35Verify.need_mib(4, max_ctx=mc) + 64 + PF_MIB)
 mod = 'dec_q35_tcap_ver_trace' if eng.tcap else 'dec_q35_swift_ver_trace'
 print(torch.cuda.get_device_name(0), eng.module, '->', mod, flush=True)
 toks = [(7 * i + 3) % 5000 + 100 for i in range(mc)]
-for p in range(A.depth): eng.verify(toks, p, 0 if p == 0 else 1)   # (decode steps up to the depth: the state every pass reads)
+if A.prefill and A.depth:
+    pf = Q35OwnPrefill(eng, chunk=512); pf.run(toks[:A.depth], 0, 0, A.depth); torch.cuda.synchronize(); del pf
+else:
+    for p in range(A.depth): eng.verify(toks, p, 0 if p == 0 else 1)   # (decode steps up to the depth: the state every pass reads)
 
 
 def kind(sg):
