@@ -187,6 +187,9 @@ CLAUDE.md imports this file.
   format), `gu_fused` (the tape's gate | up fusion test, called from `q35_dense._build_tape`) and `mat_tensors` (the trunk
   matrix roles `benchmarks/own_mv_census.py` times). `q35_dense.py` re-exports them, so every existing import is
   unchanged.
+- `engine/q35_plan.py`: the CPU per-tensor format planner behind `tools/q35_format_plan.py` (predicted decode ms per
+  token under a VRAM and a quality-loss cap; the menu is the module's `k3.MODULE_CAPS`). Detail:
+  docs/dev/q35-format-plan.md.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `dec_q3m_tp`: kv heads and each

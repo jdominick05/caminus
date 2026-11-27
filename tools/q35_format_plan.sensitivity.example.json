@@ -1,0 +1,40 @@
+{
+  "schema": "q35-format-plan.sensitivity/1",
+  "unit": "mean KLD of one greedy decode (128 positions) against the engine's fp32 reference mode, with this tensor alone requantized to the format",
+  "filled_by": "a per-tensor arm of G-model (docs/specs/spec-own-quant.md; tools/gates/q35_gmodel.py): the gate prompts, the reference mode's logits, one tensor swapped per run, on a card",
+  "synthetic": true,
+  "note": "SYNTHETIC EXAMPLE, not measured: loss = 5e-4 * (1 - bits-per-weight / 32). The real table needs the model and a GPU; every plan run with this file is flagged synthetic. The file's own format of a tensor is the zero baseline.",
+  "default": null,
+  "tensors": {
+    "*": {
+      "F32": 0.0,
+      "IQ1_M": 0.00047266,
+      "IQ1_S": 0.00047559,
+      "IQ2_S": 0.00045996,
+      "IQ2_XS": 0.00046387,
+      "IQ2_XXS": 0.00046777,
+      "IQ3_S": 0.00044629,
+      "IQ3_XXS": 0.00045215,
+      "IQ4_NL": 0.00042969,
+      "IQ4_XS": 0.00043359,
+      "MXFP4": 0.00043359,
+      "NVFP4": 0.00042969,
+      "Q1_0": 0.00048242,
+      "Q2_0": 0.00046484,
+      "Q2_K": 0.00045898,
+      "Q3_K": 0.00044629,
+      "Q4_0": 0.00042969,
+      "Q4_1": 0.00042187,
+      "Q4_K": 0.00042969,
+      "Q5_0": 0.00041406,
+      "Q5_1": 0.00040625,
+      "Q5_K": 0.00041406,
+      "Q6_K": 0.00039746,
+      "Q8_0": 0.00036719,
+      "Q8_1": 0.00035937,
+      "Q8_K": 0.00035742,
+      "TQ1_0": 0.00047363,
+      "TQ2_0": 0.00046777
+    }
+  }
+}

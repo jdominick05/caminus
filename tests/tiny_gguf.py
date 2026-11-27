@@ -1,8 +1,10 @@
-"""Tiny synthetic GGUF files for the CPU tests (tests/test_arch.py, tests/test_ref_q35.py, tests/test_ref_coder.py), and the
-Gated DeltaNet block's definition written out per token and per value head (the float64 references' tests check
-caminus.ref_q35's _gdn against it). Not a test itself: the tests import it (python -I keeps the script's directory out of
-sys.path, so each adds tests/ first)."""
+"""Tiny synthetic GGUF files for the CPU tests (tests/test_arch.py, tests/test_ref_q35.py, tests/test_ref_coder.py,
+tests/tools/test_q35_format_plan.py), and the Gated DeltaNet block's definition written out per token and per value head
+(the float64 references' tests check caminus.ref_q35's _gdn against it). Not a test itself: the tests import it (python -I
+keeps the script's directory out of sys.path, so each adds tests/ first). write_gguf also takes each tensor as a
+(dims, raw bytes, ggml type id) tuple, for fixtures in a quantized type (a float32 array is always written F32)."""
 import struct
+
 import numpy as np
 
 U32, I32, F32, BOOL, STR, ARR, U64 = 4, 5, 6, 7, 8, 9, 10
@@ -24,14 +26,18 @@ def _val(v):
 
 
 def write_gguf(path, meta, tensors):
-    """a GGUF v3 file: meta {key: value (see _val)}, tensors {name: float32 array} (written F32, dims innermost first: an
-    array [rows, K] is a K x rows tensor), data aligned to 32 bytes"""
+    """a GGUF v3 file: meta {key: value (see _val)}, tensors {name: value} where a value is a float32 array (written F32,
+    dims innermost first: an array [rows, K] is a K x rows tensor) or a (dims, raw bytes, ggml type id) tuple (any
+    quantized type); data aligned to 32 bytes"""
     head = struct.pack('<4sIQQ', b'GGUF', 3, len(tensors), len(meta)) + b''.join(_s(k) + _val(v) for k, v in meta.items())
     info, data = b'', b''
     for name, a in tensors.items():
-        a = np.ascontiguousarray(a, np.float32); dims = a.shape[::-1]
-        info += _s(name) + struct.pack('<I', len(dims)) + b''.join(struct.pack('<Q', d) for d in dims) + struct.pack('<IQ', 0, len(data))
-        data += a.tobytes(); data += b'\0' * (-len(data) % 32)
+        if isinstance(a, tuple):          # (dims innermost first, raw bytes, ggml type id)
+            dims, raw, tid = a
+        else:
+            a = np.ascontiguousarray(a, np.float32); dims, raw, tid = a.shape[::-1], a.tobytes(), 0
+        info += _s(name) + struct.pack('<I', len(dims)) + b''.join(struct.pack('<Q', d) for d in dims) + struct.pack('<IQ', tid, len(data))
+        data += raw; data += b'\0' * (-len(data) % 32)
     blob = head + info
     with open(path, 'wb') as f:
         f.write(blob + b'\0' * (-len(blob) % 32) + data)
