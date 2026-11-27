@@ -136,7 +136,7 @@ CLAUDE.md imports this file.
   ThinkingCap's TP verify row (`dec_q35_tcap_tp_ver`) alone defines `K3_Q35_GDN_LOCAL_BASE`: empty asm operands keep GDN STEP/SAVE
   geometry and replay pointers inside their dispatch branches. Preserve the addresses and floating-point statements;
   check the whole build's object isolation and register budget before running its TP bitwise gates.
-  Plain Qwen3.8-27B GSQ-RCO uses `dec_q35_gsq` / `pf_q35_gsq` and `Q35R_*` host names; `Q35G_*` belongs to
+  Plain Qwen3.8-27B GSQ-RCO uses `dec_q35_gsq` (its K3_TRACE build `dec_q35_gsq_trace`: measurement only) / `pf_q35_gsq` and `Q35R_*` host names; `Q35G_*` belongs to
   Qwen3.6, so reusing it changes another model's dispatch. Its verify pass is three launches: prefix, the one IQ1_M
   ffn_gate on `dec_q35_gsq_ver_m`, then suffix on `dec_q35_gsq_ver` with a scratch embedding to stage the IQ grids.
   Isolating IQ1_M keeps the persistent allocation within 96 VGPRs; other IQ1_M placements are refused on the host.

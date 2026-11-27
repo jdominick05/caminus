@@ -51,6 +51,10 @@ dec_q35_gsq_ver	dec_q35_gsq	K3_Q3M_VER;K3_Q35_VER;K3_Q35_ATTN_PACK
 # it in dec_q35_gsq_ver's dispatch k3_run took 97 to 102 VGPRs (budget 96). The host's caps give this module that format only.
 dec_q35_gsq_ver_m	dec_q35_gsq_ver	K3_Q35_GSQ_M
 
+# kernels/dec_q35_gsq.hip with K3_TRACE (per-segment timestamps; measurement only, never shipped: benchmarks/q3moe_trace.py
+# --engine dense35 --modules dec_q35_gsq_trace, the in-module time of the GSQ formats IQ2_XS / IQ2_XXS / Q2_K / IQ1_M / Q4_K)
+dec_q35_gsq_trace	dec_q35_gsq	K3_TRACE
+
 # The dense qwen35 line's DFlash 2 drafter module (incoai's Qwen3.8-27B-DFlash2 on Swift 1.5: engine/q35_dflash.py). The
 # Swift module's T-token ops (K3_Q3M_VER / K3_Q35_VER: the Q8_0 and Q6_K matvecs over the draft block's rows, add + norm,
 # the q / k norm with RoPE, SwiGLU, the Q4_K embedding) and the drafter's own fp32 ops (kernels/ops_q35_dflash.h: the
