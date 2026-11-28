@@ -4,6 +4,16 @@ Every release of Caminus, newest first. Speeds are measured on an RX 7900 XTX (t
 otherwise; where each number comes from is in [docs/dev/benchmarks.md](docs/dev/benchmarks.md). Patch releases (0.x.y)
 do not rerun the benchmarks; a number in a patch release's entry cites the pull request that measured it.
 
+## Unreleased
+
+### Changed
+
+- **The agent keeps your language.** `caminus ember agent language --to LANGUAGE` sets it (without one it is
+  derived from your own goals), the prompt asks for it, and a reply that switches away is recorded as a
+  `language_drift` event and, at most once every three turns, nudged back. Adding this to the system prompt
+  re-reads every live session's cached prefix once after the upgrade; nothing else about a running session
+  changes (#354).
+
 ## 0.3.3 (2026-11-19)
 
 A first-run guide, `caminus wizard`, takes an installed package to a served model and Qwen Code; the rest are

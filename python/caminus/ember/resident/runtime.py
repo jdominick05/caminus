@@ -34,6 +34,7 @@ from . import planning
 from . import sandbox
 from . import sim
 from . import browser
+from . import language
 
 TODO_STATES = ('pending', 'in_progress', 'done')
 # The todo shapes models are trained on (Qwen Code's todo_write: id, content, status; Claude Code's TodoWrite: content,
@@ -277,6 +278,40 @@ EXIT = {'completed': 0, 'waiting_user': 20, 'waiting_root': 21, 'paused': 22, 'c
 
 class _Skipped(Exception):
     """A call not run because an earlier call of the same turn was refused (its result says so; not a failure)."""
+
+
+def _call_names(calls):
+    """The names of a reply's tool calls, read over the OpenAI and flat shapes a hand-built reply uses.
+
+    Written defensively: the reply comes from a model adapter, and a call is a dict in the OpenAI shape
+    (`{'function': {'name': ...}}`) only for the adapters that use it. A missing or malformed call is skipped
+    (it reads as "no call by that name": the reply's own turn logic is unchanged), never raises inside the tick.
+    """
+    names = set()
+    for call in calls or ():
+        if not isinstance(call, dict):
+            continue
+        fn = call.get('function')
+        name = fn.get('name') if isinstance(fn, dict) else call.get('name')
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def _calls_finish(calls):
+    """Whether a reply's tool calls include `finish`, the one call that ends the goal on this same tick."""
+    return 'finish' in _call_names(calls)
+
+
+def _calls_schedule(calls):
+    """Whether a reply's tool calls include `schedule`, the one call that parks the goal on this same tick.
+
+    A nudge queued on that tick would be an unconsumed inbox row by the next one, and `agenda.wake_due` reads any
+    such row as a message that wakes the parked goal at once: the goal then takes a paid turn instead of parking,
+    and the note it was parked on never comes back (#390 Opus review P1). Same rule as `_calls_finish`: the drift
+    is still an event, and only the nudge waits for the turn it was meant to hold.
+    """
+    return 'schedule' in _call_names(calls)
 
 
 def tool(name, description, properties, required=()):
@@ -548,7 +583,12 @@ class Runtime:
         agent works - MEMORY.md, which it writes every few steps, IDENTITY.md, and the measured
         budget - therefore rides after the history instead (see :meth:`context_message`). A memory write used
         to invalidate the cache at the first token and force a full re-read of the whole transcript."""
-        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self)))
+        # `owner` is also what `language.from_home` reads for the CLI's `agent prompt`; the two must name one
+        # language for one home, and the equality test reads a single home through both (#390 review P2). Its
+        # `source` goes with the name: a default names no language in the prompt (#390 review P1-2).
+        who = language.owner(self)
+        return dict(role='system', content=render_prompt(self.home, sim=sim.enabled(self),
+                                                         language=who['name'], source=who['source']))
 
     def context_message(self,gid=None):
         """What the model knows about itself, delivered after the history so the cached prefix survives.
@@ -1617,13 +1657,17 @@ class Runtime:
                          ('\n[goal truncated: %d characters omitted]' % (len(goal_text) - len(keep)) if len(goal_text) > len(keep) else ''))
             used += len(keep)
         # A steer still waiting in the inbox counts as said: a compaction must not summarize away words the
-        # human already sent, whichever path asked for it.
-        steers = self.store.steers(gid) + [dict(id='inbox-%d' % r['id'], text=r['text'])
-                                          for r in self.store.db.execute(
-                                              'SELECT id,text FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',
-                                              (gid,))]
+        # human already sent, whichever path asked for it. A harness note is not the human speaking, though
+        # (#390 review P2-b: the language nudge used to be restated under the same heading): it keeps its own
+        # section, labelled as the harness's, and the human's own words are given the budget first.
+        rows = self.store.steers(gid) + [
+            dict(id='inbox-%d' % r['id'], text=r['text'], kind=r['kind'], source=r['source'])
+            for r in self.store.db.execute('SELECT id,text,kind,source FROM inbox WHERE goal=? AND consumed=0 '
+                                           'ORDER BY id', (gid,))]
+        human = [st for st in rows if (st.get('source') or '') != 'harness']
+        notes = [st for st in rows if (st.get('source') or '') == 'harness']
         kept = []
-        for st in reversed(steers):                     # newest first, so a tight budget keeps the latest words
+        for st in reversed(human):                      # newest first, so a tight budget keeps the latest words
             room = limit - used
             if room <= 0:
                 break
@@ -1634,6 +1678,18 @@ class Runtime:
         if kept:
             parts.append('[steers and nudges, restated verbatim after compaction, newest first]\n'
                          + '\n'.join(kept))
+        kept_notes = []
+        for st in reversed(notes):
+            room = limit - used
+            if room <= 0:
+                break
+            text = st['text'][:room]
+            kept_notes.append('[%s from the harness #%s] %s%s' % (st.get('kind') or 'nudge', st['id'], text,
+                              '\n[truncated]' if len(st['text']) > len(text) else ''))
+            used += len(text)
+        if kept_notes:
+            parts.append('[harness notes, restated verbatim after compaction, newest first: these are the loop\'s '
+                         'own notes (a nudge, a gate result), not words your human said]\n' + '\n'.join(kept_notes))
         if not parts:
             return messages
         return messages + [dict(role='user', content=self.store.stamp(gid, '\n\n'.join(parts), always=True))]
@@ -1830,24 +1886,61 @@ class Runtime:
         """How a plain reply relates to the human: 'reopened' when the goal had finished and a message of theirs
         reopened it (tool calls since then are the agent finding the answer), 'asked' when one of their messages
         arrived since the agent's previous reply, else ''. The reply being handled is already stored."""
-        kinds=[r['kind'] for r in self.store.db.execute(
-            "SELECT kind FROM events WHERE goal=? AND kind IN ('finished','goal_continued','steers_applied','assistant') "
-            "ORDER BY seq DESC LIMIT 200",(gid,))]            # newest first; kinds[0] is this reply
+        rows=list(self.store.db.execute(
+            "SELECT kind, CASE kind WHEN 'steers_applied' THEN data ELSE '' END AS data FROM events "
+            "WHERE goal=? AND kind IN ('finished','goal_continued','steers_applied','assistant') "
+            "ORDER BY seq DESC LIMIT 200",(gid,)))            # newest first; rows[0] is this reply
+        kinds=[r['kind'] for r in rows]
         if 'goal_continued' in kinds and 'finished' in kinds and kinds.index('goal_continued')<kinds.index('finished'):
             return 'reopened'
-        for k in kinds[1:]:
-            if k=='steers_applied':return 'asked'
-            if k=='assistant':break
+        for r in rows[1:]:
+            if r['kind']=='steers_applied':
+                # Only the human speaking is an answer. The runtime writes its own notes to the inbox too (a gate
+                # result, a drift nudge, a truncation warning, a scheduled wake-up): read as an answer, each one
+                # popped the plain-text streak and the pause never fired on a stalled goal (#390 review P1). The
+                # writer marks those rows `source='harness'` and `steers_applied` carries `human`; an older event
+                # without the field is a human batch, as it always was. (The CASE keeps the 200-row window cheap:
+                # only the batches' own data is read, not every assistant message's.)
+                try: human=json.loads(r['data']).get('human',True)
+                except ValueError: human=True
+                if human:return 'asked'
+                continue
+            if r['kind']=='assistant':break
         return ''
 
-    def _plain_reply(self, gid):
+    def _plain_dispatch(self, gid):
+        """(how, turn, count) for a plain reply, the one place `_plain_reply`'s branches live.
+
+        `_plain_reply` dispatches on this and the language check reads `turn` from it, so a change to one branch
+        cannot leave the other saying a turn comes when none does (review P2: the two were written twice, and a
+        nudge queued for a turn that never comes defers the `_finish` on the same tick). `turn` is whether a turn
+        follows this reply: a reopened goal's first plain reply is prompted on, its second finishes; an answer to
+        the human's question is told to carry on; otherwise the third plain reply in a row pauses the goal.
+        `count` is the reply's place in a plain run (0 for the two answer branches), which `_plain_reply` records.
+        """
+        how = self._answering(gid)
+        if how == 'reopened':
+            return how, gid not in self.__dict__.get('_reopen_prompted', set()), 0
+        if how == 'asked':
+            return how, True, 0
+        count = self.plain_replies.get(gid, 0) + 1
+        return how, count < PLAIN_TEXT_LIMIT, count
+
+    def _plain_reply(self, gid, dispatch=None):
         """A reply with no tool calls. Nudge it back to work; the third in a row pauses the goal. A reply to the
         human is not that: on a finished goal they reopened with a message, the answer ends the turn and the goal is
         complete again (it was nudged back to work instead, and with nothing left to do it re-ran its done check in a
-        loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted."""
-        how=self._answering(gid)
+        loop until it was stopped); mid-goal, an answer to their message is told to carry on, not scolded or counted.
+        `dispatch` is `_plain_dispatch(gid)` when the caller already asked for it (the language check in `_tick`
+        needs its `turn` too, and two calls were two extra `_answering` queries per plain reply - review P2)."""
+        if dispatch and dispatch[2] and dispatch[2] != self.plain_replies.get(gid, 0) + 1:
+            # The caller's snapshot is stale: a write between `_tick`'s dispatch and this call moved the reply run.
+            # Re-committing it blind would count this reply at the old place and drop or double the run (#390 review
+            # F1). Asking again is one `_answering` query, paid only on the branch that already counted replies.
+            dispatch = None
+        how, turn, count = dispatch or self._plain_dispatch(gid)
         prompted=self.__dict__.setdefault('_reopen_prompted',set())
-        if how=='reopened' and gid not in prompted:
+        if how=='reopened' and turn:
             # The agent decides, not a guess from its words: a reopened goal is either a question (the answer is
             # the whole job) or new work ("now do step 6", answered "Sure, I'll start"). One gentle prompt; a second
             # plain reply in a row completes it, so the old loop cannot come back.
@@ -1877,8 +1970,7 @@ class Runtime:
                 self.store.update(gid,messages=messages)
                 self.store.event('plain_answer',{},gid)
             return True
-        count=self.plain_replies.get(gid,0)+1
-        self.plain_replies[gid]=count
+        count=self.plain_replies[gid]=count
         with self.store.transaction():
             if self.store.goal(gid)['state']=='cancelled':return True
             if count>=PLAIN_TEXT_LIMIT:
@@ -1957,7 +2049,8 @@ class Runtime:
         note = ('[advisor] The watchdog was about to pause this goal (%s). Your advisor (%s) looked at it:\n%s\n'
                 'Change approach; the same loop again pauses the goal.' % (reason, out.get('model'), out['advice']))
         with self.store.transaction():
-            self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+            self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                  (gid, note, 'nudge', 'harness'))
             self.store.event('watchdog_advised', dict(reason=reason, step=g['steps'], usd=out.get('usd')), gid)
         # the advice gets a full window to land: the idle clock starts over (without this a 'no progress' trip paused
         # the goal on the very next tick, before the model had read the nudge it was just sent)
@@ -2043,10 +2136,10 @@ class Runtime:
         if not ok and out.startswith('the gate did not finish'):
             self._gate_slow[gid] = 'off'
             self.store.event('gate', dict(command=gate, passed=False, output=out, when='turn', disabled=True), gid)
-            self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid,
+            self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)', (gid,
                 f'[gate] the gate took over {GATE_TURN_TIMEOUT} s, so it no longer runs after each step; it still runs '
                 'when you finish. A quicker check (one test file, not the whole suite) would give you earlier feedback.',
-                'nudge'))
+                'nudge', 'harness'))
             return
         if took > GATE_SLOW:
             self._gate_slow[gid] = time.time()
@@ -2062,7 +2155,7 @@ class Runtime:
             note = '[gate] the gate passes again. If the goal is done, verify it and finish.'
         else:
             note = '[gate] the done check\'s gate fails now:\n' + out[-3000:]
-        self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)', (gid, note, 'nudge'))
+        self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)', (gid, note, 'nudge', 'harness'))
 
     def _reply_limit(self):
         """A reply's token limit for the brain in force (effort.reply_limit: config max_tokens, else a local brain's
@@ -2214,8 +2307,8 @@ class Runtime:
                 if k == 'sim' and bool(fresh[k]) != bool(self.config.get('sim', True)):
                     self._tools = None        # an off session is not offered the sim tool, and an on one is
                 self.config[k] = fresh[k]
-        for k in ('eyes', 'providers'):           # (`agent eyes` / `agent provider` take effect at the next image read)
-            if k in fresh:
+        for k in ('eyes', 'providers', 'language'):   # (`agent eyes` / `agent provider` take effect at the next image
+            if k in fresh:                            #  read, `agent language` at the next turn)
                 self.config[k] = fresh[k]
             else:
                 self.config.pop(k, None)
@@ -2269,9 +2362,10 @@ class Runtime:
                 self.store.update(gid,state='paused',error='oneshot model-step budget reached')
             return True
         if gid in self._held:
-            # only the human's message lifts it, not a harness note ([gate], [answer ...]: same rule as unsend)
-            waiting = self.store.db.execute("SELECT 1 FROM inbox WHERE goal=? AND consumed=0 AND substr(text,1,1)!='[' "
-                                            'LIMIT 1', (gid,)).fetchone()
+            # only the human's message lifts it, not a harness note (a gate result, an answer, a cut-off notice,
+            # the language nudge: all `source='harness'`, and an older one by its leading `[`): same rule as unsend
+            waiting = self.store.db.execute("SELECT 1 FROM inbox WHERE goal=? AND consumed=0 AND source!='harness' "
+                                            "AND substr(text,1,1)!='[' LIMIT 1", (gid,)).fetchone()
             if not waiting and time.time() - self._held[gid] < INTERRUPT_HOLD:
                 return False
             self._held.pop(gid, None)
@@ -2280,7 +2374,7 @@ class Runtime:
         try:
             with self.store.transaction():
                 rows = list(self.store.db.execute(
-                    'SELECT id,text,kind FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
+                    'SELECT id,text,kind,source FROM inbox WHERE goal=? AND consumed=0 ORDER BY id',(gid,)))
                 # Steers are ordinary user text in the transcript, so they carry the latest-wins rule with
                 # them: history length differs turn to turn and a terse prefix is what makes a mid-goal
                 # redirect win over the older instructions it contradicts. Each one is also filed verbatim
@@ -2289,7 +2383,7 @@ class Runtime:
                 messages = g['messages']
                 for r in rows:
                     kind = r['kind'] or 'nudge'
-                    steer_id = self.store.add_steer(gid, r['text'], kind)
+                    steer_id = self.store.add_steer(gid, r['text'], kind, r['source'])
                     if kind == 'steer':
                         # A steer redirects: it outranks the plan and may move the goal itself.
                         tag = (f'[steer #{steer_id}, supersedes earlier instructions where they conflict. '
@@ -2307,8 +2401,11 @@ class Runtime:
                     self.store.db.executemany('UPDATE inbox SET consumed=1 WHERE id=?',[(r['id'],) for r in rows])
                     # redirect: whether a steer (not only nudges / questions) was among them; only a steer asks for a
                     # fresh verify (a question on a finished goal made the agent think it had to redo its proof)
+                    # human: whether any row came from the human; `_answering` reads a batch of the runtime's own
+                    # notes (source 'harness') as no answer, so its nudges cannot reset the plain-text pause
                     self.store.event('steers_applied', dict(ids=[r['id'] for r in rows],
-                                                            redirect=any((r['kind'] or 'nudge') == 'steer' for r in rows)), gid)
+                                                            redirect=any((r['kind'] or 'nudge') == 'steer' for r in rows),
+                                                            human=any((r['source'] or '') != 'harness' for r in rows)), gid)
                 if not g['steps'] and not self.store.db.execute(
                         "SELECT 1 FROM events WHERE goal=? AND kind='startup_discovery' LIMIT 1",(gid,)).fetchone():
                     snapshot=discovery.discover(self.home)
@@ -2368,15 +2465,60 @@ class Runtime:
             reasoning = reply.pop('reasoning_content','')
             if not self.store.model_reply(gid,reply,reasoning=reasoning,tokens=self._reply_tokens()):
                 return True
+            # A reply that slid into another language is an event every turn, and one nudge to the goal's next
+            # turn when it is due (issue #354); the prompt names the language, this is what holds a brain that
+            # drifts past it anyway. `due` is whether a turn follows this reply. Tool calls do; a plain reply
+            # ends the goal only on the paths below that finish or pause it, and a loop-gated one leaves the
+            # plain-text nudge behind, so its drift is nudged rather than recorded one turn late (review P2).
+            # A nudge for a turn that never comes is worse than late: the unconsumed inbox row would defer the
+            # completion `_finish` makes on this very tick.
+            plain = not reply.get('tool_calls')
+            # A reply that calls `finish` ends the goal on this tick too: the action runs before the next turn and
+            # `_finish` defers whenever an unconsumed inbox row waits. A tool-call reply generally does leave a
+            # turn, so `follows` starts True, but this one must not queue the nudge that would defer its own
+            # completion (review P1). The drift is still an event; only the nudge is withheld.
+            # A reply that calls `schedule` parks the goal, and `agenda.wake_due` wakes a parked goal on any
+            # unconsumed inbox row: a nudge queued here would read as a message and bring the goal back on the
+            # next tick, a paid turn instead of the sleep it asked for (#390 Opus review P1). Withheld the same
+            # way, so the nudge rides the wake-up turn, which is the turn it was meant to hold.
+            # Free time (`free`, `dream`) is not graded and has no next graded turn: `check`'s docstring says a
+            # drift there is recorded and never nudged, and only the plain branch below honoured it — a tool-call
+            # reply on a free goal was nudged anyway (review P2). `kind` is read for every reply now, not just a
+            # plain one, so the tool-call branch can honour the same rule.
+            kind = g.get('kind', 'work')      # (the row read at the top of the tick; `update` cannot change `kind`)
+            calls = reply.get('tool_calls')
+            follows = not (_calls_finish(calls) or _calls_schedule(calls)) and kind not in FREE_KINDS
+            dispatch = None
+            if plain:
+                # A plain reply leaves a turn only on the branches `_plain_reply` takes, and every branch that
+                # does not take one finishes or pauses the goal. Default False: a loop-gated reply sets it from
+                # the dispatch, and a reply that finishes (`loop_gates` off, a FREE kind) must not queue a nudge
+                # the `_finish` on this same tick would defer (review P2).
+                follows = False
+                if kind not in FREE_KINDS and self.loop_gates:
+                    # Computed here and handed to `_plain_reply` below, after the language check. That check only
+                    # reads the store and writes an event and an inbox row; the dispatch's inputs
+                    # (`plain_replies`, `_answering`) are not touched between the two, so asking again there
+                    # would be a second answer, not a fresher one (r22 review P2: invariant, no change needed).
+                    dispatch = self._plain_dispatch(gid)
+                    follows = dispatch[1]
+            # The answering brain's config is named here rather than left to `sim.serving`'s second read: a fallback
+            # turn's drift must be stamped with the model that wrote it, and passing the agent's `rt.config` instead
+            # would mislabel exactly that turn (#390 review F2).
+            if (note := language.check(self, gid, reply.get('content') or '',
+                                       cfg=getattr(self.model, 'config', None) or self.config, due=follows)):
+                with self.store.transaction():
+                    self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                          (gid, note, 'nudge', 'harness'))
             self.progress[gid] = time.time()
-            if not reply.get('tool_calls'):
+            if plain:
                 # A goal ends only through the finish tool, which runs the done check. Plain text is not
                 # completion: nudge the agent back to the work, and pause the goal after three in a row.
-                if self.store.goal(gid).get('kind','work') in FREE_KINDS:
+                if kind in FREE_KINDS:
                     # Free time is not graded: a plain reply is the resident choosing to rest.
                     self._finish(gid,reply['content'])
                 elif self.loop_gates:
-                    return self._plain_reply(gid)
+                    return self._plain_reply(gid, dispatch)
                 else:
                     self._finish(gid,reply['content'])
             else:
@@ -2428,11 +2570,11 @@ class Runtime:
                     self.truncations[gid]=count
                     if count<TRUNCATION_LIMIT:
                         limit=self._reply_limit()
-                        self.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,
+                        self.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',(gid,
                             f'[harness] Your last reply hit the output limit ({limit} tokens) and was cut off, so '
                             'nothing in it ran. Keep each reply under the limit: write a big file in parts (write '
                             'the first part, then add the rest with edit or further writes), and split long '
-                            'commands or text across steps.','nudge'))
+                            'commands or text across steps.','nudge','harness'))
                         self.store.update(gid,state='working',error='')
                         self.store.event('model_truncated',dict(error=str(e),recovered=True,streak=count,
                                                                 partial=e.partial),gid)

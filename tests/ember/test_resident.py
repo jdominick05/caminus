@@ -31,6 +31,11 @@ from caminus.ember import bridge as human_bridge
 ap=argparse.ArgumentParser();ap.add_argument('--scratch',required=True);ap.add_argument('-k',action='append',default=[],metavar='PATTERN');A=ap.parse_args()
 S=Path(A.scratch).resolve();S.mkdir(parents=True,exist_ok=True)
 BOOT="import sys;sys.path.insert(0,sys.argv[1]);from caminus.__main__ import main;sys.argv=sys.argv[1:];sys.exit(main())"
+# A `default` language names no language in the prompt or the drift nudge (#390 review P1-2): `derive` refuses
+# Latin script (English, Spanish and French share it), so the fallback name English is only a label, and
+# "Your human works in English" told a Spanish owner who never ran `--to` to write in a language that is not
+# theirs. Both describe the language instead; a `config` or a derived name is still written as such.
+REPLY_LANGUAGE="the language your human writes their goals in"
 
 
 PAGE=('<!doctype html><title>Fixture</title><h1>Welcome</h1><p>Read <a href="/about.html">About us</a>.</p>'
@@ -493,6 +498,96 @@ class Resident(unittest.TestCase):
         self.assertEqual(len(pauses),1)
         self.assertEqual(pauses[0]['data']['replies'],3)
         self.assertNotIn('finished',[e['kind'] for e in events])
+
+    def test_a_drifting_plain_reply_still_pauses_the_goal_after_three(self):
+        # #390 review P1: the language nudge is a note the runtime writes to the inbox, not the human speaking.
+        # `_answering` read the `steers_applied` batch it arrived in as their answer, and `_plain_reply`'s `asked`
+        # branch popped the streak and queued "carry on"; with DRIFT_EVERY == PLAIN_TEXT_LIMIT == 3 the pause
+        # never fired (the reviewer reproduced 12 plain replies staying `working`). A drifting reply is still a
+        # plain reply: three in a row pause the goal, whatever notes the runtime queued along the way.
+        self.gates_on()
+        chinese=('\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002')
+        drifting=lambda: dict(role='assistant',content=chinese)
+        self.replies(call('define_done',dict(check='the file exists')),drifting(),drifting(),drifting())
+        goal=self.cmd('once',['--goal','Create the file.'],code=22)
+        self.assertEqual(goal['state'],'paused')
+        self.assertIn('plain text',goal['error'])
+        events=self.cmd('events')
+        pauses=[e for e in events if e['kind']=='plain_text_pause']
+        self.assertEqual(len(pauses),1,'the third plain reply pauses it even when it drifted')
+        self.assertEqual(pauses[0]['data']['replies'],3)
+        self.assertNotIn('plain_answer',[e['kind'] for e in events],'no harness note was read as the human')
+        drifts=[e['data'] for e in events if e['kind']=='language_drift']
+        self.assertEqual([d['nudged'] for d in drifts],[True,False,False],
+                         'one nudge, then the cadence, then none for the turn that never comes')
+        applied=[e['data'] for e in events if e['kind']=='steers_applied']
+        self.assertTrue(applied,'the drift nudge was consumed as a nudge')
+        self.assertEqual([a['human'] for a in applied],[False],'the batch is the runtime\'s own note, not theirs')
+
+    def test_a_stale_plain_dispatch_is_asked_again_not_recommitted(self):
+        # #390 review F1: `_tick` computes `_plain_dispatch(gid)` before the language check writes an event and an
+        # inbox row, then `_plain_reply` re-committed that snapshot with `self.plain_replies[gid]=count`. Today
+        # nothing between the two moves the run, so this is an invariant, not a live bug; the guard makes it one the
+        # code holds instead of one the comment claims. Handed a snapshot that disagrees with the live run, the reply
+        # is counted from the live value.
+        self.gates_on()
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Create the file.');rt.store.update(gid,done_check='x',state='working')
+            stale=rt._plain_dispatch(gid)         # what `_tick` hands over: count 1 of a fresh run
+            rt.plain_replies[gid]=1               # a write between the two calls moves the run
+            rt._plain_reply(gid,stale)
+            nudges=[e for e in rt.store.events() if e['kind']=='plain_text_nudge']
+            self.assertEqual(nudges[-1]['data']['replies'],2,'the reply is counted from the live run, not the stale one')
+            self.assertEqual(rt.plain_replies[gid],2)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_language_check_is_handed_the_answering_brains_config(self):
+        # #390 review F2: `check` was called without `cfg`, so the drift event's brain came from a second read of
+        # `rt.model.config` inside `sim.serving`. Today that is the same dict as `rt.config`, which is why the review
+        # called it an invariant rather than a bug; a fallback turn is where the two can differ. The contract pinned
+        # here is the call itself: `_tick` hands `check` the answering model's own config object, not a re-read.
+        from caminus.ember.resident import language as langmod
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            rt.loop_gates=True
+            class Answering:
+                # a distinct config object, as a fallback's client carries: same keys, another dict
+                def __init__(self,model):self._model,self.config=model,dict(model.config)
+                def __getattr__(self,name):return getattr(self._model,name)
+            rt.model=Answering(rt.model)
+            asked=[]
+            real=langmod.check
+            def spy(runtime,gid,text,cfg=None,due=True):
+                asked.append(cfg)
+                return real(runtime,gid,text,cfg=cfg,due=due)
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(role='assistant',content=zh))
+            with unittest.mock.patch.object(langmod,'check',spy):
+                self.assertTrue(rt._tick(gid))
+            self.assertEqual(len(asked),1,'the tick censused its reply')
+            self.assertIs(asked[0],rt.model.config,'the check is handed the answering brain\'s config object')
+            self.assertIsNot(asked[0],rt.config,'not the agent config re-read: those differ on a fallback turn')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_humans_message_still_answers_a_plain_reply(self):
+        # the other side of #390's P1 fix: a row the human wrote is not marked `harness`, so a plain reply to their
+        # message is still told to carry on and still starts the streak over. Their messages did not get quieter.
+        self.gates_on()
+        self.replies(call('define_done',dict(check='the file exists')))
+        goal=self.cmd('once',['--goal','Create the file.'],code=24)
+        self.cmd('send',['Carry on and create it.','--goal-id',goal['id']])
+        self.replies(dict(role='assistant',content='On it.'),
+                     call('verify',dict(evidence='the file is there')),call('finish',dict(summary='Done.')))
+        out=self.cmd('once',['--goal-id',goal['id']])
+        self.assertEqual(out['state'],'completed')
+        events=self.cmd('events')
+        self.assertIn('plain_answer',[e['kind'] for e in events],'their message is still an answer')
+        self.assertNotIn('plain_text_pause',[e['kind'] for e in events])
+        bodies=[b for k,b in Endpoint.seen if k==self.key]
+        self.assertTrue(any('Carry on with the goal' in json.dumps(b) for b in bodies),
+                        'the answer is still told to carry on, not counted')
 
 
     def test_the_same_call_failing_twice_is_refused(self):
@@ -1588,7 +1683,7 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
         rt=Runtime(self.home)
         try:
             self.assertNotIn('browser',[t['function']['name'] for t in rt.tools])
-            self.assertNotIn('use browser',prompt.render(self.home))
+            self.assertNotIn('use browser',prompt.render(self.home,language='English',source='config'))
             with self.assertRaises(ValueError) as cm:browser.call(rt,'g',uuid.uuid4().hex,dict(action='open',url='http://x.org/'))
             self.assertIn('no Chrome',str(cm.exception))
         finally:rt.mail.close();rt.store.close()
@@ -1795,6 +1890,12 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
             inbox=[r['text'] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=?',(gid,))]
             self.assertTrue(any('read its first error' in t and 'asked for by your human' in t for t in inbox))
             self.assertTrue(rt.store.pending_request(gid,'interrupt'),'the reply being written is dropped')
+            # #390 review P1: the note is the runtime's own, not the human speaking. Inserted with three columns,
+            # `source` took its '' default (the human), so `_answering` read the advisor's note as their answer
+            # and the plain-text pause reset on a stalled goal, the very behaviour this PR fixes elsewhere.
+            rows=list(rt.store.db.execute("SELECT text,source FROM inbox WHERE goal=? AND text LIKE '%read its "
+                                          "first error%'",(gid,)))
+            self.assertEqual(rows[0]['source'],'harness','the advisor review is a harness note, not the human')
         finally:rt.mail.close();rt.store.close()
 
     def test_the_status_line_shows_a_speed_only_while_it_is_current(self):
@@ -2670,8 +2771,8 @@ for line in sys.stdin:
             cfg=json.loads((self.home/'config.json').read_text());cfg['sim']=False
             atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertNotIn('sim',[t['function']['name'] for t in rt.tools])
-            self.assertNotIn('SIM: predict',render(self.home,sim=False))
-            self.assertIn('SIM: predict',render(self.home))
+            self.assertNotIn('SIM: predict',render(self.home,sim=False,language='English',source='config'))
+            self.assertIn('SIM: predict',render(self.home,language='English',source='config'))
             self.assertEqual([h for h in rt.memory.search('zzmarker')['hits'] if h['where'].endswith('· sim')],[])
             cfg['sim']=True;atomic_json(self.home/'config.json',cfg);rt._follow_config()
             self.assertIn('sim',[t['function']['name'] for t in rt.tools])
@@ -2703,6 +2804,1056 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('sim',['--record','--change','x','--predicted','y'])['record']['status'],'recorded')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
         self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
+
+    def test_a_reply_that_slides_into_chinese_is_nudged_in_english(self):
+        # issue #354: mid-goal a reply switched to Chinese while the owner works in English. The prompt names the
+        # language; a reply whose most units are in another script is an event carrying the brain that wrote it,
+        # and the goal's next turn reads one short nudge back to English.
+        chinese='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        slid=call('terminal',dict(command='printf ok'));slid['content']=chinese
+        self.replies(slid,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        drifts=[e['data'] for e in self.cmd('events') if e['kind']=='language_drift']
+        self.assertEqual(len(drifts),1)
+        self.assertEqual((drifts[0]['script'],drifts[0]['language'],drifts[0]['nudged']),('Han','English',True))
+        self.assertEqual(drifts[0]['brain']['model'],'fixture','the brain that wrote the drift is named')
+        # the nudge rides the goal's next turn, its plan kept, and the request's prompt names English. Both reads are
+        # this test's own requests: `Endpoint.seen` is shared by every test in the run (other tests set another
+        # `language`), so the first request of the run is not necessarily this home's first.
+        sent=[body for key,body in Endpoint.seen if key==self.key]
+        body=json.dumps(sent[-1])
+        self.assertIn('[nudge #',body)
+        self.assertIn('Reply in '+REPLY_LANGUAGE,body,
+                      'the goal names no language (Latin script), so the nudge describes it (#390 P1-2)')
+        self.assertIn(REPLY_LANGUAGE,json.dumps(sent[0]))
+        self.assertEqual([x['kind'] for x in self.steers(goal['id'])],['nudge'])
+
+    def test_an_english_reply_quoting_chinese_is_not_a_drift(self):
+        # a reply that quotes a log line, a path or a word in another script is English: the census counts words,
+        # so a few CJK characters inside an English sentence stay far under the majority, and no nudge is queued.
+        quoted=call('terminal',dict(command='printf ok'))
+        quoted['content']=('The build printed \u5206\u652f\u5df2\u63a8\u9001 once, which is the Chinese for '
+                           '"the branch was pushed"; the PR is open against ember-next.')
+        self.replies(quoted,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
+        self.assertEqual(self.steers(goal['id']),[])
+
+    def test_a_fully_quoted_foreign_sentence_is_not_a_drift(self):
+        # a quotation is a citation, not the reply's language: an owner who quotes a whole foreign sentence inside a
+        # correct English reply must not be nudged, even though the quoted characters are most of its units (#354
+        # review P2). A straight apostrophe (`don't`) is not read as an opening quote.
+        from caminus.ember.resident import language
+        self.assertIsNone(language.drift(
+            "The reply said '\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002' and then opened it.",
+            ('Latin',)))
+        self.assertIsNone(language.drift('It printed \u201c\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 '
+                                         'PR\u3002\u201d in the log.', ('Latin',)))
+        self.assertEqual(language.units("Don't")[1], 2,
+                         'an apostrophe ends a run of letters: a contraction is two units')
+        quoted=call('terminal',dict(command='printf ok'))
+        quoted['content']=("The reply said '\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002' and "
+                           'then opened the pull request.')
+        self.replies(quoted,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertNotIn('language_drift',[e['kind'] for e in self.cmd('events')])
+        self.assertEqual(self.steers(goal['id']),[])
+
+    def test_every_derived_language_name_has_a_script_table(self):
+        # review P2 (r18): `check`'s "no script table" event only fires for `source == 'config'`, so a name that
+        # is DERIVED (`derive` -> `_LANG_OF`) and has no table would leave the drift check switched off with
+        # nothing in the log saying why. That branch is unreachable only while every `_LANG_OF` value has a table;
+        # this is that invariant, so adding a script to `_LANG_OF` without a table fails here rather than
+        # silently disabling the check on a derived session.
+        from caminus.ember.resident import language
+        derived=sorted(set(language._LANG_OF.values()))
+        self.assertEqual([n for n in derived if not language.named(n,'derived')['scripts']],[],'each derived name censuses')
+        # and the guard's premise holds the other way too: a DERIVED name is never read from its own spelling, so
+        # a table-less one stays `()`. A *configured* name is (r24), which is the P2's safer shape: `--to Pali`
+        # used to switch the whole check off and left a session unheld with one log line as evidence.
+        self.assertEqual(language.named('Pali','derived')['scripts'],())
+        self.assertEqual(language.named('Pali','config')['scripts'],('Latin',),'a configured name censuses its own script')
+        self.assertEqual(language.named('\u092a\u093e\u0932\u0940','config')['scripts'],('Devanagari',))
+        self.assertEqual(language.named('\u16a0\u16a2\u16a6\u16a8','config')['scripts'],(),
+                         'a name whose letters are in no known script is still off')
+
+    def test_a_multiline_quotation_stays_in_the_census_in_every_quote_form(self):
+        # review P2 (r18), then r24: bounding a quote pair to one line buys the stray-quote fix at a cost - a genuine
+        # quotation that spans lines is no longer read as a citation, so its units stay in the census and a short
+        # English reply around it measures as Han. r24 made that bound uniform: the typographic forms used to cross
+        # lines, and a pair opened in one paragraph and closed in another swallowed the prose between them (#390
+        # review P2-2, 73 characters in and 6 out). The cost is now the same in every form, and this is the
+        # boundary, measured: restating it for one form only is how this test went stale against the fix (CI
+        # resident, head 1ee6bca: the typographic half still asserted the pre-r24 behaviour). A miss would be the
+        # silent failure this feature exists to prevent, a nudge is visible and cheap, so the bound stays.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
+        body='\n'.join([zh]*3)
+        for open_q,close_q,form in (('"','"','straight'),('\u201c','\u201d','typographic')):
+            multi='The log said:\n'+open_q+body+close_q+'\nand then the PR was opened.'
+            self.assertEqual(language.drift(multi,('Latin',))[0],'Han',
+                             'a multi-line %s citation stays in the census'%form)
+            inline='The log said: '+open_q+zh+close_q+' and then the PR was opened.'
+            self.assertIsNone(language.drift(inline,('Latin',)),
+                              'the same paragraph in one-line %s quotes is a citation'%form)
+
+    def test_a_stray_straight_quote_does_not_blind_the_rest_of_the_reply(self):
+        # review P2 (r16): `_QUOTED` paired two strays across a newline and dropped everything between them, so a
+        # genuine drift after a markdown attribute (`href="x`) was never censused. The straight-quote pair is now
+        # bounded to one line: two strays on different lines no longer pair, and a real one-line citation is still
+        # dropped as before. The first assertion is the defect (old census was {'Latin': 4}, no drift); the second
+        # is the guard that the fix did not stop quotations being citations.
+        from caminus.ember.resident import language
+        han=('\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
+             '\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002')
+        reply='The template is href="x and it works.\n'+han+'\nDone, see the log."'
+        self.assertEqual(language.drift(reply,('Latin',)),('Han',0.5333333333333333),
+                         'a stray quote above the reply does not hide the drift below it')
+        self.assertEqual(language.units(language.prose('He said "'+han+'" and opened it.'))[0]['Latin'],5,
+                         'a one-line quotation is still a citation and stays out of the census')
+
+    def test_short_straight_quoted_labels_are_terms_and_a_language_quote_is_still_a_citation(self):
+        # review P2 (r23): the straight-quote pair is only a quotation because of its punctuation, and a narration
+        # that labels four flags (`set the flag "开" and the label "关"`) put a drifting reply's every foreign unit
+        # inside one-line pairs, so `prose()` dropped them and the census was pure English: a drift that never fired.
+        # The span's units decide now. The first probe is the defect (old census was {'Latin': 2}, drift None).
+        from caminus.ember.resident import language
+        labels='Flags "\u5f00" "\u5173" "\u505c" "\u8d70" set.'
+        self.assertEqual(language.units(labels),({'Latin': 2, 'Han': 4}, 6),
+                         'a short straight-quoted label is the reply\'s own word, not a citation')
+        self.assertEqual(language.drift(labels,('Latin',)),('Han',.6666666666666666),
+                         'a reply whose foreign units are all short quoted labels is still a drift')
+        # the floor is length, not script: English labels in English prose stay English, and `don't`/`it's` are
+        # still apostrophes (the closing-quote guard above), so the count is the narration around them
+        self.assertIsNone(language.drift('Set the flag "on" and the label "off" today.',('Latin',)),
+                          'labels in the owner\'s own script change nothing')
+        # and a whole quoted sentence is still a citation at any length: the floor must not re-open r21
+        han='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002'
+        self.assertIsNone(language.drift('He said "'+han+'" and opened it.',('Latin',)),
+                          'a quoted foreign sentence is still a citation')
+        self.assertNotIn('Han', language.units('He said "'+'\u5f00\u5173\u505c\u8d70\u5206\u652f\u5df2\u63a8\u9001'+'" x.')[0],
+                         'ten units clears the floor: a quote of that length is a citation, not a label')
+
+    def test_a_typographic_quotation_is_bounded_to_one_line_and_a_short_label_is_kept(self):
+        # review P2-2 (r24): the typographic pair had no line bound, unlike the straight pair, so a quotation opened
+        # in one paragraph and closed in another censused away the prose between them (`“Run summary:\n…\n” done`
+        # was 39 characters in, 6 out) and a reply could never drift inside it. The line bound is the fix; a quoted
+        # sentence on one line is still a citation, and a short curly-quoted label is still the reply's own word.
+        from caminus.ember.resident import language
+        han='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\uff0c\u8bf7\u68c0\u67e5\u65e5\u5fd7\u3002'
+        crossing='\u201cRun summary:\n'+han+'\u201d done'
+        self.assertEqual(language.drift(crossing,('Latin',)),('Han',0.7647058823529411),
+                         'a curly quote that crosses a line does not hide the drift inside it')
+        self.assertEqual(language.units(crossing),({'Latin': 4, 'Han': 13}, 17),
+                         'the prose between the two lines stays in the census')
+        # the line bound must not re-open the citation rule: the same span on one line is a quotation
+        one_line='\u201c'+han.replace('\n',' ')+'\u201d done'
+        self.assertEqual(language.units(one_line),({'Latin': 1}, 1),
+                         'a one-line curly quotation is still a citation')
+        # and the floor is one rule for every form: `“开”` is the same label as `"开"` (#354 review P2, r23)
+        labels='Flags \u201c\u5f00\u201d \u201c\u5173\u201d set.'
+        self.assertEqual(language.units(labels),({'Latin': 2, 'Han': 2}, 4),
+                         'a short curly-quoted label is not a citation')
+        self.assertIsNone(language.drift(labels,('Latin',)),
+                          'nor does a short curly-quoted label make English prose a drift')
+
+    def test_a_reply_is_censused_in_one_prose_pass_and_prose_is_not_idempotent(self):
+        # rev-muse P2 on `58d39b8`: `units()` handed `prose(text)` to `_census`, which applied `prose()` again, and
+        # the quote floor reached the same private counter, so the text the checker recorded and the text the floor
+        # measured were two passes whose agreement nothing pinned. Ordinary replies strip to a fixed point, so no
+        # wrong nudge was reproduced then; a quote/tick shape like this one is not a fixed point (`"`"`x开x"` reads
+        # as `" x开x"` once, `' '` twice), and the old double pass censused the whole reply as nothing at all.
+        from caminus.ember.resident import language
+        q,tick='"','`'
+        tricky=q+tick+q+tick+'x\u5f00x'+q
+        self.assertEqual(language.prose(language.prose(tricky)),' ',
+                         'the shape this pins: a second `prose()` pass empties what the first one kept')
+        self.assertEqual(language.prose(tricky),q+' x\u5f00x'+q,'one pass keeps the reply it reads')
+        self.assertEqual(language.units(tricky),({'Latin': 2, 'Han': 1}, 3),
+                         'one prose pass per reply: the old census was ({}, 0) here (the defect)')
+        # the floor is still on the span's units, and the two forms of the r23 label pin still read the same
+        labels='Flags "\u5f00" "\u5173" "\u505c" "\u8d70" set.'
+        self.assertEqual(language.units(labels),({'Latin': 2, 'Han': 4}, 6),'a short label is still a term')
+        # and the clause pass under a spaceless owner takes the clauses `prose()` already produced
+        self.assertEqual(language.drift('\u5206\u652f\u5df2\u63a8\u9001 "ok" \u73b0\u5728\u5f00 PR\u3002',('Han',)),None,
+                         'a borrowed Latin term inside a Han clause is a term, not a drift')
+        mixed='\u5df2\u63a8\u9001\u3002We pushed the branch and opened the pull request for review.\u3002'
+        hit=language.drift(mixed,('Han',))
+        self.assertEqual(hit[0],'Latin','a clause that is another script is still the reply switching')
+        self.assertAlmostEqual(hit[1],11/14,places=6,msg="the share is the sum of the foreign clause's units")
+
+    def test_the_prompt_op_and_a_live_session_name_the_same_language(self):
+        # review P2 (r16): `agent prompt` reads the language through `language.from_home` and a live session
+        # through `language.owner`; they agree by construction (config `language`, then the same goal window
+        # through `derive`) but nothing bound them. This reads ONE home through both for the three sources -
+        # derived goals, a named config, and a config the session cannot read - so a change to either path alone
+        # fails here rather than shipping a prompt that disagrees with the session.
+        from caminus.ember.resident import language
+        from caminus.ember.resident.store import atomic_json
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'],language.from_home(self.home)['name'],
+                             'a derived name is the same through both paths')
+        finally:
+            rt.mail.close();rt.store.close()
+        cfg=json.loads((self.home/'config.json').read_text())
+        cfg['language']='French';atomic_json(self.home/'config.json',cfg)
+        rt=Runtime(self.home)
+        try:
+            self.assertEqual((language.owner(rt)['name'],language.from_home(self.home)['name']),
+                             ('French','French'),'a named language is the same through both paths')
+        finally:
+            rt.mail.close();rt.store.close()
+        cfg.pop('language',None);cfg['sim']=True;atomic_json(self.home/'config.json',cfg)
+        (self.home/'config.json').write_text('{"language": ')
+        self.assertIn('config.json',self.cmd('prompt',[],code=1)['error'],
+                      'a corrupt config is refused by the prompt op, as by `agent language`')
+
+    def test_an_unbalanced_fence_is_blinded_like_a_closed_one(self):
+        # a reply cut off mid-block (or a ```markdown that never closes) has no closing fence; the code body is not
+        # the reply's language, so the narration must be censused alone. With the body left in, its CJK literals
+        # outweigh the narration and a correct English reply drifts (#354 review P2).
+        from caminus.ember.resident import language
+        fenced=('Checked the store, then wrote the fixture:\n```python\ndoc = "\u6587\u4ef6\u5728"\n'
+                'more("\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002")\n')
+        self.assertIsNone(language.drift(fenced, ('Latin',)))
+        closed=('Checked the store, then wrote the fixture:\n```python\ndoc = "\u6587\u4ef6\u5728"\n```\n'
+                'The branch is pushed and the pull request is open.')
+        self.assertIsNone(language.drift(closed, ('Latin',)))
+        # narration before the fence really in the other script is still held
+        self.assertEqual(language.drift('\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002\n```\ncode()\n',
+                                        ('Latin',))[0], 'Han')
+        # and text after an unterminated fence is the block's, not the reply's, so it is not censused (the cost of
+        # blinding a block with no closing fence: a reply cut off mid-block is read by its narration alone)
+        self.assertIsNone(language.drift('Done:\n```\ncode()\n\n\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR\u3002',
+                                         ('Latin',)))
+
+    def test_a_goal_that_keeps_drifting_is_nudged_again_only_after_the_interval(self):
+        # a reply that keeps drifting is detected on every turn, so the interval counts from the last *nudged*
+        # drift (not the last detection): turn 2 drifts but is not nudged, turn 4 is nudged again. Counting from
+        # the detection would push the next nudge back on every turn and never fire a second time.
+        from caminus.ember.resident import language
+        chinese='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        turns=[]
+        for _ in range(4):
+            turn=call('terminal',dict(command='printf ok'));turn['content']=chinese;turns.append(turn)
+        self.replies(*turns,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        self.assertEqual(goal['state'],'completed')
+        drifts=[e['data'] for e in self.cmd('events') if e['kind']=='language_drift']
+        self.assertTrue(len(drifts)>=3,'every drifting reply is an event')
+        self.assertEqual([s['kind'] for s in self.steers(goal['id'])],['nudge','nudge'],'two nudges read, one per interval')
+        self.assertTrue(drifts[0]['nudged'] and not drifts[1]['nudged'],'the turn after a nudge is detected, not nudged')
+        self.assertTrue(any(d['nudged'] for d in drifts[language.DRIFT_EVERY:]),'the interval brings the nudge back')
+
+    def test_calls_finish_reads_every_shape_the_normalizer_emits(self):
+        # #390 review P2: `_calls_finish` reads a call's name over the OpenAI and flat shapes, so an adapter shape
+        # neither covers would read as "not a finish" and the drift nudge it queued would defer the `_finish` on the
+        # same tick. Every adapter reply passes through `Model._message` before `_tick` sees it (`complete` returns
+        # its output for OpenAI, the streamed reply, and the Anthropic tool_use blocks): it validates each call and
+        # emits one shape, so the flat read is the fallback for hand-built replies, not a guess about adapters.
+        from caminus.ember.resident import model as mod
+        from caminus.ember.resident.runtime import _calls_finish
+        m=mod.Model(dict(endpoint='http://127.0.0.1:9/v1'))
+        call=dict(id='c1',type='function',function=dict(name='finish',arguments='{}'))
+        for raw in (dict(content='',tool_calls=[call]),                                  # OpenAI, content empty
+                    dict(content=[dict(type='text',text='done')],tool_calls=[call])):    # typed blocks
+            out=m._message(raw)
+            self.assertTrue(_calls_finish(out['tool_calls']),raw)
+            self.assertEqual([c['function']['name'] for c in out['tool_calls']],['finish'],
+                             'the normalizer emits one shape whatever the adapter sent')
+        # The shapes the review named never reach the tick: the normalizer refuses them instead of storing a reply
+        # whose finish would read as "not a finish".
+        for bad in (['finish'],[dict(id='c3',function='finish')],[dict(id='c4',function=dict(name=7,arguments='{}'))]):
+            with self.assertRaises((ValueError,TypeError)):
+                m._message(dict(content='done',tool_calls=bad))
+        # A reply with no finish call is false in every shape, and the flat shape hand-built replies use still reads.
+        self.assertFalse(_calls_finish([dict(id='c5',type='function',function=dict(name='terminal',arguments='{}'))]))
+        self.assertFalse(_calls_finish(None))
+        self.assertTrue(_calls_finish([dict(name='finish',arguments='{}')]))
+
+    def test_the_language_setting_names_the_prompt_and_auto_derives_it_again(self):
+        # the owner's language is a session setting (`agent language --to LANGUAGE`), read by `agent prompt`
+        # before a turn, so the setting and the prompt cannot disagree; `--auto` drops it and the owner's own
+        # goals name the language again.
+        out=self.cmd('language',[])
+        self.assertEqual((out['language'],out['scripts'],out['source'],out['check']),
+                         ('English',['Latin'],'default',True),'no setting and no derivation: the default')
+        self.assertIn('--to LANGUAGE',out['note'],'the default says it is one, and how to name a language')
+        text=self.cmd('prompt',[])['prompt']
+        self.assertNotIn('Your human works in',text,'the default names no language (#390 review P1-2)')
+        self.assertIn(REPLY_LANGUAGE,text)
+        out=self.cmd('language',['--to','Chinese'])
+        self.assertEqual(out,dict(language='Chinese',scripts=['Han'],source='config',check=True))
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
+        self.assertIn('Your human works in Chinese',self.cmd('prompt',[])['prompt'])
+        self.cmd('language',['--to','Chinese','--auto'],code=1)
+        out=self.cmd('language',['--auto'])
+        self.assertEqual((out['language'],out['scripts'],out['source'],out['check']),
+                         ('English',['Latin'],'default',True))
+        self.assertNotIn('language',json.loads((self.home/'config.json').read_text()))
+
+    def test_a_goal_that_pastes_another_script_does_not_name_the_session(self):
+        # `derive` must not count a pasted excerpt (a fenced block, an inline span, a log line) as the owner's
+        # voice: letters over prose, so a goal that is really Chinese still names Chinese and an English goal
+        # around a Chinese log line does not.
+        from caminus.ember.resident import language
+        self.assertIsNone(language.derive(['Fix the failing push step. Log: \u6d4b\u8bd5\u5931\u8d25\u4e86\uff0c'
+                                           '\u5206\u652f\u5df2\u63a8\u9001\uff0c\u8bf7\u68c0\u67e5\u3002']),
+                          'a pasted CJK log line does not outvote the owner')
+        self.assertEqual(language.derive(['\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                                          '\u7136\u540e\u5f00 PR\u3002'])['name'],'Chinese','a Chinese goal still names it')
+        self.assertIsNone(language.derive(['Fix the failing push step. ```\u5206\u652f\u5df2\u63a8\u9001\u3002```']),
+                          'a fenced block is not the owner\'s prose')
+        self.assertIsNone(language.derive(['ok']),'too few letters cannot name a language')
+        # review P2 (answered, not a defect): a reply of pure kana with no kanji is Japanese, not Chinese.
+        # `per` holds no Han at all there, so the Han branch never runs and the Kana majority decides.
+        self.assertEqual(language.derive(['\u306f\u3044\u3001\u305d\u3046\u3067\u3059\u3002'])['name'],'Japanese',
+                         'pure kana, no kanji, is still Japanese')
+        self.assertEqual(language.derive(['\u305d\u3046\u3067\u3059\u306d\u3001\u308f\u304b\u308a\u307e\u3057\u305f\u3002'
+                                          '\u30c6\u30b9\u30c8\u3092\u5b9f\u884c\u3057\u3066\u304b\u3089\u30d7\u30c3'
+                                          '\u30b7\u30e5\u3057\u307e\u3059\u3002'])['name'],'Japanese')
+
+    def test_a_latin_script_corpus_names_no_language_and_says_so(self):
+        # one Latin script is English, Spanish, French and German alike: letters cannot name a language from
+        # it, so a Spanish owner keeps the documented default instead of being told they work in English, and
+        # `agent language` says the answer is the default rather than a derivation.
+        from caminus.ember.resident import language
+        self.assertIsNone(language.derive(['Arregla el paso de push y revisa el log, por favor. El objetivo '
+                                           'esta en el informe, revisalo y dime.']),
+                          'a Latin corpus names no language')
+        self.assertIsNone(language.derive(['Fix the failing push step and open the pull request against ember-next.']),
+                          'English prose is a Latin corpus too: the default, not a derivation')
+        out=self.cmd('language',[])
+        self.assertEqual((out['language'],out['source']),('English','default'))
+        self.assertIn('--to LANGUAGE',out['note'])
+
+    def test_a_chinese_owners_reply_with_english_terms_is_not_a_drift(self):
+        # a reply in a spaceless script borrows Latin terms inside its own clauses (git push, pytest paths,
+        # gh commands): those are terms, not the reply switching language, and counting them nudged a correct
+        # Chinese reply back to Chinese. A clause that is in another script entirely is still a drift.
+        from caminus.ember.resident import language
+        zh=('\u8bf7\u8fd0\u884c pytest tests/ember/test_resident.py\uff0c\u7136\u540e\u7528 git push origin '
+            'pr-390 \u63a8\u9001\u5206\u652f\uff0c\u518d\u7528 gh pr create --base ember-next\u3002')
+        self.assertIsNone(language.drift(zh,('Han',)),'English terms inside Chinese clauses are not a drift')
+        self.assertEqual(language.drift('I pushed the branch and opened the pull request against ember-next, '
+                                        'please review it.',('Han',))[0],'Latin','an English reply still drifts')
+        # review P2 (r15): dropping every Latin run of every clause that carries one Han unit went too far. An
+        # English reply with one Han term per clause is English, not Han, and was measured as a Han reply with
+        # no drift at all. The clause decides: Latin that out-measures the owner's script in its own clause is
+        # that clause's language. The Chinese shapes above stay held, which the assertions above pin.
+        drifted='We pushed \u5206\u652f the branch. The pull \u8bf7\u6c42 request is open. Please \u5ba1\u67e5 ' \
+                'review it, thanks.'
+        self.assertEqual(language.drift(drifted,('Han',)),('Latin',0.6842105263157895),
+                         'a mostly-English reply is English however many Han terms it quotes')
+        for held in ('\u6211\u6539\u4e86 cli.py \u548c runtime.py \u4e24\u4e2a\u6587\u4ef6\uff0c'
+                     'pytest \u5168\u8fc7\u4e86\uff0c\u73b0\u5728\u7b49 CI\u3002',
+                     '\u8fd9\u4e2a\u95ee\u9898\u5728 https://github.com/jdominick05/caminus/pull/390 '
+                     '\u91cc\uff0c\u5df2\u7ecf\u4fee\u4e86\u3002'):
+            self.assertIsNone(language.drift(held,('Han',)),
+                              'a Chinese clause with more Han than Latin still borrows its terms: %s' % held)
+        # the reverse shape the review describes cannot come up: `_without_borrowed` runs only for a spaceless
+        # owner's script, so an English owner's reply is measured as written and a Latin run is never dropped.
+        english_owner='The \u6f22\u5b57 policy is complex. Each \u5b57 clause carries a glyph.'
+        self.assertIsNone(language.drift(english_owner,('Latin',)),
+                          'a Latin owner is measured as written: this reply is 8 Latin of 10 units')
+
+    def test_a_short_reply_entirely_in_another_script_is_still_a_drift(self):
+        # review P2: MIN_UNITS was the floor for both shapes, so a reply with no unit in the owner's script at all
+        # ("好的。完成了。" is 5 units) was never an event or a nudge, however many arrived. A whole reply in
+        # another script is that language from WHOLE_MIN_UNITS on; the 6-unit floor still holds the mixed shape,
+        # where a word or a path in another script is not a language.
+        from caminus.ember.resident import language
+        self.assertEqual(language.units('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002')[1],5,'five Han units')
+        self.assertEqual(language.drift('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002',('Latin',)),('Han',1.0),
+                         'a short reply entirely in another script is a drift')
+        self.assertIsNone(language.drift('\u6587\u4ef6',('Latin',)),
+                          'a bare two-character path is a fragment, not a reply (review P2)')
+        self.assertEqual(language.drift('\u6587\u4ef6\u5728',('Latin',)),('Han',1.0),
+                         'a reply of three units and none of the owner\'s is a drift')
+        self.assertIsNone(language.drift('\u597d',('Latin',)),'one unit cannot name a language')
+        self.assertIsNone(language.drift('ok \u6587\u4ef6',('Latin',)),
+                          'a short reply that also has the owner\'s units keeps the 6-unit floor')
+        self.assertIsNone(language.drift('```\n\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002\n```',('Latin',)),
+                          'a fenced block is still not prose')
+
+    def test_the_floor_decision_reads_the_owners_own_units_not_the_total(self):
+        # review P2: the mixed-shape floor tested the reply's total, so a mostly-Chinese reply whose only
+        # owner-script units were ONE borrowed token ("文件在 ok": three Han and one `ok`) passed both floors and
+        # was never held. The decision is on the owner's own units: 0 or 1 -> the whole-reply floor, 2+ -> the
+        # mixed floor. The table pins the verdict for each shape so a later edit cannot regroup the rule.
+        from caminus.ember.resident import language
+        cases = [
+            # (reply, owner scripts, expected, why)
+            ('\u6587\u4ef6', ('Latin',), None, 'two units, a fragment, under the whole floor'),
+            ('\u597d', ('Latin',), None, 'one unit cannot name a language'),
+            ('\u6587\u4ef6\u5728', ('Latin',), ('Han', 1.0), 'three units, none the owner\'s: whole floor met'),
+            ('\u597d\u7684\u3002\u5b8c\u6210\u4e86\u3002', ('Latin',), ('Han', 1.0), 'five units, none the owner\'s'),
+            ('\u6587\u4ef6\u5728 ok', ('Latin',), ('Han', .75), 'one borrowed owner unit does not buy the mixed floor'),
+            ('ok \u6587\u4ef6', ('Latin',), None, 'two owner units are content: the mixed floor holds it'),
+            ('\u6587\u4ef6 missing', ('Latin',), None, 'two owner units, four units total: held'),
+            ('Is \u5df2\u5b8c\u6210 right?', ('Latin',), None, 'two owner units, five total: held'),
+            ('\u6587\u4ef6\u5728 is here now', ('Latin',), None, 'share is exactly .5: not a strict majority'),
+            ('ok \u597d\u7684', ('Latin',), None, 'share is exactly .5 even with one owner unit'),
+        ]
+        for text, scripts, expected, why in cases:
+            self.assertEqual(language.drift(text, scripts), expected, '%s: %r' % (why, text))
+        # the two shapes the earlier rounds fixed must survive this table
+        self.assertEqual(language.drift('\u597d\u7684\u3002\u8bf7\u68c0\u67e5 branch: pr-390-fix.', ('Latin',)),
+                         ('Han', .625), 'a short mixed reply with a borrowed clause is still a drift')
+        # the reverse direction: an English reply to a Chinese owner has none of the owner's units, so the
+        # whole-reply floor applies and it drifts; a one-word English reply is still under that floor
+        self.assertEqual(language.drift('I pushed the branch and opened the pull request, please review it.',
+                                        ('Han',)), ('Latin', 1.0),
+                         'an English reply to a Chinese owner is a drift')
+        self.assertIsNone(language.drift('ok', ('Han',)), 'one unit cannot name a language, either way')
+
+    def test_a_deleted_goal_does_not_leave_a_stale_language_cached(self):
+        # review P2: `owner` cached on COUNT(*) FROM goals, so deleting one goal and adding another kept the
+        # count while the first-8 window changed, and the cached language outlived the goals that produced it
+        # (`agent language` reads the window uncached and disagreed). The key is the window's own ids.
+        from caminus.ember.resident import language
+        rt = Runtime(self.home)
+        try:
+            en = 'Fix the failing push step and open the pull request against ember-next.'
+            for _ in range(7):
+                rt.store.enqueue(en)
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'], 'English',
+                             'seven Latin goals and one Chinese: the prefix names no language')
+            key = rt._language_owner[0]
+            self.assertEqual(len(key), 8, 'the cache key is the whole window, not its size')
+            ids = [r['id'] for r in rt.store.db.execute(
+                'SELECT id FROM goals ORDER BY created, id LIMIT 8')]
+            for gid in ids[:7]:                         # (replace seven, keep the count at eight)
+                rt.store.db.execute('DELETE FROM goals WHERE id=?', (gid,))
+            for _ in range(7):
+                rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                                 '\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(rt.store.db.execute('SELECT COUNT(*) FROM goals').fetchone()[0], 8,
+                             'the goal count is unchanged: a count key cannot see this')
+            self.assertEqual(language.owner(rt)['name'], 'Chinese',
+                             'the window changed under the same count: re-derive, do not serve the cache')
+            self.assertEqual(language.from_home(self.home)['name'], 'Chinese',
+                             'the CLI agrees with the turn after the window changed')
+        finally:
+            rt.mail.close(); rt.store.close()
+
+    def test_a_nudge_is_not_forgotten_by_a_long_run_of_drifting_replies(self):
+        # review P2: the last nudged drift was found in a LIMIT 32 window of the newest drifts, so a goal that
+        # drifted 32 more times since its nudge lost it; `last` became None and `since` counted every assistant
+        # turn of the goal, which fired the next nudge early. The log is asked for the last nudged seq instead.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            brain=dict(provider='fixture',model='fixture',effort='')
+            for _ in range(3):                                  # (the nudge below is turn 3 of this goal)
+                rt.store.event('assistant',dict(content='ok'),gid)
+            rt.store.event('language_drift',dict(script='Han',language='English',share=1.0,brain=brain,nudged=True),gid)
+            for _ in range(40):                                 # (more drifts than the old window held)
+                rt.store.event('language_drift',dict(script='Han',language='English',share=1.0,brain=brain,nudged=False),gid)
+            rt.store.event('assistant',dict(content='ok'),gid)  # (one turn since the real nudge)
+            self.assertEqual(language.check(rt,gid,zh),'','one turn after a nudge is not due, whatever came between')
+            for _ in range(2):                                  # (now DRIFT_EVERY turns have passed)
+                rt.store.event('assistant',dict(content='ok'),gid)
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'the cadence counts from the real nudge')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_brace_in_the_language_setting_reaches_the_prompt_literally(self):
+        # review P2 (could not be reproduced): str.format substitutes the value and does not parse it again, so a
+        # configured `{notakey}` is text in the prompt, not a KeyError on every turn. Pinned so a later second
+        # formatting pass over the rendered prompt cannot reintroduce it silently.
+        from caminus.ember.resident.prompt import render
+        for value in ('{notakey}', '{sim_head}', 'a{b}c}'):
+            text=render(str(self.home),sim=True,language=value,source='config')
+            self.assertIn('works in %s.' % value,text,'the setting reaches the prompt as written')
+            self.assertIn('## SIM: predict',text,'the SIM section is still filled by the one format pass')
+
+    def test_a_drift_on_the_reply_that_ends_the_goal_queues_no_nudge(self):
+        # review P2: `check` ran before the finish check, so a plain reply (no tool call) that ends the goal also
+        # queued a nudge for a turn that never comes. The drift is still an event; `nudged` stays false.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.assertEqual(language.check(rt,gid,zh,due=False),'','no nudge for a turn that cannot come')
+            rows=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(rows),1,'the drift is still an event')
+            self.assertFalse(rows[0]['nudged'],'and it does not advance the cadence')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'the next turn that comes is nudged')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_plain_reply_that_finishes_the_goal_queues_no_nudge_without_loop_gates(self):
+        # review P2 (a regression from the `_plain_dispatch` refactor): `follows` started True and was only
+        # overwritten inside the loop-gated branch. With the loop gates off a plain reply finishes the goal, so a
+        # drifting one still queued a nudge, and the `_finish` on the same tick found an unconsumed inbox row and
+        # deferred the completion to a turn that never comes. The drift is an event, `nudged` is false, and the
+        # goal completes on this tick.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            self.assertFalse(rt.loop_gates)
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(gid))
+            self.assertEqual(rt.store.goal(gid)['state'],'completed','the plain reply finished the goal')
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1)
+            self.assertFalse(drifts[0]['nudged'],'no turn follows the reply, so the drift is not nudged')
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[],'no nudge is left to defer the finish')
+            self.assertFalse(any(e['kind']=='completion_deferred' and e['goal']==gid for e in rt.store.events()))
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_loop_gated_plain_reply_is_nudged_because_a_turn_follows_it(self):
+        # review P2: `due=bool(reply.get('tool_calls'))` assumed a plain reply ends the goal. A goal whose loop
+        # gates are on keeps running after one (`_plain_reply` nudges it back to work), so a drifting plain reply
+        # left `nudged=False`: the nudge came one turn late and the cadence counted from the wrong turn. `due` now
+        # follows `_plain_reply`'s own dispatch, and only a reply that really ends the goal is left unnudged.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            rt.loop_gates=True
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(gid))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1)
+            self.assertTrue(drifts[0]['nudged'],'a plain reply that leaves a turn is nudged')
+            rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
+            self.assertTrue(any('Reply in '+REPLY_LANGUAGE in t for t in rows),'the nudge is queued for that turn')
+            self.assertNotIn(rt.store.goal(gid)['state'],('completed','paused'),'the goal kept running')
+            self.assertTrue(rt._plain_dispatch(gid)[1],'the first plain reply leaves a turn behind')
+            # the shapes `_plain_reply` branches on decide `due`; a separate goal so its events do not overlap
+            g2=rt.store.enqueue('Second goal.')
+            rt.plain_replies[g2]=2
+            self.assertFalse(rt._plain_dispatch(g2)[1],'the third plain reply in a row pauses the goal: no turn follows')
+            rt.plain_replies.pop(g2)
+            rt.store.event('finished',{},g2)
+            rt.store.event('goal_continued',{},g2)
+            rt.store.event('assistant',dict(content='ok'),g2)
+            self.assertTrue(rt._plain_dispatch(g2)[1],'a reopened goal is prompted for one more turn')
+            rt.__dict__.setdefault('_reopen_prompted',set()).add(g2)
+            self.assertFalse(rt._plain_dispatch(g2)[1],'its second plain reply completes the goal: no turn')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_drifting_reply_that_schedules_is_not_nudged_awake(self):
+        # #390 Opus review P1-1: a drift nudge is an unconsumed inbox row, and `agenda.wake_due` wakes a parked
+        # goal on any such row (`early = ... inbox WHERE consumed=0`). A drifting reply that calls `schedule`
+        # therefore woke the goal on its own nudge instead of parking it: `woke {early: true}` and a paid turn
+        # where it had asked to sleep. `follows` withholds the nudge for that reply as it does for `finish`: the
+        # drift is still an event, and the nudge rides the wake-up turn it was meant to hold.
+        from caminus.ember.resident.runtime import _calls_schedule
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        for calls in ([dict(id='c6',type='function',function=dict(name='schedule',arguments='{}'))],   # OpenAI shape
+                      [dict(name='schedule',arguments='{}')],                                          # flat, hand-built
+                      None):
+            self.assertEqual(_calls_schedule(calls),bool(calls),calls)
+        self.assertFalse(_calls_schedule([dict(id='c7',function=dict(name='finish',arguments='{}'))]))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            turn=call('schedule',dict(after_minutes=10,note='check the build log'))
+            turn['content']=zh
+            self.replies(turn)
+            self.assertTrue(rt._tick(gid),'the reply was taken')
+            self.assertTrue(rt._tick(gid),'the schedule action ran')
+            self.assertIsNotNone(rt.store.goal(gid)['wake_at'],'the goal parked itself')
+            self.assertFalse(rt._tick(gid),'a parked goal takes no turn')
+            self.assertFalse(any(e['kind']=='woke' and e['data']['early'] for e in rt.store.events()),
+                             'the nudge did not wake it early')
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[],'no harness nudge waits in the inbox')
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1,'the drift is still an event')
+            self.assertFalse(drifts[0]['nudged'],'and no nudge was queued for a parked goal')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_store_error_during_the_drift_check_loses_the_event_not_the_turn(self):
+        # review P2: check() ran three event queries and the insert with no guard, after the reply was already
+        # recorded and before the inbox write, so a locked db or a schema drift raised out of runtime._tick and the
+        # turn died mid-tool-call. owner() already treats sqlite3.Error as tolerable; check() now does too: the
+        # event is lost for that turn and the next one detects the drift again, which beats a dead turn.
+        import sqlite3
+        import types
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        real=rt.store
+        def boom(*a,**k):
+            raise sqlite3.Error('database is locked')
+        try:
+            gid=real.enqueue('Open the pull request against ember-next.')
+            rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=boom)
+            # a failed read or insert is still no exception, and since r18 it is no lost nudge either: the cadence
+            # is unknowable, but the drift is real and the caller writes the inbox row itself
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'a locked store is still a nudge')
+            rt.store=types.SimpleNamespace(db=real.db,event=boom)   # (the queries read, the insert is refused)
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'a refused insert is still a nudge')
+            rt.store=real
+            self.assertEqual([r[0] for r in real.db.execute(
+                "SELECT COUNT(*) FROM events WHERE goal=? AND kind='language_drift'",(gid,))],[0],
+                'neither failed call wrote an event')
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),
+                          'the next turn with a working store detects the drift again')
+        finally:
+            rt.store=real
+            rt.mail.close();rt.store.close()
+
+    def test_a_store_error_during_the_drift_check_is_recorded_not_only_swallowed(self):
+        # review P2 (r6): the cadence query and the drift write sat in one `except sqlite3.Error: return ''`, so a
+        # locked store lost the event with no trace and the per-brain drift rate -- the number this check is
+        # measured by -- under-reported silently. The failure is now its own event, best effort: when the store is
+        # what failed, the record fails the same way and is lost, and that is still no second exception.
+        # review P2 (r18): `return ''` also lost the NUDGE the turn was due for, and the retry path only comes
+        # back after another DRIFT_EVERY assistant turns. The cadence read is the thing that failed; the drift
+        # itself was already measured, so a due turn gets the nudge anyway and the caller writes the inbox row in
+        # its own transaction. The event is still lost (no store), which is the r6 record's own best effort.
+        import sqlite3
+        import types
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        real=rt.store
+        def boom(*a,**k):
+            raise sqlite3.Error('database is locked')
+        try:
+            gid=real.enqueue('Open the pull request against ember-next.')
+            rt.store=types.SimpleNamespace(db=types.SimpleNamespace(execute=boom),event=real.event)
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),
+                          'a locked store is still no exception, and no lost nudge either')
+            errs=[json.loads(r[0]) for r in real.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='drift_check_error'",(gid,))]
+            self.assertEqual(len(errs),1,'the lost drift is recorded, not only swallowed')
+            self.assertIn('database is locked',errs[0]['error'])
+            self.assertEqual(errs[0]['script'],'Han','the record says what the drift was')
+            rt.store=real
+            self.assertEqual([r[0] for r in real.db.execute(
+                "SELECT COUNT(*) FROM events WHERE goal=? AND kind='language_drift'",(gid,))],[0],
+                'no drift event was invented')
+        finally:
+            rt.store=real
+            rt.mail.close();rt.store.close()
+
+    def test_the_plain_dispatch_and_the_language_check_are_one_predicate(self):
+        # review P2 (r6): `_plain_continues` copied `_plain_reply`'s branches, so a later change to one could leave
+        # the other saying a turn comes when none does -- and the nudge it queues would defer the `_finish` on the
+        # same tick. They are one function now: `_plain_reply` dispatches on what `_plain_dispatch` returns. A copy
+        # could not follow a patched dispatch; this asserts the single predicate by moving it.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal whose reply is plain.')
+            rt._plain_dispatch=lambda g: ('asked', False, 0)      # (the branch `_answering` would not pick here)
+            self.assertTrue(rt._plain_reply(gid))
+            last=rt.store.goal(gid)['messages'][-1]['content']
+            self.assertIn('Carry on with the goal',last,'`_plain_reply` took the branch the dispatch named')
+            kinds=[r[0] for r in rt.store.db.execute(
+                "SELECT kind FROM events WHERE goal=? AND kind='plain_answer'",(gid,))]
+            self.assertEqual(kinds,['plain_answer'])
+            # the count is the dispatch's too: a patched count of 3 pauses, it is not recomputed from plain_replies
+            g2=rt.store.enqueue('A second goal.')
+            rt._plain_dispatch=lambda g: ('', False, 3)
+            self.assertTrue(rt._plain_reply(g2))
+            self.assertEqual(rt.store.goal(g2)['state'],'paused','the dispatch count reached PLAIN_TEXT_LIMIT')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_the_tick_takes_the_drift_nudge_from_the_plain_dispatch_not_from_its_own_copy(self):
+        # review P2 (r12): `_tick` decided `due` itself and `_plain_reply` decided again in prose of its own; a
+        # branch added to one would leave the other saying a turn comes when none does, and the nudge queued for
+        # that turn defers the `_finish` on the same tick. `_tick` now reads `turn` from `_plain_dispatch`, the
+        # predicate `_plain_reply` dispatches on: this moves that predicate under `_tick` and asserts the nudge
+        # follows it, not a re-derivation.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            rt.loop_gates=True
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            rt._plain_dispatch=lambda g: ('asked', False, 0)     # (a branch whose reply leaves no turn)
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(gid))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1,'the drift is an event whatever the branch')
+            self.assertFalse(drifts[0]['nudged'],'no turn follows the reply the dispatch named')
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[],
+                'no nudge is left for a turn that never comes')
+            g2=rt.store.enqueue('A second goal, whose reply leaves a turn.')
+            rt._plain_dispatch=lambda g: ('', True, 1)           # (a branch that does leave one)
+            self.replies(dict(role='assistant',content=zh))
+            self.assertTrue(rt._tick(g2))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(g2,))]
+            self.assertEqual(len(drifts),1)
+            self.assertTrue(drifts[0]['nudged'],'the turn the dispatch named is the one nudged')
+            rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(g2,))]
+            self.assertTrue(any('Reply in '+REPLY_LANGUAGE in t for t in rows),rows)
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_finish_call_on_a_drifting_reply_queues_no_nudge_that_would_defer_it(self):
+        # review P1 (r13): `follows` started True for every tool-call reply, but a reply that calls `finish`
+        # ends the goal on this very tick, and `_finish` defers whenever an unconsumed inbox row waits: the
+        # drift nudge written a few lines earlier would defer the completion it precedes by a paid turn (or
+        # for good, if the daemon stops). The drift is still an event; only the nudge is withheld.
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            # The fixture's loop gates are off: a `finish` call reaches `_finish` without a `define_done` first,
+            # so the goal really completes on this tick (with the gates on it would be refused before that).
+            self.assertFalse(rt.loop_gates)
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            self.replies(dict(call('finish',dict(summary='done')),content=zh))
+            self.assertTrue(rt._tick(gid))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(drifts),1,'the drift is still an event')
+            self.assertFalse(drifts[0]['nudged'],'the finish call ends the goal, so no turn follows it')
+            rows=[r[0] for r in rt.store.db.execute('SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))]
+            self.assertFalse([t for t in rows if 'Reply in '+REPLY_LANGUAGE in t],
+                             'no nudge is left for the finish on this tick to defer: %r' % (rows,))
+            # The control: the same drifting prose with a call that does NOT end the goal is still nudged,
+            # so the helper reads the call's name rather than making every tool-call reply silent.
+            g2=rt.store.enqueue('A second goal, whose reply keeps running.')
+            self.replies(dict(call('read',dict(path='x')),content=zh))
+            self.assertTrue(rt._tick(g2))
+            drifts=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(g2,))]
+            self.assertEqual(len(drifts),1)
+            self.assertTrue(drifts[0]['nudged'],'a turn follows a call that does not finish')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_language_setting_with_no_script_table_says_so_in_the_log_once(self):
+        # review P2 (r13): `--to` a name with no script table leaves the drift check switched off, and the CLI's
+        # `check: false` note was the only place that said so: a session started elsewhere had nothing in its log
+        # to say why no drift was ever detected. One `language_setting_unchecked` event per process per name, not
+        # per turn. Since the r24 review, a name written in letters the census knows is read as its script, so the
+        # branch is left for a name whose own letters are in no table at all (Runic here).
+        name='\u16a0\u16a2\u16a6\u16a8\u16b1\u16b2'
+        conf=json.loads((self.home/'config.json').read_text());conf['language']=name
+        (self.home/'config.json').write_text(json.dumps(conf))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal in a language with no script table.')
+            self.replies(dict(role='assistant',content='ok'))
+            self.assertTrue(rt._tick(gid))
+            rows=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_setting_unchecked'",(gid,))]
+            self.assertEqual(len(rows),1,'the unchecked setting is in the log')
+            self.assertEqual(rows[0]['language'],name)
+            g2=rt.store.enqueue('A second goal in the same session.')
+            self.replies(dict(role='assistant',content='ok'))
+            self.assertTrue(rt._tick(g2))
+            self.assertEqual(rt.store.db.execute(
+                "SELECT COUNT(*) FROM events WHERE kind='language_setting_unchecked'").fetchone()[0],1,
+                'one per process per name, not one per turn')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_an_empty_language_setting_is_refused_instead_of_silently_ignored(self):
+        # review P2: `--to ''` is falsy, so it skipped both writes and printed a derived answer while an old
+        # `language` key stayed in config.json, disagreeing with the display.
+        self.cmd('language',['--to','Chinese'])
+        for empty in ('','   '):
+            out=self.cmd('language',['--to',empty],code=1)
+            self.assertIn('--auto',out['error'],'the refusal names how to drop the setting')
+            self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting is unchanged')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Chinese')
+        # review P2 (r12): `--to '' --auto` is a contradiction about what the command is for, and it used to be
+        # answered with the blank-name error. Both flags together is the thing to say, whatever the name is.
+        out=self.cmd('language',['--to','','--auto'],code=1)
+        self.assertIn('not both',out['error'],'the two flags together are named, not the empty name')
+        self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting is unchanged')
+
+    def test_a_corrupt_config_is_an_error_the_owner_can_act_on_not_a_traceback(self):
+        # review P2: the `language` op read config.json unguarded. It writes the setting, so unlike `prompt` it
+        # must not fall back to the defaults (that would rewrite the file and lose the rest), and it must not
+        # traceback: valid JSON of the wrong shape reached cfg['language'] as a TypeError.
+        for text,why in (('not json{','not valid JSON'),('[]','not a JSON object'),('[1, 2]','not a JSON object')):
+            (self.home/'config.json').write_text(text)
+            for extra in (['--to','Chinese'],['--auto']):
+                out=self.cmd('language',extra,code=1)
+                self.assertIn(why,out['error'],'%s %s names the shape: %s' % (text,extra,out['error']))
+                self.assertIn('config.json',out['error'],'the error says which file to fix')
+            self.assertEqual((self.home/'config.json').read_text(),text,'the op did not rewrite the corrupt file')
+        (self.home/'config.json').write_text('{"name": "test"}')
+        self.assertEqual(self.cmd('language',[])['language'],'English','a repaired config works again')
+
+    def test_prompt_and_language_refuse_one_corrupt_config_the_same_way(self):
+        # review P2 (r14): `agent prompt` read config.json in its own try/except and fell back to the defaults on a
+        # corrupt file, while `agent language` refused it. Two ops, one home, two answers about the language. Both
+        # go through `cli._read_config` now: a corrupt or wrong-shape file is refused by both with the same message,
+        # and only the no-config-yet case differs (prompt prints the defaults before `init`; language says to run it).
+        for text,why in (('not json{','not valid JSON'),('[]','not a JSON object')):
+            (self.home/'config.json').write_text(text)
+            for op,extra in (('prompt',[]),('language',[]),('language',['--to','Chinese'])):
+                out=self.cmd(op,extra,code=1)
+                self.assertIn(why,out['error'],'%s %s: %s' % (op,extra,out['error']))
+                self.assertIn('config.json',out['error'],'the error says which file to fix')
+            self.assertEqual((self.home/'config.json').read_text(),text,'neither op rewrote the corrupt file')
+        # a home with no config at all still prints a prompt: that is what `prompt` is for before `init`
+        (self.home/'config.json').unlink()
+        out=self.cmd('prompt',[])
+        self.assertIn('human',out['prompt'],'a home with no config yet still renders the defaults')
+        self.assertIn('run agent init first',self.cmd('language',[],code=1)['error'],
+                      'the writing op still says how to make one')
+
+    def test_a_restart_derives_the_same_language_from_the_same_goals(self):
+        # review P2: a derived name must not live only on the running runtime. `derive` is a pure function of
+        # the goal window and the window is created order, so a turn, the CLI (`from_home`) and a restart all
+        # land on the same name, or the prompt (a cached prefix) changes across a restart and every reply of
+        # the session would be nudged. Pins the invariant a later `derive` change or a moved window keeps.
+        from caminus.ember.resident import language
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+            first=language.owner(rt)
+        finally:
+            rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)
+        try:
+            again=language.owner(rt)
+            self.assertEqual((first['name'],first['source']),('Chinese','your goals'),'the goal names Chinese')
+            self.assertEqual(again,first,'a restart re-derives the same name, scripts and source')
+            self.assertEqual(getattr(rt,'_language_owner',(None,None))[1],first,'the answer is cached by window')
+            self.assertEqual(language.from_home(self.home),first,'the CLI reads the same name as the turn')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_language_set_after_the_derived_one_is_cached_still_wins(self):
+        # review P2 (called fragile, not a bug): `owner` checks config before the `_language_owner` cache and
+        # returns early on a name, so a setting applied to the running runtime (`_follow_config`) outranks a
+        # derivation cached on a previous turn. The risk is a later edit that moves the cache read above the
+        # config read: the session would keep the derived language while `agent prompt` named the setting. This
+        # walks the cycle on one runtime - derive and cache, set, drop - so that edit fails here.
+        from caminus.ember.resident import language
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'],'Chinese','the goal names Chinese')
+            cached=getattr(rt,'_language_owner')
+            self.assertIsNotNone(cached,'the derivation is cached for the next turn')
+            rt.config['language']='French'
+            self.assertEqual(language.owner(rt),dict(name='French',scripts=('Latin',),source='config'),
+                             'a setting applied after the cache was filled still wins')
+            self.assertEqual(getattr(rt,'_language_owner'),cached,'the derivation is untouched by the setting')
+            rt.config.pop('language',None)                   # `--auto`: back to the same goals, uncached or cached
+            self.assertEqual(language.owner(rt)['name'],'Chinese',
+                             'dropping the setting falls back to the derivation, not the default')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_the_language_op_uses_the_config_it_wrote_instead_of_reading_it_again(self):
+        # review P2: `agent language --to NAME` wrote config.json and then called `from_home(home)`, which read
+        # the file again - a second writer in between would be reported as the name this op just set. The op now
+        # passes the config it read and wrote; this pins that the argument is used and that omitting it still
+        # reads the file, so `agent prompt` (which has no config in hand) keeps its behaviour.
+        from caminus.ember.resident import language
+        from caminus.ember.resident.store import atomic_json
+        cfg=json.loads((self.home/'config.json').read_text())
+        cfg['language']='French';atomic_json(self.home/'config.json',cfg)
+        self.assertEqual(language.from_home(self.home)['name'],'French','no argument: the file, as before')
+        self.assertEqual(language.from_home(self.home,{'language':'Chinese'})['name'],'Chinese',
+                         'the argument wins over a file that says otherwise')
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c'
+                             '\u7136\u540e\u5f00 PR\u3002')
+        finally:
+            rt.mail.close();rt.store.close()
+        self.assertEqual(language.from_home(self.home,{})['name'],'Chinese',
+                         'a config with no language still falls through to the goals')
+        out=self.cmd('language',['--to','Korean'])
+        self.assertEqual((out['language'],out['source'],out['scripts']),('Korean','config',['Hangul']),
+                         'the op reports the name it wrote, and writes it')
+        self.assertEqual(json.loads((self.home/'config.json').read_text())['language'],'Korean')
+
+    def test_a_borrowed_term_is_not_a_language_drift_whatever_script_it_is_written_in(self):
+        # review P2 (r20): `_without_borrowed` dropped only Latin runs, so a Han reply that quoted a Greek or
+        # Cyrillic name in each clause kept every one of those units, and enough clauses could nudge a correct
+        # reply. The rule is about the clause, not the borrowed script: the clause's non-owner units are terms
+        # when the owner's own script out-measures them together.
+        from caminus.ember.resident import language
+        zh=('\u8bf7\u8fd0\u884c pytest \u03b1\u03b2\u03b3 \u7136\u540e\u63a8\u9001\u3002'
+            '\u7528 gh pr create \u03b4\u03b5\u03b6 \u5f00 PR\u3002'
+            '\u56de\u590d\u5728 \u03b7\u03b8\u03b9 \u8fd9\u4e2a\u7ebf\u7a0b\u3002')
+        self.assertIsNone(language.drift(zh,('Han',)),
+                          'a Greek name inside a Chinese clause is a term, not the reply switching')
+        self.assertIsNone(language.drift(zh.replace('\u03b1\u03b2\u03b3','alpha').replace('\u03b4\u03b5\u03b6','beta')
+                                          .replace('\u03b7\u03b8\u03b9','gamma'),('Han',)),
+                          'the Latin form of the same term was already a term')
+        self.assertEqual(language.drift('\u03b1\u03b2\u03b3\u03b4 \u03b5\u03b6\u03b7\u03b8 \u03b9\u03ba\u03bb\u03bc '
+                                        '\u03bd\u03be\u03bf\u03c0 \u03c1\u03c3\u03c4\u03c5',('Han',)),
+                         ('Greek',1.0),'a reply really in Greek still drifts')
+
+    def test_the_language_event_records_every_foreign_script_in_the_reply(self):
+        # review P2 (r22): the event's `script` is the largest foreign script while its `share` is the SUM of all
+        # of them, so a reply split between two scripts was recorded as if the one named held the whole share
+        # (probed: 9 Han + 5 Greek units of a Russian owner's reply named 'Han' at 0.933 when Han itself was
+        # 0.600). The split rides beside them now, `script` stays the same max `drift` names, and the nudge names
+        # the runner-up when it holds at least half the winner: unnamed, it read as the owner's own script.
+        from caminus.ember.resident import language
+        han='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00\u53d1\u3002'
+        greek=('\u03b1\u03b2\u03b3\u03b4 \u03b5\u03b6\u03b7\u03b8 \u03b9\u03ba\u03bb\u03bc \u03bd\u03be\u03bf\u03c0 '
+               '\u03c1\u03c3\u03c4\u03c5')
+        conf=json.loads((self.home/'config.json').read_text());conf['language']='Russian'
+        (self.home/'config.json').write_text(json.dumps(conf))
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('A goal its owner writes in Russian.')
+            nudge=language.check(rt,gid,han+' '+greek+' \u0438')
+            self.assertIn('Reply in Russian',nudge)
+            self.assertIn('(Han and Greek)',nudge,
+                          "the runner-up is named: alone it read as the owner's own script")
+            rows=[json.loads(r[0]) for r in rt.store.db.execute(
+                "SELECT data FROM events WHERE goal=? AND kind='language_drift'",(gid,))]
+            self.assertEqual(len(rows),1)
+            data=rows[0]
+            self.assertEqual(data['scripts'],{'Han':9,'Greek':5},'every foreign script is in the event')
+            self.assertEqual(data['script'],max(data['scripts'],key=data['scripts'].get),
+                             'the named script is still the largest one, as `drift` returns it')
+            self.assertEqual(data['share'],round(14/15,3),'share is still their sum, not the winner\'s')
+            self.assertEqual(sum(data['scripts'].values()),14,'the split adds up to the share it explains')
+            # a clear winner is named alone: the runner-up under half the winner is not what the reply slid into,
+            # so naming it would send the owner looking for a script their reply barely used.
+            g2=rt.store.enqueue('A second goal in the same session.')
+            self.assertIn('(Han)',language.check(rt,g2,han+' '+han+' \u03b1\u03b2\u03b3\u03b4 \u0438'))
+            self.assertNotIn('and Greek',language.check(rt,g2,han+' '+han+' \u03b1\u03b2\u03b3\u03b4 \u0438'))
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_the_language_cadence_counts_the_reply_being_censused(self):
+        # review P2 (r20): the count of assistant events since the last nudge is only right because
+        # `store.model_reply` writes the reply's `assistant` event before `_tick` calls `check`. Hand-written
+        # events would not show a later move of that write, so this drives `model_reply` itself: nudge at reply
+        # N, then replies N+1 and N+2 are not due and N+3 is.
+        from caminus.ember.resident import language
+        zh='\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00 PR (base ember-next)\u3002'
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            reply=dict(role='assistant',content=zh)
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),'the first drift of the goal is due')
+            rt.store.model_reply(gid,dict(reply))
+            self.assertEqual(language.check(rt,gid,zh),'','the reply that was nudged is one turn since it')
+            rt.store.model_reply(gid,dict(reply))
+            self.assertEqual(language.check(rt,gid,zh),'','two turns since the nudge is not DRIFT_EVERY')
+            rt.store.model_reply(gid,dict(reply))
+            self.assertIn('Reply in '+REPLY_LANGUAGE,language.check(rt,gid,zh),
+                          'the third reply after the nudge is due: the censused reply is in the count')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_foreign_phrase_that_an_english_language_reply_quotes_is_stripped(self):
+        # review P2 (r21): "Good point — 谢谢你不错不错不错." is 82 % Han by units and fires. No floor can separate
+        # it from a real switch, and neither remedy the review suggested binds on it: own=2 already reaches the
+        # mixed branch (so "some minimum of the owner's units before the whole-reply rule" is what `own >= 2` is),
+        # and other=9 clears WHOLE_MIN_UNITS by six either way. The separable part is that the phrase is a
+        # citation, which `prose()` already strips in every quoted or code form; the bare shape stays counted as
+        # the documented cost, so this test would have to change if a floor ever does separate it.
+        from caminus.ember.resident import language
+        han = '\u8c22\u8c22\u4f60\u4e0d\u9519\u4e0d\u9519\u4e0d\u9519'
+        self.assertEqual(language.drift('Good point \u2014 %s.' % han, ('Latin',)),
+                         ('Han', 9 / 11), 'bare, the phrase is the reply by units: the cost this rule cannot remove')
+        for why, quoted in (('straight', '"%s"'), ('typographic', '\u201c%s\u201d'), ('corner', '\u300c%s\u300d'),
+                            ('guillemet', '\u00ab%s\u00bb'), ('code', '`%s`')):
+            self.assertIsNone(language.drift('Good point \u2014 %s.' % (quoted % han), ('Latin',)),
+                              'a quoted phrase is a citation, not the reply switching (%s)' % why)
+
+    def test_the_cli_reads_a_home_whose_path_holds_a_uri_metacharacter(self):
+        # review P2 (could not be reproduced): `from_home` builds a read-only URI from the store path, and
+        # `urllib.parse.quote` escapes `?` and `#` by default, so a home `a?b#c` reads its goals rather than
+        # silently losing them. Pinned because that percent-encoding is load-bearing: `quote(..., safe='/')` or
+        # an unquoted path would break such a home quietly, and the CLI would name a different language than a
+        # turn on the same goals.
+        from caminus.ember.resident import language
+        odd=Path(str(self.home)+'?x#y')
+        store=Store(odd)
+        try:
+            store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c\u7136\u540e\u5f00 PR\u3002')
+        finally:
+            store.close()
+        self.assertEqual(language.from_home(odd)['name'],'Chinese','a home with ? and # still reads its goals')
+
+    def test_a_named_language_is_not_renamed_by_a_later_goal(self):
+        # `derive` reads the first eight goals, so a ninth goal could otherwise flip the name - and the prompt
+        # is a cached prefix that must not change as goals are added. Once the goals name a language it is the
+        # session's; while they cannot (a Latin corpus), the answer is the default and a later goal may name it.
+        from caminus.ember.resident import language
+        rt=Runtime(self.home)
+        try:
+            rt.store.enqueue('\u4fee\u590d\u5931\u8d25\u7684\u63a8\u9001\u6b65\u9aa4\uff0c\u7136\u540e\u5f00 PR\u3002')
+            self.assertEqual(language.owner(rt)['name'],'Chinese')
+            for _ in range(9):
+                rt.store.enqueue('Fix the failing push step and open the pull request against ember-next.')
+            self.assertEqual(language.owner(rt)['name'],'Chinese',
+                             'a named language is the session\'s, not the first eight goals\'')
+            # every reader agrees after the later goals: the CLI (`from_home`) and a fresh runtime derive the
+            # same name the running turn reads (review P2: a sticky in-process pin said otherwise)
+            self.assertEqual(language.from_home(self.home)['name'],'Chinese','the CLI agrees after later goals')
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_an_unlisted_language_names_its_census_and_which_off_case_it_got(self):
+        # `--to Esperanto` has no script table, but its own letters are Latin, so since r24 the check censuses
+        # Latin (the reviewer's safer shape) and the note says where that came from. Two shapes stay
+        # `check: false`, and each says which it is: a name whose letters are in no script the census knows
+        # (Runic), and a name whose letters are split between known scripts with no majority (`ab 中文`, found
+        # by my own adversarial pass on `fa45f81`: the note used to claim its letters were in no known script).
+        out=self.cmd('language',['--to','Esperanto'])
+        self.assertEqual((out['language'],out['scripts'],out['check']),('Esperanto',['Latin'],True))
+        self.assertIn('the script its name is written in',out['note'])
+        self.assertEqual(self.cmd('language',[]),dict(language='Esperanto',scripts=['Latin'],source='config',check=True,
+                                                      note=out['note']))
+        out=self.cmd('language',['--to','\u16a0\u16a2\u16a6\u16a8'])
+        self.assertEqual((out['language'],out['scripts'],out['check']),('\u16a0\u16a2\u16a6\u16a8',[],False))
+        self.assertIn('in no script this census knows',out['note'])
+        self.assertNotIn('split between',out['note'])
+        out=self.cmd('language',['--to','ab \u4e2d\u6587'])
+        self.assertEqual((out['language'],out['scripts'],out['check']),('ab \u4e2d\u6587',[],False))
+        self.assertIn('split between Han, Latin',out['note'],'the note names the scripts its letters are in')
+        self.assertNotIn('in no script this census knows',out['note'],'its letters ARE in known scripts')
+
+    def test_reading_the_language_creates_no_store_and_no_home(self):
+        # review P2: `language` sat under `store=Store(home)`, so a typo'd `--home` was handed a directory and an
+        # agent.sqlite3 as the side effect of reading a setting, and an initialized home whose store had been
+        # moved got an empty one back. It reads through `language.from_home` (config, then the store mode=ro) like
+        # `agent prompt`, so neither a read nor the write creates either file.
+        fresh=S/(self.key+'-fresh')
+        p=subprocess.run([sys.executable,'-I','-c',BOOT,str(ROOT/'python'),'env','agent','--local','language',
+                          'test','--home',str(fresh),'--json'],capture_output=True,text=True)
+        self.assertEqual(p.returncode,1,p.stdout+p.stderr)
+        self.assertIn('not initialized',p.stdout)
+        self.assertFalse(fresh.exists(),'a read created no home')
+        for name in ('agent.sqlite3','agent.sqlite3-wal','agent.sqlite3-shm'):
+            path=self.home/name
+            if path.exists():path.unlink()
+        out=self.cmd('language',['--to','Chinese'])
+        self.assertEqual((out['language'],out['source']),('Chinese','config'))
+        self.assertFalse((self.home/'agent.sqlite3').exists(),'setting the language created no store')
+        self.assertEqual(self.cmd('language',[])['language'],'Chinese','the setting reads back')
+        self.assertFalse((self.home/'agent.sqlite3').exists(),'reading it created no store')
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
@@ -3601,6 +4752,38 @@ for line in sys.stdin:
                 rt.tick(gid)
             self.assertEqual(rt.store.goal(gid)['state'],'completed',[(e['kind'],str(e['data'])[:200]) for e in rt.store.events() if e['goal']==gid])
         finally:rt.mail.close();rt.store.close()
+
+    def test_a_free_goals_tool_call_reply_is_not_nudged_about_its_language(self):
+        # review P2 (r14): `check`'s docstring says a drift on a free-time goal is recorded and never nudged (the
+        # goal is not graded and has no next graded turn), but `kind` was read inside `if plain:`, so `follows`
+        # stayed True for a tool-call reply on a free goal and a nudge was queued anyway. `kind` is read for every
+        # reply now. A work goal's tool-call reply is still nudged, which the next assertion pins.
+        class Drift:
+            def __init__(self,*replies):self.replies=list(replies)
+            def context_size(self):return 65536
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None):return self.replies.pop(0)
+        chinese='\u5206\u652f\u5df2\u63a8\u9001\uff0c\u73b0\u5728\u5f00 PR\u3002'
+        slid=call('terminal',dict(command='printf ok'));slid['content']=chinese
+        rt=self.free_runtime(model=Drift(slid,dict(role='assistant',content='Resting now.')))
+        try:
+            gid=rt.free.pulse()
+            for _ in range(6):
+                if rt.store.goal(gid)['state'] in ('completed','paused','error'):break
+                rt.tick(gid)
+            drifts=[e['data'] for e in rt.store.events() if e['kind']=='language_drift' and e['goal']==gid]
+            self.assertEqual(len(drifts),1,'the drift is still an event: it is the rate this feature is measured by')
+            self.assertFalse(drifts[0]['nudged'],'a free goal has no next graded turn to nudge')
+            self.assertEqual([x['kind'] for x in self.steers(gid)],[],'no nudge rides a free goal')
+        finally:rt.mail.close();rt.store.close()
+        # the work branch is unchanged: the same reply on a work goal queues the nudge (existing test pins the text,
+        # this one pins that the free/ work split did not switch the nudge off for everyone). The legacy fixture is
+        # left as setup made it: loop gates off, so `finish` completes without a done check to answer first.
+        self.replies(slid,call('finish',dict(summary='Opened the pull request.')))
+        goal=self.cmd('once',['--goal','Open the pull request against ember-next.'])
+        drifts=[e['data'] for e in self.cmd('events')
+                if e['kind']=='language_drift' and e['goal']==goal['id']]
+        self.assertTrue(drifts and drifts[0]['nudged'],'a work goal is still nudged')
 
     def test_free_time_budget_on_a_priced_remote_model(self):
         import types
@@ -7983,6 +9166,32 @@ for line in sys.stdin:
             self.assertNotIn(gid,rt._out_boost,'the boost ends with the whole reply')
         finally:rt.mail.close();rt.store.close()
 
+    def test_a_failed_model_call_does_not_count_a_plain_reply(self):
+        # review P2 (r15): `_plain_reply` records `plain_replies[gid]` from a dispatch the tick computed before
+        # the call could fail. A retryable cut stores nothing and runs the tick again, so the reply that finally
+        # arrives must be the first of its run, not the second: the pause after PLAIN_TEXT_LIMIT plain replies
+        # must not be reached on retries. Pins the invariant; `_tick` recomputes the dispatch after the call,
+        # which is what makes it hold.
+        from caminus.ember.resident.model import ModelTruncated
+        self.gates_on()
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Create the file.')
+            real=rt.model.complete
+            def failing(messages,tools=None,max_tokens=None,**kw):
+                if tools is None:return real(messages,tools,max_tokens=max_tokens,**kw)   # (the judge)
+                raise ModelTruncated(dict(content='half'),retryable=True)
+            rt.model.complete=failing
+            rt.tick(gid)
+            self.assertNotIn(gid,rt.plain_replies,'a reply that never arrived is not a plain reply')
+            rt.model.complete=real
+            rt.retry.pop(gid,None);rt.store.update(gid,state='working')
+            self.replies(dict(role='assistant',content='I think it is finished.'))
+            rt.tick(gid)
+            nudges=[e['data'] for e in rt.store.events() if e['kind']=='plain_text_nudge']
+            self.assertEqual([n['replies'] for n in nudges],[1],'the reply after a retry is the first of its run')
+        finally:rt.mail.close();rt.store.close()
+
     def test_three_cut_off_replies_in_a_row_pause_the_goal(self):
         cut=lambda:dict(call('write',dict(path='big.txt',content='x')),_finish_reason='length')
         self.replies(cut(),cut(),cut(),call('finish',dict(summary='never reached')))
@@ -8589,6 +9798,101 @@ for line in sys.stdin:
         self.assertIn('ZZONE one',body)
         self.assertNotIn('ZZTWO',body)                # the withdrawn text never reached a turn
         self.cmd('unsend',['missing-goal'],code=1)
+
+    def test_the_language_default_names_no_language_and_a_derived_one_is_named(self):
+        # #390 review P1-2: `derive` refuses Latin script (English, Spanish and French share it), so the fallback
+        # name English is a label and nothing more; naming it in the prompt told a Spanish owner who never ran
+        # `--to` to write in a language that is not theirs. A language the owner's own goals do establish is
+        # still written as one, which is the other half of the rule.
+        self.assertIn(REPLY_LANGUAGE,self.cmd('prompt',[])['prompt'])
+        self.assertNotIn('Your human works in',self.cmd('prompt',[])['prompt'])
+        self.cmd('send',['\u5206\u652f\u5df2\u63a8\u9001\u3002\u73b0\u5728\u5f00\u53d1\u3002'])   # (a goal in Chinese)
+        text=self.cmd('prompt',[])['prompt']
+        self.assertIn('Your human works in Chinese',text,'a name the goals establish is written as such')
+        self.assertIn('in Chinese',text)
+
+    def test_unsend_and_the_interrupt_hold_skip_the_harness_note_by_its_source(self):
+        # #390 review P2-a: the language nudge is a harness note with no leading `[`, so up-arrow withdrew it as
+        # if the human had written it, and a held goal lifted its hold on it. Both read `inbox.source` now, and
+        # the `[` rule stays for a note written before the column existed.
+        gid=self.cmd('send',['goal'])['id']
+        nudge='Reply in '+REPLY_LANGUAGE+'.'
+        rt=Runtime(self.home)
+        try:
+            rt.store.db.execute("INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,'harness')",(gid,nudge,'nudge'))
+            self.assertEqual(rt.store.unsend(gid),(gid,None),"a harness note is not the human's to withdraw")
+            self.assertEqual([r[0] for r in rt.store.db.execute(
+                'SELECT text FROM inbox WHERE goal=? AND consumed=0',(gid,))],[nudge],'and it stays in the inbox')
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'please use tabs','steer'))
+            self.assertEqual(rt.store.unsend(gid),(gid,'please use tabs'),"the human's own message still withdraws")
+            # the interrupt hold: a harness note is not a message, so it does not lift the hold
+            self.replies(dict(role='assistant',content='noted'))
+            rt._held[gid]=time.time()
+            self.assertFalse(rt._tick(gid),'held: a harness note does not lift the hold')
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,'go on','steer'))
+            self.assertTrue(rt._tick(gid),"the human's message lifts it")
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_a_compaction_restates_a_harness_note_as_the_harness_and_the_human_as_themselves(self):
+        # #390 review P2-b: the drift nudge is filed as a steer too, so `_restate_goal` restated it under "steers
+        # and nudges" as words the human had said. Each steer carries its source now: the harness's notes get
+        # their own labelled section, and the human's words are given the budget first.
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Open the pull request against ember-next.')
+            rt.store.add_steer(gid,'please use tabs')
+            rt.store.add_steer(gid,'Reply in '+REPLY_LANGUAGE+'.','nudge','harness')
+            rt.store.db.execute("INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,'harness')",
+                                (gid,'[gate] the gate fails now','nudge'))
+            out=rt._restate_goal(gid,[])[-1]['content']
+            human,_,notes=out.partition('[harness notes,')
+            self.assertIn('please use tabs',human)
+            self.assertNotIn(REPLY_LANGUAGE,human,"the nudge is not restated as the human's words")
+            self.assertNotIn('the gate fails now',human)
+            self.assertIn(REPLY_LANGUAGE,notes)
+            self.assertIn('the gate fails now',notes)
+            self.assertIn('not words your human said',notes)
+        finally:
+            rt.mail.close();rt.store.close()
+
+    def test_an_old_database_migrates_under_the_write_lock(self):
+        # #390 review P2-c: `table_info` then `ALTER` is a check-then-act; two openers of the same old database
+        # both saw the column missing and the loser raised `duplicate column name` out of `Store.__init__`. The
+        # migration runs under BEGIN IMMEDIATE now, so openers serialize and every one of them finds the work done.
+        import sqlite3
+        home=self.home/'migrate';home.mkdir()
+        db=sqlite3.connect(home/'agent.sqlite3')
+        db.executescript("""
+          CREATE TABLE goals(id TEXT PRIMARY KEY, prompt TEXT NOT NULL, state TEXT NOT NULL,
+            messages TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '', steps INTEGER NOT NULL DEFAULT 0, step_limit INTEGER,
+            deadline REAL, created REAL NOT NULL, updated REAL NOT NULL);
+          CREATE TABLE inbox(id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
+            text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE steers(id INTEGER PRIMARY KEY, goal TEXT, text TEXT, ts REAL);
+          CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, goal TEXT,
+            kind TEXT NOT NULL, data TEXT NOT NULL);""")
+        db.commit();db.close()
+        stores,errs=[],[]
+        start=threading.Barrier(4)
+        def open_it():
+            start.wait()
+            try:
+                s=Store(home)
+                try:
+                    # read and close in the thread that opened it: a sqlite connection is thread-affine
+                    stores.append({r['name'] for r in s.db.execute('PRAGMA table_info(steers)')})
+                finally:
+                    s.close()
+            except Exception as e:errs.append(e)
+        threads=[threading.Thread(target=open_it) for _ in range(4)]
+        for t in threads:t.start()
+        for t in threads:t.join(30)
+        self.assertEqual(errs,[],'every opener migrated it or found the work done')
+        self.assertEqual(len(stores),4)
+        for cols in stores:
+            self.assertTrue({'kind','source'}<=cols,'the columns the migration adds are there')
 
     def test_the_goal_queue_lists_moves_and_removes_queued_goals(self):
         a=self.cmd('send',['first'])['id']

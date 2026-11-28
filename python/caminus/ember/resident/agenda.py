@@ -83,7 +83,9 @@ def wake_due(rt, gid, g):
         text = g.get('wake_note') or ''
         rt.store.update(gid, wake_at=None, wake_note=None)
         if not early:
-            rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',
-                                (gid, '[scheduled wake-up] ' + text, 'nudge'))
+            # A harness note, not the human speaking: `_answering` must not read it as their answer (the plain-text
+            # pause resets otherwise, #390 review P1); the note wakes the goal, it does not reply to it.
+            rt.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                (gid, '[scheduled wake-up] ' + text, 'nudge', 'harness'))
         rt.store.event('woke', dict(early=bool(early), note=text), gid)
     return False

@@ -106,7 +106,7 @@ class Discovery(unittest.TestCase):
             self.assertEqual(discovery._probe(['probe'])['status'],'timed_out')
 
     def test_prompt_describes_actual_account_and_discovery_before_building(self):
-        text=render('/agent/workspace')
+        text=render('/agent/workspace',language='English',source='config')
         self.assertIn('/agent/workspace',text)
         self.assertIn('## Discover before building',text)
         self.assertIn('apt-get',text);self.assertIn('ask_root',text)

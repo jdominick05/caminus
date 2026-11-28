@@ -29,6 +29,32 @@ SPEED_FRESH_S = 120   # seconds a measured decode speed stays on the status line
 LIVE_POLL_S = 1.0     # the longest a status call waits on a Caminus server's /caminus/status for the live speed
 
 
+def _read_config(home, missing_ok):
+    """`config.json` as a dict, refused the same way by every op that reads it (#390 review P2).
+
+    `missing_ok` is for the read-only ops that work before `init`: `agent prompt` prints the defaults for a home
+    that has no config yet, so its absence is not an error there. An op that writes (`agent language`) passes
+    False and keeps "run agent init first". A corrupt file or valid JSON of the wrong shape is an error for both:
+    before, `prompt` silently fell back to the defaults while `language` refused, so the two ops could print
+    different languages for the same home.
+    """
+    try:
+        cfg = json.loads((home / 'config.json').read_text())
+    except FileNotFoundError:
+        if missing_ok:
+            return {}
+        raise ValueError('cannot read config.json in %s: run agent init first' % home)
+    except OSError:
+        if missing_ok:
+            return {}
+        raise ValueError('cannot read config.json in %s: run agent init first' % home)
+    except ValueError:
+        raise ValueError('config.json is not valid JSON: fix or remove %s' % (home / 'config.json'))
+    if not isinstance(cfg, dict):
+        raise ValueError('config.json is not a JSON object: fix or remove %s' % (home / 'config.json'))
+    return cfg
+
+
 def _engine_live(home, daemon_alive, opener=None):
     """The engine's write speed while this session's reply streams from a Caminus server: 1000 / its /caminus/status
     decode.ms_per_token (the engine's mean ms per emitted token over its last passes, across requests, so the figure
@@ -299,7 +325,7 @@ def model_ops(a,home):
 def parser():
     ap=argparse.ArgumentParser(prog='caminus ember agent')
     sub=ap.add_subparsers(dest='op',required=True)
-    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim'):
+    for op in ('init','create','memory','run','once','send','status','events','stream','resume','cancel','compact','unit','start','stop','peers','message','mail','discover','prompt','heartbeat','advisor','eyes','fallback','mcp','provider','models','model','effort','update','pause','studio','queue','plan','unsend','interrupt','btw','theme','export','diff','rewind','github','advise','remove','restore','sim','language'):
         p=sub.add_parser(op)
         p.add_argument('name',**(dict(nargs='?',help='the session to restore; none lists the closed ones') if op=='restore' else {}))
         p.add_argument('--home',help='agent-side home; use an isolated directory for tests')
@@ -356,6 +382,11 @@ def parser():
             p.add_argument('--budget-usd',type=float,help='dollars per day the fallback may spend on work (default 1.00)')
             p.add_argument('--down-seconds',type=float,help='how long a failed primary is left alone (default 60)')
             p.add_argument('--off',action='store_true')
+        if op=='language':
+            p.add_argument('--to',metavar='LANGUAGE',help='the language the owner works in, e.g. English, Chinese, '
+                           'Spanish: what the prompt asks and what the drift check holds a reply to')
+            p.add_argument('--auto',action='store_true',help='drop the setting: derive the language from your goals '
+                           'again (English when they cannot tell)')
         if op=='sim':
             p.add_argument('--on',action='store_true',help='write sim true: this session records SIM predictions')
             p.add_argument('--off',action='store_true',help='write sim false: the agent says the log is off instead of recording')
@@ -694,11 +725,20 @@ def main(argv=None,stdin=None):
             emit(discover(home,a.topic,a.query),True)
             return 0
         if a.op=='prompt':
-            try:
-                sim_on=bool(json.loads((home/'config.json').read_text()).get('sim',True))
-            except (OSError,ValueError):
-                sim_on=True
-            value=render_prompt(home,sim=sim_on)
+            # The same read `agent language` makes, so the two ops cannot disagree about the language for the
+            # same home: a corrupt config is refused by both (before, this op fell back to the defaults and
+            # printed English while `language` reported the error — #390 review P2). A home with no config yet
+            # still prints the defaults, which is what `prompt` is for before `init`.
+            # `from_home` is `language.owner` for a caller with no runtime; the two must name one language for one
+            # home (both read config `language`, then the same `_GOALS` window through `derive`), and
+            # `test_the_prompt_op_and_a_live_session_name_the_same_language` reads one home through both (#390 review P2).
+            from . import language
+            # One read of config.json for both: `sim` and the language must come from the same snapshot, and a
+            # second read inside `from_home` could see a different file (rev-muse P2 on `dfe53fb`).
+            cfg=_read_config(home,missing_ok=True)
+            sim_on=bool(cfg.get('sim',True))
+            who=language.from_home(home,cfg)
+            value=render_prompt(home,sim=sim_on,language=who['name'],source=who['source'])
             emit(dict(prompt=value),True) if a.json else print(value)
             return 0
         if a.op=='init':
@@ -793,6 +833,66 @@ def main(argv=None,stdin=None):
             else:
                 subprocess.run(['systemctl','--user','stop',unit],env=env,check=True)
             emit(dict(name=a.name,unit=unit,started=a.op=='start'),a.json)
+            return 0
+        if a.op=='language':
+            # The owner's language (issue #354): the prompt names it, and the per-turn check holds a reply to it.
+            # Reads go through language.from_home (config, then the store mode=ro), so this op creates nothing,
+            # like `agent prompt`: before, it opened the Store first and an initialized home whose store had been
+            # moved was handed an empty agent.sqlite3 back as a side effect of reading a setting (review P2).
+            from . import language
+            # This op writes `language`, so a config it cannot read is an error rather than a fallback that
+            # would overwrite whatever the file held; `_read_config` gives `agent prompt` the same refusal for
+            # the same corruption, so the two ops agree about one home (#390 review P2).
+            cfg=_read_config(home,missing_ok=False)
+            if a.to is not None and a.auto:
+                # Asked first: `--to '' --auto` is a contradiction about what the command is for, and answering it
+                # with the blank-name error named the less likely mistake (review P2). Whatever the name is, both
+                # flags together is the thing to say.
+                raise ValueError('use --to NAME or --auto, not both')
+            if a.to is not None:
+                if not a.to.strip():
+                    # `--to ''` is falsy, so it used to skip both writes and print a derived answer while an old
+                    # `language` key stayed in config.json, disagreeing with the display (review P2): say so.
+                    # One block for both the refusal and the write: as two back-to-back `if a.to is not None:`
+                    # blocks, a later edit to the first would read as guarding both (#390 review P2).
+                    raise ValueError('--to needs a language name; use --auto to drop the setting')
+                cfg['language']=a.to.strip()
+                atomic_json(home/'config.json',cfg)
+            elif a.auto:
+                cfg.pop('language',None)
+                atomic_json(home/'config.json',cfg)
+            # The config this op already read and wrote, not a second read of the file: another writer between
+            # the write and a re-read would otherwise be reported as the name this op just set (#390 review P2).
+            # On a read-only call (`language`, no flags) `cfg` is the same read, so one path serves both.
+            who=language.from_home(home,cfg)
+            # A name the table does not know is read as the script its own letters are written in (`--to पाली`),
+            # so the check is off in two cases, not one: the name has no letter in any script the census knows
+            # (`--to ᚠᚢᚦ`), or its letters are split between known scripts with no one in the majority
+            # (`--to ab 中文`), which has letters here but no single script to census. Say which of the two
+            # happened rather than print `scripts: []` and let the owner believe a drifting reply would be held
+            # (#390 review P2, r24; the second case found by my own adversarial pass on `fa45f81`).
+            out=dict(language=who['name'],scripts=list(who['scripts']),source=who['source'],check=bool(who['scripts']))
+            if not who['scripts']:
+                per, _total = language.letters(who['name'])
+                if per:
+                    out['note']=('no script table for %s, and its own letters are split between %s with no one in '
+                                 'the majority: the prompt asks for it, but a reply that drifts into another script '
+                                 'is not detected; write the name in one script to have it checked'
+                                 % (who['name'],', '.join(sorted(per,key=lambda s:(-per[s],s)))))
+                else:
+                    out['note']=('no script table for %s, and its own letters are in no script this census knows: '
+                                 'the prompt asks for it, but a reply that drifts into another script is not detected'
+                                 % who['name'])
+            elif language.census_of(who['name'])=='name':
+                out['note']=('no script table for %s: the check censuses %s, the script its name is written in, so '
+                             'a reply that leaves that script is held and one that stays is not'
+                             % (who['name'],', '.join(who['scripts'])))
+            elif who['source']=='default':
+                # One Latin script is English, Spanish, French and German alike, so goals written in it cannot
+                # name a language: say that the answer is the default and how to name one.
+                out['note']=('the default, not derived from your goals: one Latin script is English, Spanish, '
+                             'French and German alike, so `--to LANGUAGE` names the language you work in')
+            emit(out,a.json)
             return 0
         store=Store(home)
         if a.op=='sim':
@@ -1155,7 +1255,8 @@ def main(argv=None,stdin=None):
                 note=('[advisor review, asked for by your human] %s read your goal and says:\n%s\n'
                       'Weigh this before your next step; say what you change, or why not.' % (out.get('model'),out['advice']))
                 with rt.store.transaction():
-                    rt.store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',(gid,note,'nudge'))
+                    rt.store.db.execute('INSERT INTO inbox(goal,text,kind,source) VALUES(?,?,?,?)',
+                                        (gid,note,'nudge','harness'))
                     rt.store.request(gid,'interrupt')
                     rt.store.event('advisor_review',dict(model=out.get('model'),usd=out.get('usd'),
                                                          focus=(a.text or '')[:300],advice=(out.get('advice') or '')[:4000]),gid)

@@ -13,6 +13,12 @@ Paths: a relative path, in every tool, starts in your workspace, and each termin
 too ($WORKSPACE names it in the shell). ~ is the account home, as the shell has it, and other agents of
 this account share it. Use absolute paths or $WORKSPACE when you mean the workspace from the shell.
 
+## The owner's language
+{language_named}Write your replies, the notes and files you write for them, commit messages
+and GitHub text (issue and PR bodies, review comments) in {language_object}, unless they ask for another one: a
+reply that has slid into another language is not something they can use. Quoting a term, a name or a log
+line in another script is fine; most of a reply being in another one is not.
+
 ## Your freedom and responsibilities
 The terminal tool accepts arbitrary shell commands. It is an entry point to the
 operating system, not a list of approved applications. You may use installed
@@ -226,7 +232,24 @@ an empty prediction_error is a claim the prediction held exactly. Proposals are
 not changes: record them with status proposed and make no change.'''
 
 
-def render(home, sim=True):
+def render(home, sim=True, *, language, source):
+    """The prompt for a session whose owner works in `language` (issue #354; `resident/language.py` names it).
+
+    It is part of the cached prefix, so it changes only when the session's setting does: the per-turn check
+    (`language.check`) is what holds a brain that drifts anyway.
+
+    `language` and `source` are required, with no default: a default let any caller that forgot it render a
+    prompt that disagrees with the session's setting (a later `run`/`pages` entry point, say), and the prompt is
+    cached from the first token, so the disagreement would outlive the turn that made it (#390 review P2). The
+    two callers (`Runtime.system`, `agent prompt`) both resolve them (`language.owner`, `language.from_home`),
+    whose dict is this function's two arguments.
+
+    `source == 'default'` names nothing: `derive` refuses to name a language from Latin script because English,
+    Spanish and German share it, and the fallback name is English only as a label. Writing "Your human works in
+    English" there told every Spanish or French owner who never ran `--to` to write in a language that is not
+    theirs (#390 review P1-2), so the section describes the language instead of naming one. A configured or
+    derived name (`'config'`, `'your goals'`) is the owner's own and is written as such.
+    """
     from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
@@ -237,7 +260,13 @@ def render(home, sim=True):
     # Off: the heading and the paragraph both go; a heading over an empty section still asked for a record the
     # runtime would refuse, and an A/B's off arm must not be steered by what the on arm learned
     head, section = ('## SIM: predict, then measure\n', SIM_ON) if sim else ('', '')
+    # A named source writes the name twice ("Your human works in Chinese. … in Chinese"); the default describes
+    # the language instead, and the object of "in" stays grammatical in both ("in Chinese", "in the language …").
+    name = str(language or 'English').strip() or 'English'
+    named = name if source != 'default' else ''
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
+                         language_named=f'Your human works in {named}. ' if named else '',
+                         language_object=named or 'the language your human writes their goals in',
                          browser_text=', or the browser tool\'s snapshot' if there else '',
                          sim_head=head, sim_section=section)

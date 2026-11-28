@@ -80,12 +80,20 @@ class Store:
           CREATE TABLE IF NOT EXISTS inbox(
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal TEXT NOT NULL,
             text TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
-            kind TEXT NOT NULL DEFAULT 'nudge');
+            kind TEXT NOT NULL DEFAULT 'nudge',
+            -- Who wrote the row: '' is the human (or a peer's message, which is data, not approval), 'harness' is
+            -- the runtime's own loop note (a gate result, a drift nudge, a truncation warning). `_answering` must
+            -- not read its own note as the human speaking: the plain-text pause resets otherwise (#390 review P1).
+            source TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS peer_deliveries(id TEXT PRIMARY KEY, goal TEXT, error TEXT);
           -- Every steer, verbatim and at goal level: compaction and the finish report must be able to
           -- quote what the human actually said, which a summarised transcript cannot.
           CREATE TABLE IF NOT EXISTS steers(id INTEGER PRIMARY KEY, goal TEXT, text TEXT, ts REAL,
-                                            kind TEXT NOT NULL DEFAULT 'steer');
+                                            kind TEXT NOT NULL DEFAULT 'steer',
+                                            -- Who said it: '' the human (or a peer), 'harness' the runtime's own
+                                            -- note (a gate result, the language nudge). A compaction restates the
+                                            -- human's words as theirs; a harness note is labelled as one (#390 P2).
+                                            source TEXT NOT NULL DEFAULT '');
           -- Failures by signature, so "the same failure twice" is a fact about this call, not a mood.
           CREATE TABLE IF NOT EXISTS failures(id INTEGER PRIMARY KEY, goal TEXT, signature TEXT,
                                               count INTEGER, last_error TEXT, ts REAL,
@@ -209,42 +217,50 @@ class Store:
 
     def _migrate(self):
         """Add columns an older database predates. CREATE TABLE IF NOT EXISTS leaves an existing goals
-        table untouched, so the loop's own state has to be added explicitly."""
-        have = {r['name'] for r in self.db.execute('PRAGMA table_info(goals)')}
-        for name, decl in (('done_check','TEXT'), ('steer_seq','INTEGER NOT NULL DEFAULT 0'),
-                           ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT'),
-                           ('kind',"TEXT NOT NULL DEFAULT 'work'"), ('wake_at','REAL'), ('wake_note','TEXT'), ('gate','TEXT'),
-                           ('plan','INTEGER NOT NULL DEFAULT 0'), ('plan_text','TEXT'),
-                           ('session','TEXT')):   # (session: the conversation's id an OpenCode plan is sent)
-            if name not in have:
-                self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
-        if 'position' not in have:
-            # The queue's explicit order; an older database keeps its FIFO order by filing create time as position.
-            self.db.execute('ALTER TABLE goals ADD COLUMN position REAL')
-            self.db.execute('UPDATE goals SET position=created WHERE position IS NULL')
-        for table, name, decl in (('inbox','kind',"TEXT NOT NULL DEFAULT 'nudge'"),
-                                  ('steers','kind',"TEXT NOT NULL DEFAULT 'steer'")):
-            have = {r['name'] for r in self.db.execute('PRAGMA table_info(' + table + ')')}
-            if have and name not in have:
-                self.db.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + decl)
-        have = {r['name'] for r in self.db.execute('PRAGMA table_info(failures)')}
-        if have and 'last_error' not in have:
-            self.db.execute('ALTER TABLE failures ADD COLUMN last_error TEXT')
-        # history_search: a full-text index over the events that are history. A database from before it is indexed
-        # once, here, from its events.
-        fresh = not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='history_fts'").fetchone()
-        self.db.execute('CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5('
-                        'text, goal UNINDEXED, kind UNINDEXED, seq UNINDEXED)')
-        if fresh:
-            for r in self.db.execute('SELECT seq,goal,kind,data FROM events').fetchall():
-                try:
-                    text = history_text(r['kind'], json.loads(r['data']))
-                except ValueError:
-                    continue
-                if text:
-                    self.db.execute('INSERT INTO history_fts(rowid,text,goal,kind,seq) VALUES(?,?,?,?,?)',
-                                    (r['seq'], text, r['goal'], r['kind'], r['seq']))
-        self.db.commit()
+        table untouched, so the loop's own state has to be added explicitly.
+
+        One write transaction around the checks: a plain `table_info` read followed by an `ALTER` is a
+        check-then-act, and two processes opening the same old database at once (the CLI and a resident
+        turn) both saw the column missing and both ran the ALTER, so the loser raised `duplicate column
+        name` out of `Store.__init__` (#390 review P2-c). `BEGIN IMMEDIATE` takes the write lock before the
+        first check, so the second opener waits and then finds the column it needs already there."""
+        with self.transaction():
+            have = {r['name'] for r in self.db.execute('PRAGMA table_info(goals)')}
+            for name, decl in (('done_check','TEXT'), ('steer_seq','INTEGER NOT NULL DEFAULT 0'),
+                               ('approach_changes','INTEGER NOT NULL DEFAULT 0'), ('ledger','TEXT'),
+                               ('kind',"TEXT NOT NULL DEFAULT 'work'"), ('wake_at','REAL'), ('wake_note','TEXT'), ('gate','TEXT'),
+                               ('plan','INTEGER NOT NULL DEFAULT 0'), ('plan_text','TEXT'),
+                               ('session','TEXT')):   # (session: the conversation's id an OpenCode plan is sent)
+                if name not in have:
+                    self.db.execute('ALTER TABLE goals ADD COLUMN ' + name + ' ' + decl)
+            if 'position' not in have:
+                # The queue's explicit order; an older database keeps its FIFO order by filing create time as position.
+                self.db.execute('ALTER TABLE goals ADD COLUMN position REAL')
+                self.db.execute('UPDATE goals SET position=created WHERE position IS NULL')
+            for table, name, decl in (('inbox','kind',"TEXT NOT NULL DEFAULT 'nudge'"),
+                                      ('inbox','source',"TEXT NOT NULL DEFAULT ''"),
+                                      ('steers','kind',"TEXT NOT NULL DEFAULT 'steer'"),
+                                      ('steers','source',"TEXT NOT NULL DEFAULT ''")):
+                have = {r['name'] for r in self.db.execute('PRAGMA table_info(' + table + ')')}
+                if have and name not in have:
+                    self.db.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + name + ' ' + decl)
+            have = {r['name'] for r in self.db.execute('PRAGMA table_info(failures)')}
+            if have and 'last_error' not in have:
+                self.db.execute('ALTER TABLE failures ADD COLUMN last_error TEXT')
+            # history_search: a full-text index over the events that are history. A database from before it is
+            # indexed once, here, from its events, in the same transaction as the `fresh` check.
+            fresh = not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='history_fts'").fetchone()
+            self.db.execute('CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5('
+                            'text, goal UNINDEXED, kind UNINDEXED, seq UNINDEXED)')
+            if fresh:
+                for r in self.db.execute('SELECT seq,goal,kind,data FROM events').fetchall():
+                    try:
+                        text = history_text(r['kind'], json.loads(r['data']))
+                    except ValueError:
+                        continue
+                    if text:
+                        self.db.execute('INSERT INTO history_fts(rowid,text,goal,kind,seq) VALUES(?,?,?,?,?)',
+                                        (r['seq'], text, r['goal'], r['kind'], r['seq']))
 
     def update(self, gid, **fields):
         allowed = {'state', 'messages', 'summary', 'error', 'steps', 'step_limit', 'deadline',
@@ -260,15 +276,15 @@ class Store:
         sql = ','.join(k + '=?' for k in fields)
         self.db.execute('UPDATE goals SET ' + sql + ' WHERE id=?', [*fields.values(), gid])
 
-    def add_steer(self, gid, text, kind='steer'):
+    def add_steer(self, gid, text, kind='steer', source=''):
         """Keep the human's words verbatim at goal level, and return the id it was filed under."""
-        cur = self.db.execute('INSERT INTO steers(goal,text,ts,kind) VALUES(?,?,?,?)',
-                              (gid, text, time.time(), kind))
+        cur = self.db.execute('INSERT INTO steers(goal,text,ts,kind,source) VALUES(?,?,?,?,?)',
+                              (gid, text, time.time(), kind, source or ''))
         return cur.lastrowid
 
     def steers(self, gid):
         return [dict(r) for r in self.db.execute(
-            'SELECT id,text,ts,kind FROM steers WHERE goal=? ORDER BY id', (gid,))]
+            'SELECT id,text,ts,kind,source FROM steers WHERE goal=? ORDER BY id', (gid,))]
 
     def note_failure(self, gid, signature, error):
         """Count one more occurrence of a failure signature and return the new count."""
@@ -441,9 +457,12 @@ class Store:
         with self.transaction():
             gid = self.resolve(prefix)
             # Only the human's own words: the harness writes notes to the inbox too (gate results, answers to the
-            # agent's requests, cut-off notices), all tagged with a leading [...]; pulling one back would delete it.
-            row = self.db.execute("SELECT id,text FROM inbox WHERE goal=? AND consumed=0 AND substr(text,1,1)!='[' "
-                                  'ORDER BY id DESC LIMIT 1', (gid,)).fetchone()
+            # agent's requests, cut-off notices, the language nudge), all `source='harness'`; pulling one back would
+            # delete it. The leading `[` rule stays for a note written before `inbox.source` existed, where every
+            # harness note started with one: the language nudge does not, and up-arrow used to withdraw it as if
+            # the human had written it (#390 review P2-a).
+            row = self.db.execute("SELECT id,text FROM inbox WHERE goal=? AND consumed=0 AND source!='harness' "
+                                  "AND substr(text,1,1)!='[' ORDER BY id DESC LIMIT 1", (gid,)).fetchone()
             if row is None:
                 return gid, None
             self.db.execute('DELETE FROM inbox WHERE id=?', (row['id'],))
