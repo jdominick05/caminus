@@ -182,6 +182,11 @@ CLAUDE.md imports this file.
   YaRN runs on separate objects (`k3.Q3M_YARN_OF`: `dec_q3m*_yarn`, `pf_q3m*_yarn`); the default objects keep their
   code, and each YaRN object's spilled scalars must equal its native peer's (53 / 19 / 66 / 33): objcheck cannot pair
   them. Detail: docs/dev/qwen3-30b-a3b.md, "The long-context mode".
+- `engine/q35_file.py`: the dense qwen35 line's file-level facts, moved out of `engine/q35_dense.py` (module choice,
+  block kinds, shapes, the VRAM projection's terms, `attn_part_elems`), plus `upload_bytes` (a tensor's card bytes at a
+  format), `gu_fused` (the tape's gate | up fusion test, called from `q35_dense._build_tape`) and `mat_tensors` (the trunk
+  matrix roles `benchmarks/own_mv_census.py` times). `q35_dense.py` re-exports them, so every existing import is
+  unchanged.
 - `engine/`: `flashnext_tp.py` (the Coder, two cards), `qwen35_one.py` (one-card Qwen3.6 / AREX-2), `qwen3next_tp.py`,
   `q3moe_one.py` (Qwen3-30B-A3B: own reader, own kernels; `tests/test_own_code.py` keeps ggml headers, gguf-py and the
   tokenizers library off its path), `q3moe_tp.py` (the same model on two cards on `dec_q3m_tp`: kv heads and each
