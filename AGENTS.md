@@ -234,6 +234,9 @@ CLAUDE.md imports this file.
   `computeThresholds`; it always exits 0. Tests: tests/harness/test_context_note.py.
 - `tests/`: plain scripts printing PASS / FAIL and `RESULT PASS` (no pytest); `tests/serve/` is unittest via `run_all.py`.
 - `tools/gates/`: the bitwise and D-281 gates; `tools/reference/`: llama.cpp reference builders.
+- `tools/emberlab/`: the Ember lab (docs/dev/ember.md, "The lab"): scripted or real brains against a real resident in a
+  fresh home per run. `propose` measures a `proposed` SIM record as a base/arm A/B and closes it with `sim.observe`;
+  `--dry-run` prints the plan and touches nothing, the network included. Tests: tests/tools/test_emberlab.py (CPU).
 
 ## Models and data
 

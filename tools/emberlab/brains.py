@@ -64,13 +64,28 @@ class OpenAI(Brain):
         if relay and not self.model:
             raise ValueError(f'{spec}: a relayed brain names its model (URL#MODEL)')
 
-    def start(self):
-        if not self.model:
+    def resolve(self):
+        """Ask the server which model it lists when the spec named none; its label then names the model.
+
+        Without this, `openai:URL` reaches `plan_md` and `arms_spec` as `?@URL`, so a model swapped between an
+        errored run and its rerun compared equal and the folder's identity never named the model that answered
+        (#385 review P2). Called before the identity is computed, so plan.md, arms.json, plan.json and every run id
+        name the model that runs.
+        """
+        if self.model:
+            return self.model
+        try:
             with urllib.request.urlopen(self.url + '/models', timeout=10) as r:
                 ids = [m.get('id') for m in json.load(r).get('data', []) if m.get('id')]
-            if not ids:
-                raise ValueError(f'{self.url} lists no model')
-            self.model = ids[0]
+        except (OSError, ValueError) as e:
+            raise ValueError(f'{self.url} lists no model ({e})')
+        if not ids:
+            raise ValueError(f'{self.url} lists no model')
+        self.model = ids[0]
+        return self.model
+
+    def start(self):
+        self.resolve()
 
     def label(self):
         return f'{self.model or "?"}@{self.url}'
@@ -268,6 +283,26 @@ def serve_driven(ctl, judge=False, ttl=14400, caminus=False):
     print(srv.server_port, flush=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     time.sleep(ttl)
+
+
+def resolve_all(brains):
+    """Ask each endpoint for the model it lists when the spec named none, before any run id or identity is built.
+
+    `openai:URL` with no `#MODEL` used to enter `plan.md`, `arms.json`, `plan.json` and every run id as `?@URL`:
+    a model swapped between an errored run and its rerun compared equal, and the folder never named the model that
+    answered (#385 review P2). One function, called by `lab.py run` and `lab.py propose` before they compute run
+    ids, so both name the model everywhere; a brain that already names one, or names none at all, is unchanged.
+    An endpoint that cannot name a model is refused here rather than recorded as `?`.
+    """
+    for b in brains:
+        resolve = getattr(b, 'resolve', None)
+        if resolve is None:
+            continue
+        try:
+            resolve()
+        except ValueError as e:
+            raise SystemExit(str(e))
+    return brains
 
 
 def parse(spec, parallel=None):

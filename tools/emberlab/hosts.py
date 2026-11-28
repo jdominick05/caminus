@@ -132,6 +132,24 @@ class Agent(Local):
         return self._ssh(f'cat {shlex.quote(path)} 2>/dev/null', 60).stdout
 
 
+def kind(explicit, brains):
+    """The host a run uses: an explicit --host, else `agent` for a real brain (on `local` a real model gets a shell
+    as you). One function so `lab.py run` and `lab.py propose` cannot disagree about which host and which rule."""
+    return explicit or ('agent' if any(getattr(b, 'real', False) for b in brains) else 'local')
+
+
+def local_refusal(explicit, brains, unsafe_local=False):
+    """Why a real model may not run on the local host, or ''. One rule, read by both commands.
+
+    Here it is one function, and the command that prints the plan and the command that starts the runs both call it:
+    `propose` and `run` cannot answer the same command line two ways.
+    """
+    if (any(getattr(b, 'real', False) for b in brains) and kind(explicit, brains) == 'local'
+            and not unsafe_local):
+        return 'a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)'
+    return ''
+
+
 def make(kind, out, checkout):
     if kind == 'local':
         return Local(out)

@@ -8,6 +8,10 @@ Batch (measure):
              [--host local|agent] [--only KEY,...] [--jobs N] [--timeout S]
   lab.py report DIR [--md FILE]                one table per brain x arm, and per task
   lab.py compare DIR --base A --arm B          the A/B verdict: better only if better across the board
+  lab.py propose --sim-home HOME --record ID --brain BRAIN [--config JSON | --arm-checkout DIR] ...
+                                               a `proposed` SIM record becomes two arms; the runs close it (Haiku
+                                               through the owner's relay is the tool A/B brain; billed runs need
+                                               --approve-paid; see proposal.py)
 
 Sessions (design with the agent):
   lab.py open NAME --brain BRAIN --out DIR [--host agent] [--fixture SUITE]   a lab agent, its daemon up
@@ -37,6 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brains as brains_mod    # noqa: E402
 import hosts as hosts_mod      # noqa: E402
+import proposal as proposal_mod  # noqa: E402
 import report as report_mod    # noqa: E402
 import runner                  # noqa: E402
 import sessions                # noqa: E402
@@ -46,9 +51,15 @@ def cmd_run(a):
     suite = runner.load_suite(a.suite)
     arms = runner.load_arms(a.arm, a.arms)
     bs = [brains_mod.parse(s, a.parallel) for s in a.brain]
-    host_kind = a.host or ('agent' if any(b.real for b in bs) else 'local')
-    if host_kind == 'local' and any(b.real for b in bs) and not a.unsafe_local:
-        raise SystemExit('a real model on the local host gets a shell as you: use --host agent (or --unsafe-local)')
+    # an `openai:URL` brain with no `#MODEL` labels itself `?@URL` until its endpoint is asked, and that label is
+    # in every run id and in plan.json: ask first, so both name the model that answers (#385 review P2)
+    brains_mod.resolve_all(bs)
+    host_kind = hosts_mod.kind(a.host, bs)
+    # one rule for both commands (hosts.local_refusal), so `run` and `propose` cannot answer the same command line
+    # two ways (#385 review)
+    why = hosts_mod.local_refusal(a.host, bs, unsafe_local=a.unsafe_local)
+    if why:
+        raise SystemExit(why)
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     host = hosts_mod.make(host_kind, out, runner.REPO)
@@ -64,8 +75,14 @@ def cmd_run(a):
     for b in bs:
         b.start()
     host.prepare(arms)
-    (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], host=host_kind, repeats=a.repeats,
-                                                   brains=[b.label() for b in bs], arms=[x.describe() for x in arms],
+    # the suite digest is part of the plan a reader must be able to reproduce: an in-place edit of a fixture or a
+    # task keeps `suite`'s name and every task key, so the name alone does not say which bytes ran (#385 review P1)
+    (out / 'plan.json').write_text(json.dumps(dict(suite=suite['name'], suite_sha=runner.suite_sha(suite),
+                                                   host=host_kind, repeats=a.repeats,
+                                                   brains=[b.label() for b in bs], arms=[x.plan_arm() for x in arms],
+                                                   # the flag that unlocked the host, as given: the record says which
+                                                   # permission a run held, not just that it held one (#385 review P2)
+                                                   approvals=proposal_mod.approvals_granted(a),
                                                    runs=[r['id'] for r in runs]), indent=1))
     lock = threading.Lock()
     gates = {b.spec: threading.Semaphore(b.parallel) for b in bs}
@@ -111,15 +128,17 @@ def cmd_compare(a):
     return 0 if c['verdict'].startswith(('better', 'no difference')) else 1
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    sub = ap.add_subparsers(dest='cmd', required=True)
-    p = sub.add_parser('run')
-    p.add_argument('--suite', required=True, help='a suite name under benchmarks/ember/suites, or a folder')
-    p.add_argument('--brain', action='append', required=True)
+def add_run_args(p, required=True):
+    """`run`'s flags, in one place: `main` and `run_defaults` (which `propose` starts runs with) read the same list.
+
+    A flag added here reaches every caller; before, `propose` built the run namespace by hand and a flag added to
+    `run` silently did not reach a propose-started run (#385 review P2).
+    """
+    p.add_argument('--suite', required=required, help='a suite name under benchmarks/ember/suites, or a folder')
+    p.add_argument('--brain', action='append', required=required)
     p.add_argument('--arm', action='append', help='NAME[=CHECKOUT] (default: base = this checkout)')
-    p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}')
-    p.add_argument('--out', required=True)
+    p.add_argument('--arms', help='JSON {NAME: {checkout, config, env}}, or the arms.json `propose` writes')
+    p.add_argument('--out', required=required)
     p.add_argument('--repeats', type=int, default=1)
     p.add_argument('--only', help='comma-separated task keys')
     p.add_argument('--host', choices=('local', 'agent'))
@@ -128,6 +147,23 @@ def main(argv=None):
     p.add_argument('--parallel', type=int, help="override every brain's parallel cap")
     p.add_argument('--timeout', type=int, help='seconds per goal (default: the suite\'s)')
     p.add_argument('--rerun', action='store_true', help='run every id again, even those already in results.jsonl')
+    return p
+
+
+def run_defaults():
+    """Every field `cmd_run` reads, at its parser default; `propose` sets the ones its record pins.
+
+    The defaults come from `add_run_args` itself (not a copy of them), so a flag added to `run` is present with its
+    own default and `propose` cannot drift from `run`'s parser.
+    """
+    ap = argparse.ArgumentParser(add_help=False)
+    return add_run_args(ap, required=False).parse_args([])
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    p = add_run_args(sub.add_parser('run'))
     p = sub.add_parser('report')
     p.add_argument('dir')
     p.add_argument('--md')
@@ -136,6 +172,40 @@ def main(argv=None):
     p.add_argument('--base', required=True)
     p.add_argument('--arm', required=True)
     p.add_argument('--json', action='store_true')
+
+    p = sub.add_parser('propose')
+    p.add_argument('--sim-home', required=True,
+                   help="the resident's home whose SIM log holds the record (it may be live: each write is one "
+                        'BEGIN IMMEDIATE transaction, WAL, busy_timeout, the path `caminus ember agent sim` uses)')
+    p.add_argument('--record', required=True, help='the id of a `proposed` SIM record')
+    p.add_argument('--suite', default='basic')
+    p.add_argument('--brain', action='append', required=True)
+    p.add_argument('--repeats', type=int, default=3,
+                   help='runs per cell (default 3: report.compare calls fewer noise-prone)')
+    p.add_argument('--only', help='comma-separated task keys')
+    p.add_argument('--host', choices=('local', 'agent'))
+    p.add_argument('--jobs', type=int, default=4)
+    p.add_argument('--parallel', type=int)
+    p.add_argument('--out', help='default: SIM-HOME/emberlab/sim-ab/RECORD')
+    p.add_argument('--config', help="the proposal as config.json keys for arm, JSON")
+    p.add_argument('--env', help="the proposal as environment variables for arm, JSON")
+    p.add_argument('--base-config', help='config.json keys for base (rarely: base runs as it runs now)')
+    p.add_argument('--base-env')
+    p.add_argument('--arm-checkout', help='the checkout with the proposed code (default: this checkout)')
+    p.add_argument('--base-checkout')
+    p.add_argument('--dry-run', action='store_true',
+                   help='print the plan and create nothing (also asks no brain endpoint for its model: `?@URL` is '
+                        'named as it stands and resolved when the run starts)')
+    p.add_argument('--approve-paid', action='store_true',
+                   help="run a brain billed through the owner's relay (the plan names it first)")
+    p.add_argument('--unsafe-local', action='store_true', help='let a real model run as you (the local host)')
+    p.add_argument('--prediction-error', help='where the prediction was wrong, filled in after the run; a review '
+                                             'says whether the miss is understood, so leave it empty unless it is - '
+                                             "sim.observe treats a non-empty value as the record's final answer on "
+                                             'why the prediction missed and the log is append-only, so a typo is '
+                                             'permanent')
+    p.add_argument('--goal', help="the goal id the observation lives in: the record's own (a different one is "
+                                  'refused, since an observation is appended to the record\'s goal)')
 
     p = sub.add_parser('open')
     p.add_argument('name')
@@ -179,7 +249,9 @@ def main(argv=None):
     if a.cmd == 'serve-driven':
         brains_mod.serve_driven(a.ctl, a.judge, a.ttl, a.caminus)
         return 0
-    return dict(run=cmd_run, report=cmd_report, compare=cmd_compare, open=sessions.open_session, say=sessions.say,
+    return dict(run=cmd_run, report=cmd_report, compare=cmd_compare,
+                propose=lambda a: proposal_mod.cmd_propose(a, cmd_run, run_defaults),
+                open=sessions.open_session, say=sessions.say,
                 turn=sessions.turn, reply=sessions.reply, events=sessions.events, status=sessions.status,
                 close=sessions.close)[a.cmd](a)
 

@@ -150,11 +150,12 @@ inside the harness with an agent while you design it.
 
 | Module | |
 |---|---|
-| `lab.py` | the command line: `run`, `report`, `compare`; `open`, `say`, `turn`, `reply`, `events`, `status`, `close` |
+| `lab.py` | the command line: `run`, `report`, `compare`, `propose`; `open`, `say`, `turn`, `reply`, `events`, `status`, `close` |
 | `runner.py` | suites, arms, the run matrix, one run (fresh home, `once`, events, the check) |
 | `brains.py` | `scripted:NAME`, `driven` (you answer each model call; `driven:caminus` plays a `caminus serve` whose answers carry `reply --timings`), `openai:URL[#MODEL]`, `openai+relay:URL#MODEL`, `anthropic:PORT#MODEL` |
 | `hosts.py` | `local` (scratch folders as you) and `agent` (the agent account over Ember's SSH, under `~/lab/`) |
 | `report.py` | tables per brain, arm and task; the A/B verdict |
+| `proposal.py` | `propose`: a `proposed` SIM record becomes two arms, and the runs close it with `sim.observe` |
 | `sessions.py` | long-lived lab agents to talk with or drive |
 | `tui.py` | a terminal program in a hidden tmux window: keys in, exact screens out (text, colour, SVG) |
 
@@ -176,6 +177,43 @@ python -I tools/emberlab/lab.py compare DIR --base base --arm candidate
 - **Order.** Arms alternate their order every repeat, so neither always runs first.
 - **Records.** Each record names its runtime's commit and whether its tree was dirty.
 - **Resuming.** `run` appends to `results.jsonl` and skips the ids already there, so an interrupted matrix resumes.
+
+**Measure a proposal.** The post-goal reflection writes what would have helped as a `proposed` SIM record. `propose`
+turns one into an experiment and closes it with what the runs showed:
+
+```sh
+python -I tools/emberlab/lab.py propose --sim-home HOME --record ID \
+  --suite basic --brain anthropic:8091#claude-haiku-5-5 --config '{"sim": false}' --repeats 3 --out DIR
+```
+
+- **Two arms, one difference.** `base` runs the tree as it runs now and `arm` runs it with the proposal applied
+  (`--config` / `--env`, or `--arm-checkout` for a code change). Two identical arms are refused: nothing differs.
+- **The plan comes first.** Suite, arms, brains, the number of runs and every brain billed through the relay are
+  printed before anything starts. A paid brain needs `--approve-paid`, a real model on the local host needs
+  `--unsafe-local`, and `--dry-run` stops after the plan. A dry run touches nothing, including the network: an
+  `openai:URL` brain with no `#MODEL` prints as `?@URL` and is asked for its model when the run starts (a real run
+  resolves it before any identity is built).
+- **The record carries the numbers.** `sim.observe` appends the verdict and each brain's pass rate, false
+  completions and median steps, plus the suite and the tasks that ran; the observer is `emberlab`, and the
+  predictor's brain stays named. The observation lands in the record's own goal, so `--goal` naming a different
+  goal is refused before a run rather than accepted and ignored (a short id, a prefix of the record's goal, is
+  accepted, as `say --goal` resolves one).
+- **A closed record stays closed.** An `observed` record is not measured again; a `proposed` one is the input
+  (`recorded` is refused: its change is already in the tree, so the A/B would measure nothing). A verdict of
+  `incomplete` (a brain with no run of one arm) leaves the record open.
+- **One folder, one experiment.** `--out` records the arms (checkout, commit, tree state, config, env) and the plan
+  (suite, brains, `--only`, repeats, the approval flags granted as given), and a rerun that differs in any of them is
+  refused: run ids carry no record id,
+  so a shared folder would reuse the other experiment's rows. The checkouts are recorded as given, so an
+  `--arm-checkout` under your home leaves that absolute path in `arms.json`: keep an `--out` folder private unless
+  the paths in it are ones you would publish.
+- **One race the plan does not close.** The record's status is re-read after `claim_folder`, which narrows but does
+  not close the window: a resident can observe the record between that re-read and the last run. `write_observation`
+  then catches `sim.observe`'s refusal of an observed version and exits with a plain message leaving the record as-is,
+  so the cost is compute already spent, not a record the runs contradicted.
+- **The exit code.** `propose` exits 0 when the verdict is `better across the board` or `no difference`, and 1 when
+  it is `worse for ...` or another verdict (a script can gate on it); a run that errored, a refusal and a usage
+  error exit non-zero and leave the record open.
 
 **Work with the agent.** A lab session is a resident with its daemon running, in its own home:
 
