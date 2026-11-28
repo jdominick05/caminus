@@ -17,8 +17,9 @@ func mockHome(w int) string {
 	})
 	sv.Append("The bounds check reads one past the end when n == len. I changed `>` to `>=` and ")
 	sv.Append("I'm adding a parser test for the empty input next.\n```c\nassert(parse(\"\", 0) == 0);\n```")
+	header, _ := shellHeader("resident", "working", "Make the parser tests pass", 14, w)
 	parts := []string{
-		shellHeader("resident", "working", "Make the parser tests pass", 14, w),
+		header,
 		"",
 		emberDim.Render("  while you were away (2 stretches): read about tide pools; built a haiku machine  ·  /recap"),
 		"",

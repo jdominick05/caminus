@@ -3495,7 +3495,7 @@ func TestAnEmberSessionNamesItselfEmber(t *testing.T) {
 		t.Fatalf("the drawn session calls itself CAMINUS:\n%s", frame)
 	}
 	// the engine's own screens keep their name (the top screen draws CAMINUS · top)
-	if top := ansi.Strip(screenHeader("CAMINUS", "top", "idle", lipgloss.NewStyle(), "", "", 80)); !strings.HasPrefix(top, "CAMINUS · top idle") {
+	if top, _ := screenHeader("CAMINUS", "top", "idle", lipgloss.NewStyle(), "", "", 80); !strings.HasPrefix(ansi.Strip(top), "CAMINUS · top idle") {
 		t.Fatalf("the Caminus top screen is still CAMINUS:\n%s", top)
 	}
 }
