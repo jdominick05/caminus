@@ -469,6 +469,52 @@ __device__ __forceinline__ void op_attn_comb(const Seg & sg, int q) {
 #endif
     constexpr int COMB_U = ATTN_COMB_U;
     float l = 0.0f, acc = 0.0f;
+#ifdef ATTN_COMB_LDS
+#ifndef K3_Q35_ATTN_SPLIT
+#error "ATTN_COMB_LDS uses the own dense modules' OP_ATTN_PART LDS"
+#endif
+    // (the own dense modules: kernels/ops_q35.h) each split's factor f_u = expf(m_u - m) and l_u * f_u computed once, by one
+    // thread, into LDS, not by all 256 threads; the walk then loads only acc_u[d] (the same expf inputs, the same products,
+    // the same additions in u order: the same bits). The LDS is OP_ATTN_PART's (its q heads, else its scores: each task
+    // writes them before it reads them), so the kernel's LDS does not grow; chunks of CH splits. (The packed PART has no
+    // QL path: its objects would gain the 6 KB.)
+#if defined(ATTN_QL) && !defined(K3_Q35_ATTN_PACK)
+    constexpr int CH = ATTN_G * ATTN_D / 2 / COMB_U * COMB_U;
+    __attribute__((address_space(3))) float * cf = (__attribute__((address_space(3))) float *)ATTN_OWN_QL;
+#else
+    constexpr int CH = (int)(sizeof(ATTN_OWN_LDS) / sizeof(float)) / 2 / COMB_U * COMB_U;
+    __attribute__((address_space(3))) float * cf = ATTN_LDS;
+#endif
+    static_assert(CH >= COMB_U, "ATTN_COMB_LDS: a round per chunk");
+#pragma unroll 1
+    for (int c0 = 0; c0 < ns; c0 += CH) {
+        const int nc = min(CH, ns - c0);
+        __syncthreads();
+        for (int i = tid; i < nc; i += 256) {
+            const float f = expf(rec[(c0 + i) * ATTN_RS] - m);
+            cf[i] = f; cf[CH + i] = rec[(c0 + i) * ATTN_RS + 1] * f;
+        }
+        __syncthreads();
+        const float * rc = rec + c0 * ATTN_RS + 4 + tid;
+        int j = 0;
+#pragma unroll 1
+        for (; j + COMB_U <= nc; j += COMB_U) {
+            float ra[COMB_U];
+#pragma unroll
+            for (int i = 0; i < COMB_U; i++) ra[i] = rc[(j + i) * ATTN_RS];
+#pragma unroll
+            for (int i = 0; i < COMB_U; i++) {
+                l = l + cf[CH + j + i];
+                acc = acc + ra[i] * cf[j + i];
+            }
+        }
+#pragma unroll 1
+        for (; j < nc; j++) {
+            l = l + cf[CH + j];
+            acc = acc + rc[j * ATTN_RS] * cf[j];
+        }
+    }
+#else
     int u = 0;
 #pragma unroll 1
     for (; u + COMB_U <= ns; u += COMB_U) {
@@ -492,6 +538,7 @@ __device__ __forceinline__ void op_attn_comb(const Seg & sg, int q) {
         l = l + ru[1] * f;
         acc = acc + ru[4 + tid] * f;
     }
+#endif
 #else
     float m = rec[0];
     for (int u = 1; u < ns; u++) m = fmaxf(m, rec[(size_t)u * ATTN_RS]);
