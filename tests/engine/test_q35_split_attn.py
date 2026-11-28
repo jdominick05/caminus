@@ -1,10 +1,13 @@
 """The dense qwen35 own modules' decode attention (the split pair of kernels/ops_attn_split.h, built into dec_q35_swift /
-dec_q35_swift_ver / dec_q35_tcap by kernels/ops_q35.h under K3_Q35_ATTN_SPLIT) on one attention layer's shapes (24 query
-heads over 4 kv heads, head dim 256, f16 cache), a tape of just the pair on random q and cache rows:
+dec_q35_tcap / dec_q35_gsq and their verify objects by kernels/ops_q35.h under K3_Q35_ATTN_SPLIT) on one attention
+layer's shapes (24 query heads over 4 kv heads, head dim 256, f16 cache), a tape of just the pair on random q and cache
+rows:
   - bitwise the GGUF module's pair on the same inputs (dec_q35_arex for T = 1, dec_q35_arex_ver for T = 2, 3, 4: the same
-    source, its PART unpacked), at every list length tried: the verify module dec_q35_swift_ver runs the packed PART (one
-    task per (split, kv head) for every pass row: kernels/ops_attn_split.h op_attn_part_packed) and must give its bits;
-    lengths 34 / 35 / 4098 put a split under only some of a pass's rows
+    source, its PART unpacked), at every list length tried: the verify modules dec_q35_{swift,tcap,gsq}_ver run the
+    packed PART (one task per (split, kv head) for every pass row: kernels/ops_attn_split.h op_attn_part_packed) and must
+    give its bits;
+    lengths 34 / 35 / 4098 put a split under only some of a pass's rows; 3585 / 12801 / 24577 start a second chunk of
+    OP_ATTN_COMB's LDS factors (ATTN_COMB_LDS: 112 / 400 / 768 splits a chunk on the GSQ, verify and QL objects)
   - a T-row pass's row r bitwise the one-row pass at position pos + r (the split layout depends only on the list length)
   - the packed PART refuses T above k3.ATTN_PACK_T and a QSA selection (identity lists only)
   - against float64 attention: max |difference| <= 1e-5 x max |V|
@@ -22,7 +25,7 @@ dec_q35_{swift,tcap}_ver_kvq8 with the unpacked PART) over a q8_0 cache that cam
     p0 .. p0 + T - 1 written); the output H64 once and twice bitwise the host transform (twice is the input within
     1e-6 x max |x| in fp32); a NaN in K raises InvalidKVEncoding from the sticky error word
   - the Q8 objects refuse an f16 cache, a QSA selection and T 5 (the attention arms above run no rotation)
-  tools/guard.sh LOG 600 python -I tests/engine/test_q35_split_attn.py [--lens 1,2,31,32,33,34,35,1000,4096,4098,16389] [--kv q8]
+  tools/guard.sh LOG 600 python -I tests/engine/test_q35_split_attn.py [--lens 1,2,31,32,33,34,35,1000,3585,4096,4098,12801,16389,24577,32800] [--kv q8]
 New kernel code: run it on a non-display card alone first (HIP_VISIBLE_DEVICES=<its index>). Prints PASS / FAIL and RESULT."""
 import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'python'))
@@ -30,7 +33,7 @@ import numpy as np, torch
 from caminus.device import capacity
 from caminus.engine import k3
 
-ap = argparse.ArgumentParser(); ap.add_argument('--lens', default='1,2,31,32,33,34,35,1000,4096,4098,16389')
+ap = argparse.ArgumentParser(); ap.add_argument('--lens', default='1,2,31,32,33,34,35,1000,3585,4096,4098,12801,16389,24577,32800')
 ap.add_argument('--kv', choices=('f16', 'q8'), default='f16', help='q8: the separate Q8 objects on a q8_0 cache')
 A = ap.parse_args()
 Q8 = A.kv == 'q8'
@@ -197,15 +200,15 @@ bit, rows_ok, err = True, True, 0.0
 for n in LENS:
     pos = n - 1
     q1 = torch.randn(H * D, generator=g, device='cuda') * 0.1
-    a = run('dec_q35_swift', 1, pos, q1); b = run('dec_q35_arex', 1, pos, q1); c = run('dec_q35_tcap', 1, pos, q1)
-    bit &= torch.equal(a, b) and torch.equal(a, c)
+    a = run('dec_q35_swift', 1, pos, q1); b = run('dec_q35_arex', 1, pos, q1)
+    bit &= torch.equal(a, b) and all(torch.equal(a, run(m, 1, pos, q1)) for m in ('dec_q35_tcap', 'dec_q35_gsq'))
     err = max(err, float(np.abs(a[0].double().cpu().numpy() - ref(q1, pos)).max()))
     for T in (2, 3, 4):
         if n < T: continue
         qT = torch.randn(T * H * D, generator=g, device='cuda') * 0.1
         p0 = n - T
         aT = run('dec_q35_swift_ver', T, p0, qT); bT = run('dec_q35_arex_ver', T, p0, qT)
-        bit &= torch.equal(aT, bT)
+        bit &= torch.equal(aT, bT) and all(torch.equal(aT, run(m, T, p0, qT)) for m in ('dec_q35_tcap_ver', 'dec_q35_gsq_ver'))
         for r in range(T):
             rows_ok &= torch.equal(aT[r], run('dec_q35_swift', 1, p0 + r, qT[r * H * D:(r + 1) * H * D].contiguous())[0])
     print(f'  list length {n}: max |own - float64| so far {err:.2e}', flush=True)

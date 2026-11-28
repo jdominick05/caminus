@@ -56,6 +56,18 @@ enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
 #if !defined(ATTN_QL) && !defined(K3_Q35_GSQ)   // (dec_q35_gsq: 20,528 B of LDS a workgroup; + 6 KB = 26,672 B, and a
 #define ATTN_QL                                 //  WGP's 128 KB then holds 4, not the XT grid's 5)
 #endif
+// OP_ATTN_COMB with each split's factors computed once into LDS (ATTN_COMB_LDS), its walk then loading only the split's
+// acc word, 16 splits a round (the same bits). One layer alone (dec_q35_tcap, benchmarks/attn_depth.py, L2 flushed
+// before each launch, XT, median of 15 interleaved): the pair 383.4 -> 339.0 us at 32,768 cells (COMB 92 -> 45), 69.4
+// -> 65.1 at 4,096, 33.8 -> 32.8 at 512; 8 splits a round: 350.0 / 66.4 / 33.7. ThinkingCap's decode step
+// (benchmarks/q35_verify.py, XT, base / change interleaved): 23.39 / 23.93 / 28.93 -> 23.38 / 23.86 / 28.19 ms at 512 /
+// 4,096 / 32,768. It costs k3_run 1 to 5 more spilled SGPRs on these objects (inside the noise at 512).
+#if !defined(ATTN_COMB_LDS) && !defined(K3_Q35_MOE)
+#define ATTN_COMB_LDS
+#ifndef ATTN_COMB_U
+#define ATTN_COMB_U 16
+#endif
+#endif
 #endif
 #define K3_ATTN_COMB_FAST
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
