@@ -1,6 +1,7 @@
 """The resident's durable goals, conversation, actions and observable event stream."""
 from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -124,6 +125,17 @@ class Store:
           CREATE TABLE IF NOT EXISTS grants(
             goal TEXT NOT NULL, command TEXT NOT NULL, ts REAL NOT NULL,
             UNIQUE(goal,command));
+          -- A delegate child (#342) is an ordinary goal; this row is what makes it a child: the parent, the brain
+          -- it runs on, its dollar cap and the spend the cap reads, and the short report the parent gets back.
+          CREATE TABLE IF NOT EXISTS delegates(
+            child TEXT PRIMARY KEY, parent TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
+            provider TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'worker',
+            -- no DEFAULT on cap_usd (#382 review): a stored 0 read as "no cap at all" once; a cap is always
+            -- written by delegate_add, which refuses 0 and less.
+            cap_usd REAL NOT NULL, spend_usd REAL NOT NULL DEFAULT 0,
+            allowance_usd REAL NOT NULL DEFAULT 0, outcome TEXT NOT NULL DEFAULT '',
+            report TEXT, started REAL NOT NULL, ended REAL);
+          CREATE INDEX IF NOT EXISTS delegates_parent ON delegates(parent,started);
         ''')
         self._migrate()
         self.stamped = {}    # goal id -> when this process last wrote the time into its conversation (stamp)
@@ -291,6 +303,55 @@ class Store:
             'SELECT 1 FROM events WHERE goal=? AND kind=? AND seq > COALESCE('
             '(SELECT MAX(seq) FROM events WHERE goal=? AND kind=? AND data NOT LIKE ?),0) LIMIT 1',
             (gid, 'verified', gid, 'steers_applied', '%"redirect": false%')).fetchone())
+
+    def delegate_add(self, child, parent, model, provider, role, cap_usd):
+        """Register a delegate child: its brain, its role and its dollar cap (the metric the cap reads is this row's
+        spend_usd + allowance_usd, kept by delegate_spend)."""
+        cap = float(cap_usd)
+        # a NaN cap passed `cap <= 0` as False here and then failed the INSERT with a bare IntegrityError (SQLite
+        # stores a NaN as NULL, and the column is NOT NULL); an infinite cap is stored and `spend < inf` never
+        # trips, so the child ran with no effective cap (#382 review, rev-glm P2)
+        if not math.isfinite(cap) or cap <= 0:
+            raise ValueError('a delegate needs a positive dollar cap, and a finite one: %r read as no cap at all '
+                             '(#382 review)' % cap_usd)
+        self.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) VALUES(?,?,?,?,?,?,?)',
+                        (child, parent, model or '', provider or '', role, cap, time.time()))
+
+    def delegate(self, child):
+        r = self.db.execute('SELECT * FROM delegates WHERE child=?', (child,)).fetchone()
+        return dict(r) if r else None
+
+    def delegate_spend(self, child, usd=0.0, allowance=0.0):
+        """Add one turn's spend to a child's ledger: usd is money the provider charged, allowance the OpenCode plan's
+        own dollars used inside its allowance (a Go turn costs $0 of money and real allowance: both count, the two
+        are kept apart). A row that is not a delegate is not updated: a top-level goal has no cap to read."""
+        self.db.execute('UPDATE delegates SET spend_usd=round(spend_usd+?,8), allowance_usd=round(allowance_usd+?,8) '
+                        'WHERE child=?', (float(usd or 0.0), float(allowance or 0.0), child))
+
+    def delegate_done(self, child, outcome, report=None):
+        """Close a child's row with its outcome (completed / capped / failed / incomplete / orphaned) and its report."""
+        self.db.execute('UPDATE delegates SET outcome=?, report=?, ended=? WHERE child=?',
+                        (outcome, json.dumps(report, ensure_ascii=False) if report is not None else None,
+                         time.time(), child))
+
+    def workers(self):
+        """What a UI shows of delegation: the running children and the newest finished ones, with the spend the cap
+        reads (money and plan allowance, kept apart so a $0 Go turn still shows its allowance).
+
+        Every open row is in the answer. A running child's `outcome` is NULL (only `delegate_done` writes text), so
+        `ORDER BY outcome='' DESC, started DESC LIMIT 20` sorted it last - a NULL is smallest in SQLite - and twenty
+        finished children of a long-lived session crowded every running one out of the window: the panel said "no
+        children running" while one ran (#382 review, rev-glm P2). Both spellings of open count, and the finished
+        side stays bounded at 20."""
+        rows = [dict(r) for r in self.db.execute(
+            'SELECT child,parent,model,provider,role,cap_usd,spend_usd,allowance_usd,outcome,started,ended '
+            'FROM delegates WHERE ifnull(outcome,\'\')=\'\' OR child IN '
+            '(SELECT child FROM delegates WHERE ifnull(outcome,\'\')<>\'\' ORDER BY started DESC LIMIT 20) '
+            'ORDER BY ifnull(outcome,\'\')=\'\' DESC, started DESC')]
+        for r in rows:
+            r['spend_usd'], r['allowance_usd'] = round(r['spend_usd'], 6), round(r['allowance_usd'], 6)
+            r['running'] = not r['outcome']
+        return rows
 
     def clear_precondition_failures(self, gid, text):
         """Forget the failures that were only a precondition's refusal (text: in its error, also when the watchdog
@@ -463,7 +524,13 @@ class Store:
         return rows[0]
 
     def latest_goal(self):
-        r = self.db.execute('SELECT id FROM goals ORDER BY created DESC LIMIT 1').fetchone()
+        """The newest goal a command names when it names none - never a delegate child.
+
+        A child is created by its parent's call, so it is the newest row while it runs: `pause`, `rewind`, `diff` and
+        `compact` without an id landed on it instead of on the goal the human was looking at (#382 review, Opus 5.5
+        P2). A child is reached by id, which its parent's report carries."""
+        r = self.db.execute("SELECT id FROM goals WHERE ifnull(kind,'') <> 'delegate' ORDER BY created DESC "
+                            "LIMIT 1").fetchone()
         if r is None:
             raise ValueError('no goals yet')
         return r['id']

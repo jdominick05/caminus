@@ -11,6 +11,37 @@ import (
 	"testing"
 )
 
+// The workers row (#342, #382 review): the "last" child is the finished one with the newest Started - the status's
+// own sort is not the card's fact; and the cap counts money and the Go plan's allowance, so the row shows their sum.
+func TestWorkersRowNamesTheNewestFinishedChildAndCountsAllowance(t *testing.T) {
+	if got := workersRow(nil); got != "" {
+		t.Fatalf("no children: %q", got)
+	}
+	ws := []residentWorker{
+		{Child: "b", SpendUSD: 0.01, AllowanceUSD: 0.02, CapUSD: 0.5, Outcome: "completed", Started: 200},
+		{Child: "a", SpendUSD: 0.03, AllowanceUSD: 0, CapUSD: 0.5, Outcome: "capped", Started: 100},
+	}
+	if got, want := workersRow(ws), "no children running · last completed $0.0300"; got != want {
+		t.Fatalf("last row: %q, want %q", got, want)
+	}
+	// The list's order is the query's, not a fact: the older child first still names the newer one (#382 review).
+	ws = []residentWorker{
+		{Child: "old", SpendUSD: 0.01, CapUSD: 0.5, Outcome: "capped", Started: 100},
+		{Child: "new", SpendUSD: 0.07, CapUSD: 0.5, Outcome: "completed", Started: 300},
+		{Child: "mid", SpendUSD: 0.02, CapUSD: 0.5, Outcome: "completed", Started: 200},
+	}
+	if got, want := workersRow(ws), "no children running · last completed $0.0700"; got != want {
+		t.Fatalf("newest by Started: %q, want %q", got, want)
+	}
+	ws = []residentWorker{
+		{Child: "r1", SpendUSD: 0, AllowanceUSD: 0.01, CapUSD: 0.5, Running: true},
+		{Child: "r2", SpendUSD: 0.02, AllowanceUSD: 0.02, CapUSD: 0.25, Running: true},
+	}
+	if got, want := workersRow(ws), "2 children · $0.0500 of $0.75"; got != want {
+		t.Fatalf("running row: %q, want %q", got, want)
+	}
+}
+
 func TestResidentGoalCommandUsesStdin(t *testing.T) {
 	m := emberModel{cli: []string{"caminus"}, agentName: "resident"}
 	c := residentCommand(m, []string{"send", "resident", "--stdin", "--json"}, "goal with $(shell) and secrets")

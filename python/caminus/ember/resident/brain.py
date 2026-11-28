@@ -137,7 +137,20 @@ class Brains:
 
     def choose(self, gid):
         """the model for this goal's next turn; None for a free-time stretch no brain may serve (free_choice: it is
-        ended, and the turn is not run)"""
+        ended, and the turn is not run)
+
+        A delegate child gets no brain here: its brain is `rt.delegate_models`, which only the process that ran
+        start() holds, so a child that reaches this call has lost its run. It is paused as orphaned (the close
+        `sweep` makes at a restart) and None is returned, so the invariant - a child never runs on whatever brain
+        the runtime holds - holds at every call site, not just the one that checks the dict first (#382 review,
+        rev-glm P2)."""
+        from . import delegate
+        if delegate.is_child(self.rt.store, gid):
+            brain = self.rt.delegate_models.get(gid)
+            if brain is not None:
+                return brain          # its own brain: choose() is right for a child too, when the run is here
+            delegate.orphan(self.rt, gid)
+            return None
         if self.rt.free.is_free(gid):
             name = self._free_choice(primary_down=self.fallback is not None and not self._primary_up())
             if name is None:

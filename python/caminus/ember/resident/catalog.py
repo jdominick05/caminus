@@ -556,6 +556,42 @@ def load(home):
         return dict(updated=None, providers={}, models=[])
 
 
+def apply_entry(conf, entry, spec):
+    """A catalog entry's own facts into a brain's config, in place, replacing whatever the previous brain left.
+
+    Both `agent model` and a delegate child's brain build a config from an entry, and this is the one
+    normalization they share: the copy in delegate.py kept the parent's `max_tokens` and never read the entry's
+    output cap or effort levels, so a child asked its provider for its parent's maximum (#382 review, Growth).
+    The entry's window is not copied for a local server on this machine: that one is asked live (model.context_size).
+    """
+    from .model import LOOPBACK, remember_prices
+    if conf.pop('max_tokens_auto', None):
+        conf.pop('max_tokens', None)      # the previous brain's catalog maximum, not one the owner set
+    for k in ('relay', 'prices', 'context', 'context_cap', 'thinking', 'model_variants', 'efforts', 'vision'):
+        conf.pop(k, None)                 # (the previous brain's facts, not this one's)
+    if spec.get('relay'):
+        conf['relay'] = True
+    if entry.get('prices'):
+        conf['prices'] = entry['prices']
+        remember_prices(entry['id'], entry['prices'])   # a catalog model is metered like a built-in one
+    live = (spec.get('kind') == 'local' and not spec.get('relay')
+            and urllib.parse.urlsplit(spec.get('endpoint') or '').hostname in LOOPBACK)
+    if entry.get('context') and not live:
+        conf['context'] = int(entry['context'])
+    if entry.get('vision'):
+        conf['vision'] = True
+    if entry.get('variants'):
+        conf['model_variants'] = entry['variants']
+    elif spec.get('kind') not in ('local', 'anthropic'):
+        conf['efforts'] = list(entry.get('efforts') or [])
+    if spec.get('kind') == 'anthropic' and entry.get('thinking') == 'adaptive':
+        conf['thinking'] = 'adaptive'
+    if entry.get('max_output') and spec.get('kind') != 'local':
+        # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
+        conf['max_tokens'], conf['max_tokens_auto'] = min(int(entry['max_output']), 65536), True
+    return conf
+
+
 def refresh(home, config, opener=urllib.request.urlopen, only=None):
     """Ask every provider (or `only` one) for its models; keep a failed provider's last entries, marked stale."""
     cat = load(home)

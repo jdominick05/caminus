@@ -1195,10 +1195,13 @@ class Resident(unittest.TestCase):
 
     def test_first_looks_are_read_only_and_a_refusal_before_the_done_check_does_not_trip_the_watchdog(self):
         from caminus.ember.resident.runtime import read_only_command as ro
-        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head','tar -tf x.tar',
+        for c in ('cd /ctf && ls -la && unzip -l handout.zip','strings a.out | grep flag','xxd f | head',
                   '7z l x.7z','readelf -h bin','sha256sum f','sort a | uniq -c'):
             self.assertTrue(ro(c),c)
-        for c in ('unzip handout.zip','tar -xf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f','sort a > b'):
+        # tar is not a read any more: even listing runs -z / -j / -J / -Z's decompressor and its option surface is
+        # the largest of all (#382 review, fourth round). unzip -l and 7z l still list.
+        for c in ('unzip handout.zip','tar -xf x.tar','tar -tf x.tar','7z x x.7z','unzip -l x.zip -d out','cd /ctf && rm f',
+                  'sort a > b'):
             self.assertFalse(ro(c),c)
         self.gates_on()
         self.verdicts(dict(verdict='met',reason='x exists'))
@@ -1693,11 +1696,15 @@ if name == 'weasyprint': (site / 'weasyprint.py').write_text(os.environ['FAKE_WE
     def test_post_merge_review_fixes(self):
         # the second look at the merged review fixes: flag clusters, '-' as an operand, value flags, the advice's window
         from caminus.ember.resident import runtime as R
-        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort -S1ofile in','sort -k2,2o in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
+        for cmd in ('sort -ro out.txt in.txt','sort -uo out in','sort -oout.txt in','sort -o/tmp/x in','sort -uo./x in','sort --out=/x/f in','sort --o=f in','sort --compress-p=sh in',
                     'sort --compress-program=sh in','sort in | uniq - out.txt',
                     'xxd - out.bin','xxd -rp dump bin'):
             self.assertFalse(R.read_only_command(cmd),cmd)
-        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in','sort --numeric-sort in'):
+        # -S and -k consume the next letters as their value, so these carry no -o flag at all: sort itself rejects them
+        # ("invalid suffix in --buffer-size argument '1ofile'", "stray character in field spec") and writes nothing.
+        # The old deny-list refused any letter `o` anywhere, which was a refusal of reads; the parser does not.
+        for cmd in ('xxd -l 64 f','xxd -s 16 -c 8 f','uniq -f 1 f','sort -rn in','sort -k2,2 -t, in','sort --reverse in',
+                    'sort --numeric-sort in','sort -S1ofile in','sort -k2,2o in'):
             self.assertTrue(R.read_only_command(cmd),cmd)
         rt=Runtime(self.home)
         try:
@@ -2703,6 +2710,1401 @@ for line in sys.stdin:
         self.assertEqual(self.cmd('sim',['--record','--change','x','--predicted','y'])['record']['status'],'recorded')
         self.assertEqual(json.loads((self.home/'config.json').read_text())['sim'],True,'--on stays on')
         self.assertEqual([r['change'] for r in self.cmd('sim',[])['records']],['x'],'--on reads the record back')
+    def test_delegate_runs_a_read_only_child_and_reports_back(self):
+        # The parent states what done looks like, delegates a read to a child, and reads a short report: the child
+        # cannot write, its write attempt is refused, and the parent's own status shows the child and its spend.
+        (self.home/'f.txt').write_text('first\nmarker line\nlast\n')
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the marker line is quoted from f.txt')),
+            call('delegate',dict(task='Find the marker line in f.txt and quote it.',
+                                 done_check='the text of the marker line is in the summary')),
+            # the child's own turns: a write is refused (it is read-only), then it reads and finishes
+            call('write',dict(path=str(self.home/'child.txt'),content='x')),
+            call('terminal',dict(command='grep -n marker f.txt')),
+            call('read',dict(path='f.txt')),
+            call('define_done',dict(check='f.txt has a marker line')),
+            call('verify',dict(evidence='read showed line 2 is "marker line"')),
+            call('finish',dict(summary='f.txt line 2 is "marker line".')),
+            # back in the parent: the delegate result was the child's report
+            call('verify',dict(evidence='the child quoted line 2 of f.txt')),
+            call('finish',dict(summary='The marker line is "marker line" (f.txt line 2).')))
+        goal=self.cmd('once',['--goal','Ask a child what the marker line says.'])
+        self.assertEqual(goal['state'],'completed')
+        self.assertFalse((self.home/'child.txt').exists(),'the child could not write')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        reports=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertTrue(reports and reports[-1].get('outcome')=='completed',reports)
+        self.assertEqual(reports[-1]['steps'],6,'the child ran six of its own turns')
+        self.assertTrue(reports[-1]['verified'])
+        self.assertGreaterEqual(reports[-1]['cap_usd'],0.0)
+        self.assertIn('marker line',reports[-1]['summary'])
+        # the refused write names the rule and is the child's own result, not the parent's
+        refused=[r['data']['result'] for r in events if r['data'].get('name')=='write']
+        self.assertEqual(len(refused),1)
+        self.assertIn('read-only',refused[0]['error'])
+        # the status a UI reads shows the child, its brain and the spend its cap reads
+        st=self.cmd('status')
+        self.assertEqual(len(st['workers']),1)
+        self.assertEqual(st['workers'][0]['child'],reports[-1]['child'])
+        self.assertFalse(st['workers'][0]['running'])
+        self.assertEqual(st['workers'][0]['outcome'],'completed')
+
+    def test_a_child_delegate_cannot_delegate_again_or_ask_the_human(self):
+        # depth 1 and no human: both refusals are the runtime's, whatever the model asks for
+        self.gates_on()
+        self.replies(
+            call('define_done',dict(check='the child was asked to overstep')),
+            call('delegate',dict(task='Ask your human whether to continue.',done_check='the answer is known')),
+            call('ask_user',dict(question='Shall I continue?',choices=['yes','no'])),
+            call('delegate',dict(task='Ask a grandchild.',done_check='a grandchild answered')),
+            call('define_done',dict(check='both calls were refused')),
+            call('verify',dict(evidence='both errors say so')),
+            call('finish',dict(summary='Both were refused: a child is read-only and one level deep.')),
+            call('verify',dict(evidence='the child reported both refusals')),
+            call('finish',dict(summary='The child could neither ask nor delegate.')))
+        self.cmd('once',['--goal','Have a child try to ask and delegate.'])
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        asked=[r['data']['result'] for r in events if r['data'].get('name')=='ask_user']
+        self.assertEqual(len(asked),1)
+        self.assertIn('read-only',asked[0]['error'])
+        inner=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertIn('read-only',inner[0]['error'],'a child cannot delegate again')
+        self.assertEqual(inner[-1]['outcome'],'completed')
+
+    def test_delegate_rejects_a_zero_cap(self):
+        # cap_usd=0 used to disable the cap (#382 review: `if not cap` read a zero as "no cap"), so a child could
+        # run uncapped. A cap is positive now, and a row from before the fix (cap 0) pauses instead of running.
+        from caminus.ember.resident import delegate
+        self.gates_on()
+        (self.home/'f.txt').write_text('x\n')
+        self.replies(
+            call('define_done',dict(check='the zero cap was refused')),
+            call('delegate',dict(task='Read f.txt.',done_check='f.txt was read',cap_usd=0)),
+            call('terminal',dict(command='ls')),
+            call('verify',dict(evidence='the delegate error says cap_usd must be more than 0')),
+            call('finish',dict(summary='The zero cap was refused.')))
+        goal=self.cmd('once',['--goal','Try to delegate with no cap.'])
+        self.assertEqual(goal['state'],'completed')
+        events=[e for e in self.cmd('events') if e['kind']=='tool_result']
+        res=[r['data']['result'] for r in events if r['data'].get('name')=='delegate']
+        self.assertEqual(len(res),1)
+        self.assertIn('cap_usd must be more than 0',res[0]['error'])
+        self.assertEqual(self.cmd('status')['workers'],[],'no child ran')
+        rt=Runtime(self.home)
+        try:
+            parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
+            # a cap is written by delegate_add, which refuses 0 and less (#382 review); the column has no DEFAULT 0
+            cols={r[1]:r[4] for r in rt.store.db.execute('PRAGMA table_info(delegates)')}
+            self.assertIsNone(cols['cap_usd'],'no DEFAULT 0 for a reader to mistake for "no cap"')
+            with self.assertRaises(ValueError) as caught:
+                rt.store.delegate_add(child,parent,'','','worker',0.0)
+            self.assertIn('positive dollar cap',str(caught.exception))
+            # a row written before the fix (a raw insert, a store from an older version) still pauses at $0
+            rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
+                                'VALUES(?,?,?,?,?,?,?)',(child,parent,'','','worker',0.0,time.time()))
+            self.assertTrue(delegate.capped(rt,child),'a stored $0 cap is a cap, not "unlimited"')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+            with self.assertRaises(ValueError):
+                delegate._caps(rt,dict(cap_usd=0))
+            self.assertEqual(delegate._caps(rt,dict(cap_usd=0.25))[0],0.25)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_cap_a_call_passes_is_a_number_or_a_refusal_naming_it(self):
+        # The tool schema says number, but a model can send "0.9x" or true as plain text: float()/int() raised a
+        # bare ValueError/TypeError naming nothing, where the config side already refuses with the key (#382
+        # review, rev-glm P2). A bool is an int in Python, so `max_steps: true` would silently mean one step.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for args,key in ((dict(cap_usd='0.9x'),'cap_usd'),(dict(max_steps=True),'max_steps'),
+                             (dict(max_seconds='60'),'max_seconds'),(dict(cap_usd=float('inf')),'cap_usd'),
+                             (dict(max_steps=float('nan')),'max_steps')):
+                with self.assertRaises(ValueError) as caught:
+                    delegate._caps(rt,args)
+                self.assertIn(key,str(caught.exception),'the refusal names the key the caller sent: %s'%args)
+            cap,steps,secs=delegate._caps(rt,dict(cap_usd=0.25,max_steps=4.0,max_seconds=60.0))
+            self.assertEqual((cap,steps,secs),(0.25,4,60),'a JSON number still reads as one')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_childs_spend_is_charged_from_its_row_not_only_from_this_process(self):
+        # note_spend was keyed on rt.delegate_caps, this process's memory of the children it started: a child whose
+        # start() happened in a previous process (a crash, the same parent path re-run) never had its turns
+        # charged, so its dollar cap could not trip until sweep() paused it (#382 review, rev-glm P2). The row is
+        # the fact; the set is the fast path, as open_child already says for the cap sites.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            self.assertNotIn(child,rt.delegate_caps,'this process did not run its start()')
+            delegate.note_spend(rt,child,.2,.05)
+            row=rt.store.delegate(child)
+            self.assertEqual((round(row['spend_usd'],6),round(row['allowance_usd'],6)),(.2,.05),
+                             'an open child out of this process\'s set still has its ledger written')
+            # a closed row is not a runnable child: a late note must not charge it after its report was written
+            rt.store.delegate_done(child,'completed')
+            delegate.note_spend(rt,child,.1,0.0)
+            self.assertEqual(round(rt.store.delegate(child)['spend_usd'],6),.2)
+            # a top-level goal has no ledger and no row: nothing is written, and nothing raises
+            plain=rt.store.enqueue('plain')
+            delegate.note_spend(rt,plain,.3,0.0)
+            self.assertIsNone(rt.store.delegate(plain))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_workers_window_keeps_every_running_child(self):
+        # `... ORDER BY outcome='' DESC, started DESC LIMIT 20` sorted a running child (outcome NULL, and SQLite's
+        # NULL is smallest) after every finished one, so a long-lived session's twenty finished children pushed it
+        # out of the window and the panel said "no children running" while one ran (#382 review, rev-glm P2). The
+        # open rows are all in the answer; only the finished side is bounded.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            done=[]
+            for i in range(21):
+                gid=rt.store._enqueue('done %d'%i,kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                rt.store.delegate_done(gid,'completed')
+                rt.store.db.execute('UPDATE delegates SET started=? WHERE child=?',(1000.0+i,gid))
+                done.append(gid)
+            live=rt.store._enqueue('still running',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',.5)
+            rt.store.db.execute('UPDATE delegates SET started=? WHERE child=?',(900.0,live))
+            ws=rt.store.workers()
+            self.assertEqual([w['child'] for w in ws], [live]+list(reversed(done[-20:])),
+                             'every open row first, then the newest 20 finished')
+            self.assertTrue(ws[0]['running'])
+            self.assertNotIn(done[0],[w['child'] for w in ws],'only the oldest finished row is left out')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_ledger_that_is_not_a_spend_still_pauses_the_child(self):
+        # spend_usd/allowance_usd are written by arithmetic (delegate_spend adds each turn), so a negative pair
+        # (a hand edit, a backup restore) made `spend + allowance < cap` skip the cap for good, and a non-finite
+        # one paused at $0 spent with "$inf of $0.50" as the reason. Neither is a spend figure: both fail closed,
+        # the pause names the term, and the event states the 0 that was compared (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child(spend,allowance):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                rt.store.db.execute('UPDATE delegates SET spend_usd=?, allowance_usd=? WHERE child=?',
+                                    (spend,allowance,gid))
+                return gid
+            under=child(.1,.0)
+            self.assertFalse(delegate.capped(rt,under),'a spend below the cap is no pause')
+            self.assertEqual(rt.store.goal(under)['state'],'queued')
+            for spend,allowance,term in ((-.4,-.4,'spend_usd'),(float('inf'),0.0,'spend_usd'),
+                                         (0.0,float('inf'),'allowance_usd')):
+                gid=child(spend,allowance)
+                self.assertTrue(delegate.capped(rt,gid),'%r/%r must not skip the cap' % (spend,allowance))
+                err=rt.store.goal(gid)['error']
+                self.assertIn('cap reached',err)
+                self.assertIn(term,err,'the reason names the term that is not a spend')
+                self.assertNotIn('$inf',err,'never "$inf of $0.50" as a spend figure')
+                self.assertEqual(len([e for e in rt.store.events()
+                                      if e['kind']=='delegate_capped' and e['goal']==gid]),1)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_cannot_type_into_or_signal_a_terminal(self):
+        # A child has no host terminal at all now (#382 review, fourth round): a filter cannot make a shell
+        # read-only, and the child's sandbox box is a directory in the workspace, so any file it writes there
+        # (a git hook, diff.textconv, a binutils @file naming --plugin) could be run by an allow-listed command.
+        from caminus.ember.resident import delegate
+        sid='a'*32
+        for args in (dict(signal='TERM'),dict(session=sid,stdin='echo pwned\n'),dict(session=sid,signal='KILL'),
+                     dict(session=sid),dict(command='ls'),dict(command='grep -n marker f.txt'),dict(),):
+            why=delegate.refused('terminal',args)
+            self.assertTrue(why and 'read-only' in why and 'sandbox' in why,args)
+
+    def test_a_terminal_session_belongs_to_the_goal_that_opened_it(self):
+        # the other half of #382's P1: a job records the goal that opened it, and a delegate child may use only the
+        # sessions its own goal opened (a legacy job with no owner is not a child's either)
+        t=Terminal(self.home);jobs=self.home/'jobs'
+        sid=uuid.uuid4().hex
+        t.call(sid,dict(command='sleep 30',yield_ms=300),goal='goal-a')
+        legacy=uuid.uuid4().hex
+        t.call(legacy,dict(command='sleep 30',yield_ms=300))
+        try:
+            self.assertEqual(json.loads((jobs/sid/'request.json').read_text())['goal'],'goal-a')
+            with self.assertRaises(ValueError) as caught:
+                t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-b',child=True)
+            self.assertIn('another goal',str(caught.exception))
+            self.assertTrue(t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-a',child=True)['running'],
+                            'a child may poll the session its own goal opened')
+            self.assertIn('phase',t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0),goal='goal-b'),
+                          'a top-level goal is not restricted')
+            with self.assertRaises(ValueError):
+                t.call(uuid.uuid4().hex,dict(session=legacy,yield_ms=0),goal='goal-a',child=True)
+        finally:
+            t.signal_running(signal.SIGTERM)
+            self.wait(lambda:not t.call(uuid.uuid4().hex,dict(session=sid,yield_ms=0))['running'],10)
+
+    def test_a_child_has_no_gate_at_all(self):
+        # define_done's gate runs a shell command at finish (and after a change turn): a child called
+        # define_done(gate='touch gate_pwned && grep -q x f.txt'), finish ran it, and the report said completed
+        # (#382 review). Reading the command was not enough either: a child now has no host shell at all, so it
+        # has no gate - not even a "read-only" one - and a stored gate is refused at finish.
+        from caminus.ember.resident import delegate, judge
+        for gate in ('touch gate_pwned', 'grep -q x f.txt', 'ls'):
+            why=delegate.refused('define_done',dict(check='x',gate=gate))
+            self.assertTrue(why and 'read-only' in why and 'gate' in why,(gate,why))
+        self.assertIsNone(delegate.refused('define_done',dict(check='x')),'no gate is fine')
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            rt.store.update(child,gate="ls")
+            out=judge.review(rt,child,dict(summary='x'))
+            self.assertIn('read-only',out['error'])
+            self.assertIn('gate',out['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_read_only_commands_cannot_run_programs(self):
+        # the filter is the only thing keeping a child's terminal read-only (#382 review): tar's checkpoint actions
+        # and compress programs, git grep -O and git ls-remote --upload-pack ran a script through it.
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for cmd in ("tar -tf t.tar --checkpoint=1 '--checkpoint-action=exec=touch tar_pwned'",
+                    'tar -tf x --checkpoint-action=exec=sh',
+                    'tar -Iprog -cf out.tar x',
+                    'tar --use-compress-program=prog -cf out.tar x',
+                    'git grep -Oprog x',
+                    'git grep --open-files-in-pager=sh x',
+                    'git ls-remote --upload-pack=prog origin',
+                    'git ls-remote --rsh-command=prog origin',
+                    # a GPU reset takes the owner's monitors or their model down (#382 review: READ_ONLY held
+                    # rocm-smi and amd-smi whole, so any flag at all classified as a read)
+                    'amd-smi reset -g 0',
+                    'amd-smi set -g 0 --fan 100',
+                    'amd-smi partition set -g 0',
+                    'rocm-smi --gpureset -d 0',
+                    'rocm-smi --resetclocks',
+                    'rocm-smi --setfan 100',
+                    'rocm-smi -d 0 --setpoweroverdrive 200',
+                    # flags that write a file or run a program on read-only programs (#382 review, third round)
+                    'git log --output=x',
+                    'git log --out=x',              # (git abbreviates long options: --out= is --output=)
+                    'git log --ext-diff',
+                    'git show --textconv HEAD',
+                    'git cat-file --filters blob HEAD:f',
+                    'git grep --textconv x',
+                    'git grep --op=sh x',
+                    'awk \'BEGIN{system("touch awk_pwned")}\' f',
+                    'awk \'{print | "sh"}\' f',
+                    'rg --pre sh x',
+                    'rg --hostname-bin sh x',
+                    'rg -z x',
+                    'file -C -m x',
+                    'file --compile -m x',
+                    'file -z x.gz',
+                    'date -s 2020-01-01',
+                    'date --set=2020-01-01',
+                    'date 010100002020',
+                    # an attached value is the rest of its own word (GNU date sets the clock on the first one,
+                    # verified), so the -s after it must still be read as a set (#382 review, fifth round)
+                    'date -d2024-01-01 -s@1700000000',
+                    'date -f/dev/null -s@1700000000',
+                    'date -d2024-01-01 --unknown',
+                    'date -d2024-01-01 --set=2020-01-01',
+                    'date --rfc-3339',                # a required value that is missing
+                    'date -d',                        # ...and one with no word left at all
+                    # --plugin dlopens a shared object: verified live, `nm --plugin evil.so a.out` ran its constructor
+                    'nm --plugin x.so a.out',
+                    'nm --pl=x a.out',
+                    'objdump --plugin x.so -d a.out',
+                    'readelf --plugin=x.so -h a.out'):
+            self.assertFalse(ro(cmd),cmd)
+        for cmd in ('git grep -n marker f.txt','git ls-remote origin','test -f f.txt',
+                    'git log -1 --stat','git show HEAD','git cat-file -p HEAD','git grep -n x',
+                    'rocm-smi','rocm-smi -a --json','rocm-smi -d 0 --showtemp','rocm-smi --showuse',
+                    'amd-smi list','amd-smi static --clock','amd-smi metric -g 0 --temp',
+                    'awk \'{print $1}\' f','awk -F: \'NR==2\' f','rg -n x','rg -n x f.txt',
+                    'file x','file -b x','date','date -u','date +%F','date -d yesterday','date -r f','date -Iseconds',
+                    'date --iso-8601','date -d2024-01-01 -u','date -d 2024-01-01 -u','date --date=2024-01-01 -u',
+                    'date -I seconds','date --iso-8601=seconds','date --iso-8601 seconds','date --date 2024-01-01 +%F',
+                    'date --resolution','date --rfc-3339=seconds','date -f /dev/null','date -ur f',
+                    'sed -n 1p f','nm a.out','objdump -d a.out','readelf -h a.out'):
+            self.assertTrue(ro(cmd),cmd)
+
+    def test_read_only_allow_lists_refuse_abbreviations_and_clusters(self):
+        # #382 review, fourth round: a deny-list can only lose. getopt accepts any unambiguous abbreviation of a long
+        # name (`tar --use=` is --use-compress-program, `--rsh=` is --rsh-command) and a short cluster can hide an
+        # option (`git grep -iOprog`). So each program names the options a read may pass and every other word - an
+        # unlisted flag, an abbreviation, a cluster with one unlisted letter - is a change. These are the review's
+        # reproductions, then an abbreviation of each long option the old deny-lists knew by full name.
+        from caminus.ember.resident.runtime import read_only_command as ro
+        for cmd in ("tar --use=sh -cf out.tar x", "tar --rsh=sh -cf out.tar x",
+                    "tar --rmt-command=sh -cf out.tar x", "tar --index-file=/tmp/x -cf out.tar x",
+                    "git grep -iO'prog' x", 'git grep -iOprog x',
+                    # tar did all of these through a listing form; it is not a read at all now
+                    'tar -tf x.tar', 'tar -tf x.tar --checkpoint=1 --checkpoint-action=exec=sh', 'tar -Iprog -cf o x',
+                    # abbreviations of each long option the third round refused by its full spelling
+                    'git log --out=x', 'git log --o=x', 'git log --ext-d=x', 'git show --textc HEAD',
+                    'git cat-file --filter blob HEAD:f', 'git grep --op=sh x', 'git log --exec=x',
+                    'git log --upload-p=x', 'git log --show-sign=x', 'git log -1 --no-ext-dif',
+                    'rg --pre sh x', 'rg --pr=sh x', 'rg --hostname-bin sh x', 'rg --search-zip x', 'rg --search-z',
+                    'file --comp -m x', 'file --uncomp x.gz', 'nm --plug=x.so a.out', 'objdump --pl x.so -d a.out',
+                    'sort --out=/x/f in', 'sort --compress-p=sh in', 'sort --compress=sh in',
+                    'xxd --revert dump bin', 'xxd -rp dump bin', 'xxd -r dump bin',
+                    'unzip --he x.zip',               # (a lone --help lists nothing)
+                    # a value-taking long name whose value begins with '-', and a cluster that hides a refused letter
+                    'sort --output -x in', 'ls -laZ', 'head -5n f',
+                    # operands that are not read: a second file is the output the program writes
+                    'uniq a b', 'xxd a b',
+                    # git subcommands that write, and a bare git
+                    'git', 'git add x', 'git commit -m x', 'git checkout -b y', 'git branch newname', 'git branch -D main',
+                    'git remote add x y', 'git remote set-url origin z', 'git stash', 'git reflog expire --all',
+                    # fourth round (#382 review): a binutils @file expands into options, so @opts is --plugin;
+                    # xxd stops its options at the first operand, so `xxd f -p` writes ./-p; and a flag that
+                    # takes no value (or an optional one) must not swallow the next flag
+                    'nm @opts a.out', 'objdump @opts -d a.out', 'readelf @opts a.out', 'strings @opts a.out',
+                    'xxd f -p', 'xxd f -u', 'xxd f -l 4',
+                    'git log --relative-date --ext-diff', 'git log --standard-notes --ext-diff',
+                    'git diff -C --ext-diff', 'git log -U --ext-diff', 'git show -C --textconv'):
+            self.assertFalse(ro(cmd),cmd)
+        # and the reads these programs really do, including clustered short flags, `--` before a dash operand, and
+        # explicit no-<driver> options (which turn a driver off rather than run one)
+        for cmd in ('git grep -in x', 'git grep -n -- -x f', 'grep -- -x f', 'git log --no-ext-diff -1',
+                    'git diff --no-textconv --stat', 'git log --oneline -5', 'git log --pretty=oneline -3',
+                    'sort -rn in', 'sort -k2,2 -t, in', 'sort --reverse in', 'xxd -l 64 f', 'xxd -s 16 -c 8 f',
+                    'uniq -c f', 'uniq -f 1 f', 'cut -d: -f1 f', 'fold -w 40 f', 'file -b x', 'file --mime-type x',
+                    'find . -maxdepth 2 -name "*.py"', 'find . -type f -newer a', 'ls --color=never -la',
+                    'head -n 20 f', 'head -5 f', 'tail -n 5 f', 'unzip -l x.zip', '7z l x.7z',
+                    'git status --porcelain', 'git branch -a', 'git branch --list', 'git remote -v',
+                    'git remote show origin', 'git rev-parse --short HEAD', 'git describe --tags --always',
+                    'date -u', 'date +%F', 'date -d yesterday', 'date --iso-8601', 'ps aux', 'df -h', 'du -sh .',
+                    'free -h', 'readelf -h a.out', 'objdump -d a.out', 'nm a.out', 'strings -n 4 a.out',
+                    # fourth round: reads these refusals must not break - an attached optional value, a value
+                    # that is a plain word, an @ operand for a program that does not expand one, and -p before
+                    # the file (xxd's own flag order)
+                    'xxd -p f', 'xxd -u -l 8 f', 'git log -U5', 'git log -U 5', 'git diff -C2', 'git diff -C 2',
+                    'git log --relative-date', 'git log --relative-date=short', 'git log --standard-notes',
+                    'git log --oneline --relative-date -5', 'grep @x f', 'ls @x', 'git blame -L 1,5 f'):
+            self.assertTrue(ro(cmd),cmd)
+
+    def test_cancelling_the_parent_stops_the_child(self):
+        # _stop is the daemon's stop, so a cancelled parent's child ran on (#382 review): the child's stop watches
+        # the parent, and a child stopped that way reports incomplete rather than running on its own brain later.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():
+                rt.store.update(parent,state='cancelled')
+            report=delegate.run_child(rt,parent,dict(child=child,role='worker',model='',provider='',cap_usd=0.5))
+            self.assertEqual(report['outcome'],'incomplete')
+            self.assertEqual(rt.store.goal(child)['state'],'cancelled')
+            self.assertIn('parent was cancelled',rt.store.goal(child)['error'])
+            self.assertEqual(rt.store.delegate(child)['outcome'],'incomplete')
+            with rt.store.transaction():
+                rt.store.update(child,state='paused')
+            with self.assertRaises(ValueError) as caught:
+                resume_goal(rt.store,child)
+            self.assertIn('delegate child',str(caught.exception),'a resumed child would run uncapped on the parent brain')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_finished_delegate_child_cannot_be_continued(self):
+        # `send --continue` on a completed goal revived it with no delegate check, so a child ran again on the
+        # default brain with no cap (#382 review, and resume_goal refuses the same move). Same answer on both paths.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',0.5)
+            with rt.store.transaction():rt.store.update(child,state='completed')
+        finally:rt.mail.close();rt.store.close()
+        refused=self.cmd('send',['--goal-id',child,'--continue','--stdin'],code=1,stdin='Keep going.')
+        self.assertIn('delegate child',refused['error'])
+        store=Store(self.home)
+        try:self.assertEqual(store.goal(child)['state'],'completed','the refused continue must not revive the child')
+        finally:store.close()
+
+    def test_a_wait_is_clipped_to_the_goals_time_budget(self):
+        # one wait could block for its full 30 minutes against a 600 s child cap; the deadline was read only at the
+        # next tick (#382 review). A goal 2 s from its deadline waits about 2 s, not 1800, and the loop re-reads the
+        # deadline, so what ends it is the budget itself, said as such (#382 review, rev-glm P2), not a bare timeout.
+        from caminus.ember.resident import housemate
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait.',max_seconds=2)
+            t0=time.monotonic()
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,6)
+            self.assertIn('time budget is used up',r['happened'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_wait_re_reads_the_deadline_while_it_blocks(self):
+        # the deadline was read once before the wait loop, so a budget the runtime extended or shortened mid-wait
+        # went unseen until the (now stale) clipped wait returned (#382 review, rev-glm P2). A shortened one ends
+        # the wait at once; an extended one keeps it waiting past the old deadline.
+        import sqlite3
+        from caminus.ember.resident import housemate
+        housemate.POLL=0.05
+        rt=Runtime(self.home)
+        try:
+            short=rt.store.enqueue('Wait.',max_seconds=30)
+            def shorten():
+                # its own connection: the store's is bound to this thread, and a Timer runs in another
+                db=sqlite3.connect(self.home/'agent.sqlite3')
+                db.execute('UPDATE goals SET deadline=? WHERE id=?',(time.time(),short));db.commit();db.close()
+            threading.Timer(0.2,shorten).start()
+            t0=time.monotonic()
+            r=housemate.wait(rt,short,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,5,'a spent budget does not wait 30 s for its stale clip')
+            self.assertIn('time budget is used up',r['happened'])
+            long=rt.store.enqueue('Wait.',max_seconds=2)
+            def extend():
+                db=sqlite3.connect(self.home/'agent.sqlite3')
+                db.execute('UPDATE goals SET deadline=? WHERE id=?',(time.time()+6,long));db.commit();db.close()
+            threading.Timer(0.2,extend).start()
+            t0=time.monotonic()
+            r=housemate.wait(rt,long,'message',timeout=3)
+            "The 2 s budget clipped the 3 s timeout; once the deadline moves out, the wait runs to the caller's 3 s."
+            self.assertGreater(time.monotonic()-t0,2.5,'an extended budget is not clipped to the old deadline')
+            self.assertEqual(r['happened'],'timeout')
+        finally:housemate.POLL=1.0;rt.mail.close();rt.store.close()
+
+    def test_a_wait_with_less_than_a_second_left_reports_the_budget(self):
+        # `min(timeout, int(left) + 1)` rounded a fraction of a second up to a whole one and returned a stale
+        # "timeout" wait, so a child at its deadline spent a step on a wait that could not happen (#382 review).
+        from caminus.ember.resident import housemate
+        rt=Runtime(self.home)
+        try:
+            gid=rt.store.enqueue('Wait.',max_seconds=30)
+            rt.store.update(gid,deadline=time.time()+.5)
+            t0=time.monotonic()
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertLess(time.monotonic()-t0,.5,'no wait happens below a second')
+            self.assertEqual(r['waited_s'],0)
+            self.assertIn('time budget is used up',r['happened'])
+            self.assertIn('do not wait again',r['note'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_store_that_fails_mid_wait_is_not_reported_as_a_goal_that_went_away(self):
+        # the per-pass deadline read ended in `except Exception: row = None`, so a store that closed or locked
+        # under a wait told the goal its own row was gone: the wrong fault, and one that reads as "you are
+        # finished, stop waiting" (#382 review, rev-glm P2). The two cases say which happened.
+        import sqlite3
+        from caminus.ember.resident import housemate
+        housemate.POLL=0.05
+        rt=Runtime(self.home)
+        class Wrap:
+            def __init__(s,db,act): s.db,s.act,s.n=db,act,0
+            def execute(s,sql,*a):
+                if sql.startswith('SELECT deadline FROM goals'):
+                    s.n+=1
+                    return s.act(s.db,s.n,sql,a)
+                return s.db.execute(sql,*a)
+            def __getattr__(s,name): return getattr(s.db,name)
+        def locked(db,n,sql,a): raise sqlite3.OperationalError('database is locked')
+        try:
+            gid=rt.store.enqueue('Wait.')
+            rt.store.db=Wrap(rt.store.db,locked)
+            r=housemate.wait(rt,gid,'message',timeout=1800)
+            self.assertIn('store could not be read',r['happened'])
+            self.assertIn('OperationalError',r['note'])
+            self.assertIn('database is locked',r['note'])
+            # the row that really goes away, after the wait has started: the second pass finds it gone
+            gid2=rt.store.enqueue('Wait.')
+            def vanish(db,n,sql,a):
+                if n==2: db.execute('DELETE FROM goals WHERE id=?',(gid2,));db.commit()
+                return db.execute(sql,*a)
+            rt.store.db=Wrap(rt.store.db.db,vanish)
+            r=housemate.wait(rt,gid2,'message',timeout=1800)
+            self.assertEqual(r['happened'],'the goal is no longer in the store','a row that went away still says so')
+        finally:
+            housemate.POLL=1.0
+            while isinstance(rt.store.db,Wrap): rt.store.db=rt.store.db.db
+            rt.mail.close();rt.store.close()
+
+    def test_a_parents_delegate_spend_is_bounded_in_total(self):
+        # `delegate_max_children` counts rows with outcome='' and `run_child` closes its row before returning, so a
+        # serial parent never saw a running child and could delegate all day, each child under its own cap. The
+        # total over the parent's rows - closed rows included - is the bound (#382 review, Opus 5.5 P1-1).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate_total_usd']=1.0
+            parent=rt.store.enqueue('p')
+            def prep():return dict(task='t',done='d',role='worker',cap_usd=.5,max_steps=4,max_seconds=60,
+                                   model=rt.model,who={})
+            for_=prep()
+            for spent in (.6,.6):
+                child=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(child,parent,'','','worker',.5)
+                rt.store.delegate_spend(child,spent,0.0)
+                rt.store.delegate_done(child,'completed',dict(outcome='completed'))
+            self.assertAlmostEqual(delegate.total(rt,parent),1.2,msg='closed rows still count',places=6)
+            with self.assertRaises(ValueError) as caught:
+                delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=for_)
+            msg=str(caught.exception)
+            self.assertIn('delegate_total_usd',msg)
+            self.assertIn('1.2000',msg,'the refusal names what was spent')
+            rows=rt.store.db.execute('SELECT child FROM delegates WHERE parent=?',(parent,)).fetchall()
+            self.assertEqual(len(rows),2,'no third child row')
+            # the totals are per parent: another goal's children do not spend this goal's budget
+            other=rt.store.enqueue('other')
+            self.assertEqual(delegate.total(rt,other),0.0)
+            # and a raised budget lets the next child through
+            rt.config['delegate_total_usd']=2.0
+            self.assertEqual(delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['outcome'],
+                             'running')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_delegate_switch_off_removes_and_refuses_the_tool(self):
+        # config `delegate: false` is the off switch: the prompt hid its section while the tool stayed in the
+        # list, so a spending call was still reachable (#382 review, Opus 5.5 P1-2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            names=[t['function']['name'] for t in rt.tools]
+            self.assertIn('delegate',names,'the key is absent here, so the tool is offered')
+            rt.config['delegate']=False
+            rt._tools=None
+            self.assertNotIn('delegate',[t['function']['name'] for t in rt.tools],'the off switch removes it')
+            parent=rt.store.enqueue('p')
+            with self.assertRaises(ValueError) as caught:
+                delegate.prepare(rt,dict(task='t',done_check='d'),parent)
+            self.assertIn('delegate is off',str(caught.exception))
+            # `start()` goes through prepare() too, so no path reaches a child with the switch off
+            with self.assertRaises(ValueError):
+                delegate.start(rt,parent,dict(task='t',done_check='d'))
+            self.assertEqual(rt.store.db.execute("SELECT count(*) FROM goals WHERE kind='delegate'").fetchone()[0],0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_delegate_switch_on_is_not_a_role_model_dict(self):
+        # `delegate: true` reached `True.get('worker_model')` and raised AttributeError, which _action does not
+        # catch: tick() marked the *parent* goal error (#382 review, Opus 5.5 P1-2). It reads as a refusal now.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate']=True
+            self.assertTrue(delegate.switched_on(rt),'`true` is not the off switch, so the tool stays offered')
+            with self.assertRaises(ValueError) as caught:
+                delegate.role_models(rt)
+            self.assertNotIsInstance(caught.exception,AttributeError)
+            self.assertIn('delegate is True',str(caught.exception))
+            self.assertIn('role models',str(caught.exception),'the refusal says what the key is for')
+            # any other non-object value is the same refusal, and a null key is no roles, not a crash
+            rt.config['delegate']=None
+            self.assertEqual(delegate.role_models(rt),{})
+            for typo in ('worker_model=fast',['worker_model'],0):
+                rt.config['delegate']=typo
+                with self.assertRaises(ValueError) as caught:
+                    delegate.role_models(rt)
+                self.assertIn('delegate is',str(caught.exception),'the refusal names the key: %r'%(typo,))
+            parent=rt.store.enqueue('p')
+            rt.config['delegate']=True
+            with self.assertRaises(ValueError) as caught:
+                delegate.prepare(rt,dict(task='t',done_check='d'),parent)
+            self.assertNotIsInstance(caught.exception,AttributeError)
+            self.assertIn('delegate is True',str(caught.exception))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_childs_seconds_are_clamped_to_the_parents_time(self):
+        # a oneshot parent with 30 s left delegated a 600 s child and blocked past its own deadline; the child's
+        # deadline is the earlier of its own and the parent's (#382 review, Opus 5.5 P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p',max_seconds=30)
+            p=delegate.prepare(rt,dict(task='t',done_check='d'),parent)
+            self.assertLessEqual(p['max_seconds'],30)
+            self.assertGreaterEqual(p['max_seconds'],1)
+            # a parent with no deadline leaves the configured maximum alone
+            open_ended=rt.store.enqueue('q')
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'),open_ended)['max_seconds'],600)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_catalog_child_does_not_inherit_the_parents_api_key_env(self):
+        # the parent's key variable sent a catalog child's requests to another provider's endpoint with it: the
+        # child, not the owner, picked that provider. The provider's own variable, when it names one, is kept
+        # (#382 review, Opus 5.5 P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        def catalog_of(id):
+            return dict(updated=1,providers={},models=[dict(id=id,name=id,provider='deepinfra',context=32000,
+                        max_output=None,efforts=[],thinking='',vision=False,
+                        prices=dict(input=1.0,output=2.0,cache_read=0.5))])
+        try:
+            rt.config['api_key_env']='PARENTS_OWN_KEY'
+            rt.config['providers']={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai')}
+            (self.home/'models.json').write_text(json.dumps(catalog_of('someone/priced')))
+            brain,who=delegate._brain(rt,dict(model='someone/priced'))
+            self.assertNotEqual(brain.config.get('api_key_env'),'PARENTS_OWN_KEY')
+            self.assertIsNone(brain.config.get('api_key_env'),'no inherited variable, so the default is used')
+            # a provider that names its own variable keeps it
+            rt.config['providers']={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai',
+                                                     api_key_env='DEEPINFRA_KEY')}
+            brain,who=delegate._brain(rt,dict(model='someone/priced'))
+            self.assertEqual(brain.config.get('api_key_env'),'DEEPINFRA_KEY')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_latest_goal_skips_a_delegate_child(self):
+        # a child is created by its parent's call, so it is the newest row while it runs: `pause`, `rewind`, `diff`
+        # and `compact` with no id landed on it instead of the goal the human was looking at (#382 review, P2).
+        rt=Runtime(self.home)
+        try:
+            work=rt.store.enqueue('the goal the human is watching')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,work,'','','worker',.5)
+            self.assertEqual(rt.store.latest_goal(),work)
+            # a store with nothing but a child has no goal a command may land on: it still says "no goals yet"
+            rt.store.db.execute("UPDATE goals SET kind='delegate'")
+            with self.assertRaises(ValueError) as caught:
+                rt.store.latest_goal()
+            self.assertIn('no goals yet',str(caught.exception))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_children_limit_counts_running_children_not_every_child_ever_made(self):
+        # count(*) counted every child the parent ever made, so after 4 finished children it could never delegate
+        # again, while the refusal said finishing one frees a slot (#382 review). Running rows count; a child's
+        # row is closed on every exit, a crashed run included, so nothing can wedge the parent at the limit.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            rt.config['delegate_max_children']=2
+            parent=rt.store.enqueue('p')
+            def prep():return dict(task='t',done='d',role='worker',cap_usd=.5,max_steps=4,max_seconds=60,
+                                   model=rt.model,who={})
+            kids=[delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['child']
+                  for _ in range(2)]
+            with self.assertRaises(ValueError) as caught:
+                delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+            self.assertIn('2 delegate children still running',str(caught.exception))
+            # a finished child frees its slot, as the message says
+            rt.store.delegate_done(kids[0],'completed',dict(outcome='completed'))
+            third=delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())['child']
+            # a run that died before it reported does not wedge the parent: run_child closes the row on the way out
+            with unittest.mock.patch.object(rt,'run',side_effect=RuntimeError('boom')):
+                with self.assertRaises(RuntimeError):
+                    delegate.run_child(rt,parent,dict(child=third,role='worker'))
+            self.assertEqual(rt.store.delegate(third)['outcome'],'failed')
+            # ...and the goal must not stay runnable: closing the row takes it out of sweep()'s reach
+            # (`outcome=''`), so the next run would pick it up on whatever brain that process has, uncapped
+            self.assertEqual(rt.store.goal(third)['state'],'paused')
+            self.assertEqual(json.loads(rt.store.delegate(third)['report'])['state'],'paused',
+                             'the report says the state the goal is in, not a made-up "error"')
+            delegate.start(rt,parent,dict(task='t',done_check='d'),prepared=prep())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_sweep_close_reports_a_turn_priced_but_not_yet_in_the_ledger(self):
+        # `_meter` writes spend.json's per-goal total on the line before `note_spend` writes the child's ledger, so
+        # a process killed between the two leaves one priced turn in spend.json alone and the close reported a
+        # cheaper run than the money spent (#382 review). The close reports the larger of the two and says so; and
+        # it never invents one: no entry for the child, or a total below the ledger (an auxiliary call is priced
+        # into the ledger only, never into spend.json's goal total), leaves the ledger's number alone.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                return gid
+            lost=child()                      # priced .25, ledger .10: the kill between the two writes
+            rt.store.delegate_spend(lost,.10,.0)
+            plain=child()                     # no spend.json entry at all
+            rt.store.delegate_spend(plain,.20,.0)
+            aux=child()                       # a total below the ledger, as auxiliary calls leave it
+            rt.store.delegate_spend(aux,.30,.0)
+            (self.home/'spend.json').write_text(json.dumps(dict(goals={lost:.25,aux:.10})))
+            for gid in (lost,plain,aux):
+                rt.store.db.execute("UPDATE goals SET state='completed' WHERE id=?",(gid,))
+            delegate.sweep(rt)
+            report=json.loads(rt.store.delegate(lost)['report'])
+            self.assertEqual(report['spend_usd'],.25,'the priced turn is reported, not the ledger alone')
+            self.assertIn('priced but not yet in its ledger',report['summary'],'and the report says where it came from')
+            self.assertEqual(json.loads(rt.store.delegate(plain)['report'])['spend_usd'],.20,
+                             'an absent entry leaves the ledger as the number')
+            self.assertEqual(json.loads(rt.store.delegate(aux)['report'])['spend_usd'],.30,
+                             'a total below the ledger never lowers the report')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_sweep_close_reports_the_allowance_a_killed_child_never_ledgered(self):
+        # `_meter` prices an OpenCode plan turn as $0 of money and real allowance, and that allowance was kept on
+        # the day alone: a child killed between `_meter` and `note_spend` reported $0 spend and $0 allowance to its
+        # parent while the plan's monthly limit had really been used - the cap perimeter it enforces, understated
+        # (#382 review, rev-muse P1). `_meter` now keeps a per-goal allowance beside `goals`' usd, and the close
+        # reports the larger of it and the ledger, the rule the money half already follows.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            # the meter itself: an allowance-only turn (no money, no tokens) is kept per goal, not dropped
+            rt.model.last_usage=dict(opencode=dict(allowance=.25))
+            usd,allowance=rt._meter('plan-goal')
+            self.assertEqual((usd,allowance),(0.0,.25))
+            state=json.loads((self.home/'spend.json').read_text())
+            self.assertEqual(state['goal_allowance']['plan-goal'],.25,
+                             'an allowance-only turn is kept per goal, or the crash window cannot report it')
+            self.assertNotIn('plan-goal',state.get('goals') or {},'no money was spent, so no usd total')
+            parent=rt.store.enqueue('p')
+            def child(allowance=0.0):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                if allowance:
+                    rt.store.delegate_spend(gid,0.0,allowance)
+                return gid
+            lost=child()                     # .40 allowance priced per goal, ledger never saw it
+            kept=child(.10)                  # the ledger is larger than spend.json's allowance: the ledger wins
+            plain=child()                    # an older spend.json has no goal_allowance at all
+            (self.home/'spend.json').write_text(json.dumps(dict(goals={},goal_allowance={lost:.40,kept:.05})))
+            for gid in (lost,kept,plain):
+                rt.store.db.execute("UPDATE goals SET state='completed' WHERE id=?",(gid,))
+            delegate.sweep(rt)
+            report=json.loads(rt.store.delegate(lost)['report'])
+            self.assertEqual(report['allowance_usd'],.40,'the priced allowance is reported, not the ledger alone')
+            self.assertIn('allowance was priced but not yet in its ledger',report['summary'])
+            self.assertEqual(json.loads(rt.store.delegate(kept)['report'])['allowance_usd'],.10,
+                             'a spend.json allowance below the ledger never lowers the report')
+            self.assertEqual(json.loads(rt.store.delegate(plain)['report'])['allowance_usd'],0.0,
+                             'an absent entry leaves the ledger as the number')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_sweep_closes_a_paused_child_as_incomplete_and_a_capped_one_as_capped(self):
+        # a child paused by a mechanism that writes no delegate_capped event (the owner's budget watchdog, a manual
+        # pause) is not the work failing, and it is not a spent limit either. run_child called it `failed`, and
+        # sweep()'s state map fell through to `failed` too (#382 review). One fact decides both paths: the child's
+        # own delegate_capped event, and the pause's own words ride along as the summary.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                return gid
+            watched=child()
+            with rt.store.transaction():
+                rt.store.update(watched,state='paused',error='the owner was away and the budget ran out')
+            capped=child()
+            with rt.store.transaction():
+                rt.store.update(capped,state='paused',error='delegate spend cap reached: $0.5000 of $0.5000')
+                rt.store.event('delegate_capped',dict(spend_usd=.5,allowance_usd=0.0,cap_usd=.5),capped)
+            delegate.sweep(rt)
+            row=rt.store.delegate(watched)
+            self.assertEqual(row['outcome'],'incomplete','a pause with no cap behind it is not the child failing')
+            self.assertIn('budget ran out',json.loads(row['report'])['summary'],'the pause\'s own words ride along')
+            self.assertEqual(rt.store.delegate(capped)['outcome'],'capped','its own cap event is still a cap')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_sweep_closes_a_child_whose_goal_row_is_gone(self):
+        # sweep() ran bare in the runtime loop and read store.goal(), which raises on an unknown id: one delegates
+        # row whose goal row was gone (a partial restore - the case is_child's docstring names) ended the daemon
+        # on every pass and left the row open for good (#382 review, this push). It now reads the state directly
+        # and closes a row without its goal as orphaned.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            gone=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(gone,parent,'','','worker',.5)
+            rt.store.delegate_spend(gone,.25,.0)
+            rt.store.db.execute('DELETE FROM goals WHERE id=?',(gone,))
+            delegate.sweep(rt)                     # used to raise ValueError('unknown goal ...')
+            self.assertEqual(rt.store.delegate(gone)['outcome'],'orphaned')
+            report=json.loads(rt.store.delegate(gone)['report'])
+            self.assertIn('goal row is gone',report['summary'])
+            # the close is the last thing written about this child, so it must carry the spend it already made:
+            # a report without it reads as a free run (#382 review)
+            self.assertEqual(report['spend_usd'],.25)
+            self.assertEqual(report['cap_usd'],.5)
+            # the ordinary case still pauses a child left runnable by a run that ended
+            live=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',.5)
+            delegate.sweep(rt)
+            self.assertEqual(rt.store.goal(live)['state'],'paused')
+            self.assertEqual(rt.store.delegate(live)['outcome'],'orphaned')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_sweep_closes_a_child_left_open_by_a_crash_window_with_its_spend(self):
+        # review P2s (this push): a process killed between the child's final state write and its report leaves a
+        # row `outcome=''` whose goal already ended; sweep() closed only a missing goal or a still-runnable one,
+        # so that row fell through and start()'s child limit counted it forever, wedging the parent. And the
+        # pause-branch close wrote `dict(outcome='orphaned')` alone, dropping the row's spend/cap, so the
+        # parent's report read $0.0000 for real ledger money.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            # the crash window: the goal ended (completed), the row is still open, and money was spent
+            done=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(done,parent,'','','worker',.5)
+            rt.store.delegate_spend(done,.25,.0)
+            rt.store.db.execute("UPDATE goals SET state='completed' WHERE id=?",(done,))
+            # and a cancelled one, which is incomplete rather than failed
+            gone=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(gone,parent,'','','worker',.5)
+            rt.store.delegate_spend(gone,.10,.0)
+            rt.store.db.execute("UPDATE goals SET state='cancelled' WHERE id=?",(gone,))
+            # and a child left runnable, whose pause-branch close used to lose its spend too
+            live=rt.store._enqueue('c3',kind='delegate')
+            rt.store.delegate_add(live,parent,'','','worker',.5)
+            rt.store.delegate_spend(live,.05,.0)
+            delegate.sweep(rt)
+            self.assertEqual(rt.store.delegate(done)['outcome'],'completed','an ended goal closes its row')
+            report=json.loads(rt.store.delegate(done)['report'])
+            self.assertEqual(report['spend_usd'],.25,'the close carries the spend it made')
+            self.assertEqual(report['cap_usd'],.5)
+            self.assertEqual(rt.store.delegate(gone)['outcome'],'incomplete','a cancelled child did not finish')
+            self.assertEqual(json.loads(rt.store.delegate(gone)['report'])['spend_usd'],.10)
+            self.assertEqual(rt.store.delegate(live)['outcome'],'orphaned')
+            self.assertEqual(rt.store.goal(live)['state'],'paused')
+            self.assertEqual(json.loads(rt.store.delegate(live)['report'])['spend_usd'],.05,
+                             'the pause-branch close carries its spend too')
+            # and the parent's child budget is free again: no open row is left for it
+            open_rows=rt.store.db.execute("SELECT COUNT(*) FROM delegates WHERE parent=? AND outcome=''",
+                                          (parent,)).fetchone()[0]
+            self.assertEqual(open_rows,0,'no crash-window row is left open')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_parent_whose_goal_row_is_gone_does_not_raise_in_the_child(self):
+        # parent_gone() read the parent with store.goal(), which raises on an unknown id: a hand-restored store
+        # missing the parent row turned the child's run and its stop check into a raw ValueError instead of a
+        # report (#382 review, fifth round). It reads the state directly now, and a parent with no row is no
+        # cancel - the child finishes its own work and reports it.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            self.assertEqual(delegate._state(rt,parent),'queued')
+            rt.store.db.execute('DELETE FROM goals WHERE id=?',(parent,))
+            self.assertEqual(delegate._state(rt,parent),'','a missing row is no state, not an exception')
+            def fake_run(target=None,stop=None,**kw):
+                self.assertFalse(stop(),'a parent with no row is no cancel')
+                rt.store.update(child,state='completed',summary='the child finished')
+            with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
+                report=delegate.run_child(rt,parent,dict(child=child,role='worker'))
+            self.assertEqual(report['outcome'],'completed')
+            self.assertEqual(rt.store.delegate(child)['outcome'],'completed')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_capped_childs_pause_and_its_event_commit_together(self):
+        # the pause write and the delegate_capped event were two transactions, so a crash between them left a
+        # paused child with no line saying why (#382 review, fifth round). One transaction now: a failed event
+        # write rolls the pause back with it, and the ordinary path still writes both.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            rt.store.delegate_spend(child,.75,0.0)
+            with unittest.mock.patch.object(rt.store,'event',side_effect=RuntimeError('the disk is full')):
+                with self.assertRaises(RuntimeError):
+                    delegate.capped(rt,child)
+            self.assertEqual(rt.store.goal(child)['state'],'queued','the pause rolled back with its event')
+            self.assertEqual([e for e in rt.store.events() if e['kind']=='delegate_capped'],[])
+            self.assertTrue(delegate.capped(rt,child))
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+            self.assertEqual(len([e for e in rt.store.events() if e['kind']=='delegate_capped']),1)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_pause_is_capped_by_a_fact_and_never_by_its_words(self):
+        # run_child called a paused child `capped` when its error contained 'delegate' or 'budget', so a pause for
+        # any other reason whose message happened to carry either word read to the parent as a spent limit (#382
+        # review, second round). It then guessed from the row - steps >= step_limit, or a deadline that has
+        # passed - which reads a watchdog pause past a passed deadline as the deadline ending it (#382 review,
+        # third round). The one fact all three caps leave is the delegate_capped event, written in the pause's
+        # own transaction: capped() for the dollar cap, the runtime for the step limit and the deadline.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child(*,steps=None,deadline=None):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                if steps is not None or deadline is not None:
+                    with rt.store.transaction():rt.store.update(gid,step_limit=steps,deadline=deadline)
+                return gid
+            other=child()
+            with rt.store.transaction():
+                rt.store.update(other,state='paused',error='another delegate asked the same question')  # the old false positive
+            self.assertFalse(delegate._capped(rt,other))
+            stopped=child(steps=3)
+            with rt.store.transaction():
+                rt.store.update(stopped,state='paused',steps=3,error='any words at all')
+            self.assertFalse(delegate._capped(rt,stopped),'steps at the limit alone is not the pause the limit made')
+            with rt.store.transaction():     # the runtime's own step-limit pause writes the event
+                rt.store.event('delegate_capped',dict(kind='step_limit',steps=3,step_limit=3),stopped)
+            self.assertTrue(delegate._capped(rt,stopped),'the step limit is its event')
+            late=child(deadline=time.time()-5)
+            with rt.store.transaction():
+                rt.store.update(late,state='paused',error='the watchdog stopped it')
+            self.assertFalse(delegate._capped(rt,late),'a pause past a passed deadline is not the deadline ending it')
+            with rt.store.transaction():     # the runtime's own deadline pause writes the event
+                rt.store.event('delegate_capped',dict(kind='deadline',deadline=rt.store.goal(late)['deadline']),late)
+            self.assertTrue(delegate._capped(rt,late),'the deadline is its event')
+            dollars=child()
+            rt.store.delegate_spend(dollars,.75,0.0)
+            self.assertTrue(delegate.capped(rt,dollars))
+            self.assertTrue(delegate._capped(rt,dollars),'the dollar cap is its event')
+            with rt.store.transaction():
+                rt.store.update(other,state='completed')
+            self.assertFalse(delegate._capped(rt,other),'a completed child is never capped')
+
+            # and the report itself: a pause that names a delegate is `incomplete`, not `capped`
+            def fake_run(target=None,stop=None,**kw):
+                with rt.store.transaction():rt.store.update(target,state='paused',error='delegate work stopped early')
+            with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
+                report=delegate.run_child(rt,parent,dict(child=other,role='worker'))
+            self.assertEqual(report['outcome'],'incomplete','a pause with no cap behind it is not a cap, and not the child failing')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_closing_write_that_fails_leaves_a_trace_and_keeps_the_run_error(self):
+        # the fall-back close in run_child was `except Exception: pass`: a store that was transiently unwritable
+        # left the row `outcome=''`, which keeps its child slot until a restart (sweep() runs only at a start) and
+        # said nothing at all (#382 review). It retries once, then writes a line on the parent's events - and the
+        # error that ended the run is still the one raised.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            gid=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(gid,parent,'','','worker',.5)
+            import sqlite3
+            boom=RuntimeError('the run died')
+            calls=[]
+            def flaky(child,outcome,report=None):
+                calls.append(outcome)
+                raise sqlite3.OperationalError('database is locked')
+            with unittest.mock.patch.object(rt,'run',side_effect=boom), \
+                 unittest.mock.patch.object(rt.store,'delegate_done',side_effect=flaky):
+                with self.assertRaises(RuntimeError) as caught:
+                    delegate.run_child(rt,parent,dict(child=gid,role='worker'))
+            self.assertIs(caught.exception,boom,'the run error is not masked by the failed close')
+            self.assertEqual(len(calls),2,'the close is tried twice before giving up')
+            fails=[e for e in rt.store.events() if e['kind']=='delegate_close_failed']
+            self.assertEqual(len(fails),1)
+            self.assertEqual(fails[0]['goal'],parent,'the line is on the parent, which is the one refused next')
+            self.assertEqual(fails[0]['data']['child'],gid)
+            self.assertIn('locked',fails[0]['data']['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_runtime_writes_the_cap_event_its_own_pauses_leave(self):
+        # _capped() reads only the delegate_capped event, so the pauses the runtime makes itself must write it:
+        # the step limit and the deadline used to leave only `steps`/`deadline` on the row, which is how a watchdog
+        # pause past a passed deadline read as the deadline ending the child (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child(**cols):
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                rt.delegate_caps[gid]=.5        # as start() leaves it: only a child has a cap to report
+                with rt.store.transaction():rt.store.update(gid,**cols)
+                return gid
+            stopped=child(step_limit=0)
+            self.assertTrue(rt._tick(stopped))
+            self.assertEqual(rt.store.goal(stopped)['state'],'paused')
+            self.assertIn('step budget',rt.store.goal(stopped)['error'])
+            self.assertTrue(delegate._capped(rt,stopped),'the step-limit pause leaves the cap event')
+            self.assertIn('step_limit',[e['data'].get('kind') for e in rt.store.events() if e['goal']==stopped])
+            late=child(deadline=time.time()-5)
+            self.assertTrue(rt._tick(late))
+            self.assertIn('time budget',rt.store.goal(late)['error'])
+            self.assertTrue(delegate._capped(rt,late),'the deadline pause leaves the cap event')
+            # and a plain goal gets no delegate line: it has no cap to report
+            plain=rt.store.enqueue('g',max_steps=1)
+            rt.store.update(plain,steps=1)
+            self.assertTrue(rt._tick(plain))
+            self.assertEqual(rt.store.goal(plain)['state'],'paused')
+            self.assertFalse([e for e in rt.store.events() if e['goal']==plain and e['kind']=='delegate_capped'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_restarted_runtime_still_writes_the_cap_event_for_an_open_child(self):
+        # delegate_caps is this process's memory of the children it started, not the fact. A runtime that
+        # restarted while a child's row was still open has an empty set, so the deadline and step-limit pauses
+        # wrote no delegate_capped and the parent's report read `failed` where the child was capped (#382
+        # review). The open delegates row is the fact; the set is only a fast path.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate',max_steps=0)
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)                  # a restart: a new process, no delegate_caps
+        try:
+            self.assertEqual(rt.delegate_caps,{},'the restarted runtime remembers no child')
+            self.assertTrue(rt._tick(child))
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('step budget',rt.store.goal(child)['error'])
+            self.assertTrue(delegate._capped(rt,child),'the step-limit pause of an open child leaves the event')
+            late=rt.store._enqueue('c2',kind='delegate',max_seconds=600)
+            rt.store.delegate_add(late,parent,'','','worker',.5)
+            with rt.store.transaction():rt.store.update(late,deadline=time.time()-5)
+            self.assertTrue(rt._tick(late))
+            self.assertIn('time budget',rt.store.goal(late)['error'])
+            self.assertTrue(delegate._capped(rt,late),'the deadline pause of an open child leaves the event')
+            # and the report those events feed: a paused child with its event is `capped`, not `failed`
+            with unittest.mock.patch.object(rt,'run',side_effect=lambda target=None,stop=None,**kw:None):
+                report=delegate.run_child(rt,parent,dict(child=child,role='worker'))
+            self.assertEqual(report['outcome'],'capped')
+            self.assertEqual(rt.store.delegate(child)['outcome'],'capped')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_null_delegate_limit_takes_the_default_and_a_zero_is_refused(self):
+        # `delegate_max_steps: null` raised TypeError at every delegate call (#382 review), as a null dollar cap
+        # used to. Zero is not read as "the default" either: the same silent literal the table's DEFAULT 0 was.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for key in ('delegate_max_steps','delegate_max_seconds','delegate_max_children'):rt.config[key]=None
+            cap,steps,secs=delegate._caps(rt,dict())
+            self.assertEqual((steps,secs),(delegate.DEFAULTS['max_steps'],delegate.DEFAULTS['max_seconds']))
+            self.assertEqual(delegate._limit(rt,'delegate_max_children'),delegate.DEFAULTS['max_children'])
+            self.assertEqual(cap,delegate.DEFAULTS['cap_usd'])
+            for key in ('delegate_max_steps','delegate_max_seconds','delegate_max_children'):
+                rt.config[key]=0
+                with self.assertRaises(ValueError) as caught:
+                    delegate._limit(rt,key)
+                self.assertIn('at least 1',str(caught.exception))
+                rt.config[key]=None                  # (back to the default: _caps reads all three)
+            rt.config['delegate_max_steps']=5
+            self.assertEqual(delegate._caps(rt,dict())[1],5,'a configured limit still applies')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_quoted_or_bool_delegate_limit_is_refused_by_name_not_a_traceback(self):
+        # config.json is json.loads'd, so `"delegate_max_steps": "12"` is a str: it reached math.isfinite and raised
+        # TypeError from every delegate call, and "abc" a bare ValueError, instead of the refusal naming the key
+        # (#382 review, rev-glm P2). A bool is an int in Python, so `true` silently meant one step; it is refused too.
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for key in ('delegate_max_steps','delegate_max_seconds','delegate_max_children'):
+                for bad,word in (('12','str'),(True,'bool'),([12],'list')):
+                    rt.config[key]=bad
+                    with self.assertRaises(ValueError) as caught:
+                        delegate._limit(rt,key)
+                    said=str(caught.exception)
+                    self.assertIn(key,said,'the refusal names the key to fix')
+                    self.assertIn(word,said,'and what it found there')
+                    self.assertIn('default is',said,'and what leaving it out would give')
+                rt.config[key]=None
+            for bad,word in (('0.50','str'),(True,'bool'),({},'dict')):
+                rt.config['delegate_usd']=bad
+                with self.assertRaises(ValueError) as caught:
+                    delegate._caps(rt,dict())
+                said=str(caught.exception)
+                self.assertIn('delegate_usd',said)
+                self.assertIn(word,said)
+            rt.config.pop('delegate_usd',None)
+            rt.config['delegate_usd']=0.25
+            self.assertEqual(delegate._caps(rt,dict())[0],0.25,'a numeric cap still applies')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_whose_delegates_row_is_gone_is_still_a_child(self):
+        # the policy (refusals, the resume fence, no gate) was keyed on the delegates row, so a goal whose row was
+        # restored without - a hand edit, a partial backup, a sweep - was not a child any more and could write,
+        # run a terminal command or be resumed uncapped (#382 review). The goal's own kind is the answer, and a
+        # leftover row still makes a goal read-only: a false "child" costs a read-only goal, the other error does not.
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.cli import resume_goal
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            rt.store.db.execute('DELETE FROM delegates WHERE child=?',(child,))
+            self.assertIsNone(rt.store.delegate(child),'the row is really gone')
+            self.assertTrue(delegate.is_child(rt.store,child),'the goal still says what it is')
+            for name,args in (('write',dict(path='x',content='y')),('ask_user',dict(question='q')),
+                              ('terminal',dict(command='ls')),('delegate',dict(task='t',done_check='d'))):
+                self.assertTrue(delegate.refused(name,args),name)
+            with self.assertRaises(ValueError) as caught:
+                resume_goal(rt.store,child)
+            self.assertIn('delegate child',str(caught.exception))
+            other=rt.store.enqueue('o')
+            rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
+                                'VALUES(?,?,?,?,?,?,?)',(other,parent,'','','worker',.5,time.time()))
+            self.assertTrue(delegate.is_child(rt.store,other),'a leftover row fails closed')
+        finally:rt.mail.close();rt.store.close()
+
+    # ---- #382 review (Codex P1s): the delegate's brain, caps, spend and boxes --------------------------------
+
+    def test_a_delegate_child_does_not_leave_its_brain_on_the_parent(self):
+        # single-brain choose() returns rt.model as it stands, and start() hands the child's model to rt.run: after
+        # the child's run the parent's next call ran on the child's brain, model and provider (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            mine=rt.model
+            sentinel=object()
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            def fake_run(target=None,stop=None,**kw):
+                rt.model=sentinel                       # (what run() does with the child's brain)
+                rt.store.update(target,state='completed',summary='the child finished')
+            with unittest.mock.patch.object(rt,'run',side_effect=fake_run):
+                report=delegate.run_child(rt,parent,dict(child=child,role='worker'))
+            self.assertEqual(report['outcome'],'completed')
+            self.assertIs(rt.model,mine,'the parent keeps its own brain after the child ran')
+            child2=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(child2,parent,'','','worker',.5)
+            with unittest.mock.patch.object(rt,'run',side_effect=RuntimeError('boom')):
+                with self.assertRaises(RuntimeError):delegate.run_child(rt,parent,dict(child=child2,role='worker'))
+            self.assertIs(rt.model,mine,'a run that died restores it too')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_free_time_goal_cannot_delegate(self):
+        # a child is kind='delegate', so FreeTime.is_free(child) is false and its spend never reaches the free-time
+        # ledger, while its registered brain bypasses Brains.choose() and the plan rules: a free or dream goal that
+        # delegated spent outside its allowance (#382 review).
+        from caminus.ember.resident import delegate, freetime
+        rt=Runtime(self.home)
+        try:
+            for kind in freetime.KINDS:
+                gid=rt.store._enqueue('rest',kind=kind)
+                with self.assertRaises(ValueError) as caught:
+                    delegate.prepare(rt,dict(task='t',done_check='d'),gid)
+                self.assertIn('cannot delegate',str(caught.exception));self.assertIn(kind,str(caught.exception))
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'),rt.store.enqueue('w'))['task'],'t')
+            # a parent row that is gone is not free time: it reads as work and the call goes on
+            self.assertEqual(delegate.prepare(rt,dict(task='t',done_check='d'),'no-such-goal')['task'],'t')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_remote_child_with_no_price_is_refused(self):
+        # a paid child whose catalog entry has no prices priced every turn None, _meter booked 0 and its dollar cap
+        # never tripped: an unbounded child on a remote provider (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        def catalog_of(id):
+            return dict(updated=1,providers={},models=[dict(id=id,name=id,provider='deepinfra',context=32000,
+                        max_output=None,efforts=[],thinking='',vision=False,prices=None)])
+        try:
+            rt.config['providers']={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai')}
+            (self.home/'models.json').write_text(json.dumps(catalog_of('someone/unpriced')))
+            with self.assertRaises(ValueError) as caught:
+                delegate._brain(rt,dict(model='someone/unpriced'))
+            self.assertIn('has a price',str(caught.exception))
+            # the catalog's own prices make the same child priceable
+            busy=catalog_of('someone/priced');busy['models'][0]['prices']=dict(input=1.0,output=2.0,cache_read=0.5)
+            (self.home/'models.json').write_text(json.dumps(busy))
+            brain,who=delegate._brain(rt,dict(model='someone/priced'))
+            self.assertTrue(brain.remote);self.assertEqual(who,dict(model='someone/priced',provider='deepinfra'))
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_relayed_provider_with_no_price_is_refused(self):
+        # rev-glm's P2 read a relay provider on loopback as unpriced and not remote, so the price refusal (keyed on
+        # brain.remote) would miss it. apply_entry copies the provider's relay flag and Model.remote is true for a
+        # relayed brain, so the same refusal already covers it; this pins that, and the local server it must not
+        # refuse (a local server bills nothing, so it needs no price).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        def one(id):
+            return dict(updated=1,providers={},models=[dict(id=id,name=id,provider='relay',context=32000,
+                        max_output=None,efforts=[],thinking='',vision=False,prices=None)])
+        try:
+            rt.config['providers']={'relay':dict(kind='mistral',endpoint='http://127.0.0.1:8769/v1',relay=True)}
+            (self.home/'models.json').write_text(json.dumps(one('someone/unpriced-relayed')))
+            with self.assertRaises(ValueError) as caught:
+                delegate._brain(rt,dict(model='someone/unpriced-relayed',provider='relay'))
+            self.assertIn('has a price',str(caught.exception))
+            # the same loopback endpoint without the relay flag is this machine's own server: not billed, no price
+            rt.config['providers']={'mine':dict(kind='local',endpoint='http://127.0.0.1:8092/v1')}
+            (self.home/'models.json').write_text(json.dumps(dict(one('someone/served-here'),providers={})).replace('"relay"','"mine"'))
+            brain,who=delegate._brain(rt,dict(model='someone/served-here',provider='mine'))
+            self.assertFalse(brain.remote);self.assertEqual(who['provider'],'mine')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_non_finite_cap_is_no_cap_and_is_refused(self):
+        # a NaN cap passed `cap <= 0` as False (float('nan') <= 0 is False), min(cap, nan) carried it on, and the
+        # INSERT failed as a bare IntegrityError (SQLite stores a NaN as NULL, and cap_usd is NOT NULL); an infinite
+        # cap was stored and `spend + allowance < inf` never tripped, so the child ran with no dollar cap at all
+        # (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            for bad in (float('nan'),float('inf'),-float('inf')):
+                with self.assertRaises(ValueError) as caught:
+                    delegate._caps(rt,dict(cap_usd=bad))
+                self.assertIn('finite',str(caught.exception))
+                rt.config['delegate_usd']=bad
+                with self.assertRaises(ValueError):
+                    delegate._caps(rt,dict())
+            rt.config.pop('delegate_usd',None)
+            rt.config['delegate_max_steps']=float('inf')
+            with self.assertRaises(ValueError):
+                delegate._caps(rt,dict())
+            rt.config.pop('delegate_max_steps',None)
+            self.assertEqual(delegate._caps(rt,dict())[0],.5)
+            parent,child=rt.store.enqueue('p'),rt.store.enqueue('c')
+            for bad in (float('nan'),float('inf'),-float('inf')):
+                with self.assertRaises(ValueError) as caught:
+                    rt.store.delegate_add(child,parent,'','','worker',bad)
+                self.assertIn('finite',str(caught.exception))
+            # a row written around delegate_add with an infinite cap still pauses: capped() fails closed on it
+            rt.store.db.execute('INSERT INTO delegates(child,parent,model,provider,role,cap_usd,started) '
+                                'VALUES(?,?,?,?,?,?,?)',(child,parent,'','','worker',float('inf'),time.time()))
+            self.assertTrue(delegate.capped(rt,child))
+            self.assertIn('cap reached',rt.store.goal(child)['error'])
+        finally:rt.mail.close();rt.store.close()
+
+    def test_an_aux_call_is_charged_to_the_childs_cap(self):
+        # _meter prices a turn after the main generation only, and every auxiliary call (a summary, a graded finish,
+        # the judge's second opinion) overwrote the model's last usage before the child's ledger could read it: the
+        # one limit that stops a child never saw those turns (#382 review).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'claude-haiku-5-5','anthropic','worker',.5)
+            rt.delegate_caps[child]=.5
+            # 200k tokens is past Haiku's 100k long-prompt line, so it prices at the high input rate: $0.10
+            rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+            rt.model.last_call={}
+            delegate.note_aux(rt,child,'claude-haiku-5-5')          # (the model: a compaction model's own id)
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.10,places=6)
+            # a call that raised before it reported leaves the previous usage in place: nothing is charged twice
+            before=rt.model.last_usage
+            delegate.note_aux(rt,child,'claude-haiku-5-5',since=before)
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.10,places=6)
+            rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+            delegate.note_aux(rt,child,'claude-haiku-5-5',since=before)
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.20,places=6)
+            # a goal with no ledger (not a child) is left alone
+            delegate.note_aux(rt,rt.store.enqueue('not a child'),'claude-haiku-5-5')
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.20,places=6)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_judge_call_that_reported_nothing_does_not_charge_the_last_turn_again(self):
+        # #382 review P2-1: both of the judge's aux sites called `note_aux(rt,gid)` with no `since=`, while the
+        # compaction site passes `since=before`. `since` is what stops a call that raised before reporting usage
+        # from charging the previous turn's tokens a second time, so a failed judge call billed the child's cap for
+        # a turn it never ran. A judge that fails this way is the common case (the brain is down or refused).
+        from caminus.ember.resident import judge
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'claude-haiku-5-5','anthropic','worker',.5)
+            rt.delegate_caps[child]=.5
+            rt.store.update(child,done_check='the file exists')
+            rt.model.config=dict(rt.model.config,model='claude-haiku-5-5')
+            rt.model.last_call={}
+            # the turn before the judge ran: 200k input is past Haiku's 100k long-prompt line, so $0.10
+            rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+            # a judge call that raised before reporting leaves last_usage exactly as it was
+            rt.model.complete=lambda *a,**k:dict(content='{"verdict": "not_yet", "reason": "not yet"}')
+            self.assertIn('not done yet',judge.review(rt,child,dict(summary='x'))['error'])
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],0.0,places=6,
+                                   msg='a judge call that reported nothing must not re-charge the turn before it')
+            # and one that does report its usage is still charged, once
+            def reports(*a,**k):
+                rt.model.last_usage=dict(input_tokens=200_000,output_tokens=0)
+                return dict(content='{"verdict": "met", "reason": "it is there"}')
+            rt.model.complete=reports
+            self.assertIn('met: it is there',judge.review(rt,child,dict(summary='x'))['judge'])
+            self.assertAlmostEqual(rt.store.delegate(child)['spend_usd'],.10,places=6)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_compaction_summary_is_charged_to_the_childs_cap(self):
+        # the call site: a summary call is a turn of the child's brain, and a few of them at a 1M-token prompt are
+        # its whole dollar cap. A call that raised must not charge the previous turn again (#382 review).
+        from caminus.ember.resident import delegate
+        class BoundedModel:
+            remote=False
+            def __init__(self):self.fail,self.last_call,self.last_usage,self.calls=False,{},{},0
+            def context_size(self):return 20000
+            def tokens(self,m,t):return len(json.dumps([m,t]))//4
+            def complete(self,messages,tools=None,max_tokens=None,on_delta=None,**k):
+                self.calls+=1
+                if self.fail:raise RuntimeError('the endpoint dropped the summary call')
+                self.last_usage=dict(input_tokens=200_000,output_tokens=0)   # (past Haiku's 100k line: $0.10)
+                return dict(role='assistant',content='summary of the work')
+        model=BoundedModel()
+        rt=Runtime(self.home,model=model)
+        try:
+            rt.config['model']='claude-haiku-5-5'
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'claude-haiku-5-5','anthropic','worker',.5)
+                rt.delegate_caps[gid]=.5
+                return gid
+            gid=child()
+            history=rt.store.goal(gid)['messages']+[dict(role='assistant',content='thinking '*2000) for _ in range(12)]
+            out,done=rt._compact(gid,history)
+            self.assertTrue(done);self.assertGreaterEqual(model.calls,1)
+            pieces=max(e['data']['parts'] for e in rt.store.events() if e['kind']=='compacting' and e['goal']==gid)
+            self.assertEqual(model.calls,pieces,'one call per summary piece')
+            self.assertAlmostEqual(rt.store.delegate(gid)['spend_usd'],.10*pieces,places=6,
+                                   msg="every summary call reaches the child's cap")
+            # a summary call that raised charged nothing: its usage never replaced the previous turn's
+            bad=child();model.fail=True
+            history=rt.store.goal(bad)['messages']+[dict(role='assistant',content='thinking '*2000) for _ in range(12)]
+            with self.assertRaises(RuntimeError):rt._compact(bad,history)
+            self.assertEqual(rt.store.delegate(bad)['spend_usd'],0.0)
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_that_did_not_complete_has_its_box_removed(self):
+        # sandbox.sweep keeps a paused goal's box because a paused goal can resume; a delegate child never resumes
+        # (its brain and caps lived in the process that ran it), so its box is garbage that run_child used to leave
+        # for good (#382 review). A completed child keeps its box: the runtime ends it as for any finished goal.
+        from caminus.ember.resident import delegate, sandbox
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            def child():
+                gid=rt.store._enqueue('c',kind='delegate')
+                rt.store.delegate_add(gid,parent,'','','worker',.5)
+                box=sandbox.box_dir(self.home,gid);box.mkdir(parents=True)
+                return gid,box
+            gid,box=child()
+            def failed(target=None,stop=None,**kw):rt.store.update(target,state='failed',error='the model gave up')
+            with unittest.mock.patch.object(rt,'run',side_effect=failed):
+                report=delegate.run_child(rt,parent,dict(child=gid,role='worker'))
+            self.assertEqual(report['outcome'],'failed')
+            self.assertFalse(box.exists(),'an unfinished child is not resumable: its box goes at its close')
+            gid,box=child()
+            def ok(target=None,stop=None,**kw):rt.store.update(target,state='completed',summary='done')
+            with unittest.mock.patch.object(rt,'run',side_effect=ok):
+                delegate.run_child(rt,parent,dict(child=gid,role='worker'))
+            self.assertTrue(box.exists(),'a completed child keeps its box')
+            # at a start: a child left runnable, and one whose goal already ended, are closed with their boxes
+            live,box_live=child()
+            crash,box_crash=child()
+            rt.store.db.execute("UPDATE goals SET state='cancelled' WHERE id=?",(crash,))
+            delegate.sweep(rt)
+            self.assertFalse(box_live.exists(),'a child paused at sweep is closed and its box goes')
+            self.assertFalse(box_crash.exists(),'so does the box of a child whose goal already ended')
+            self.assertTrue(box.exists())
+        finally:rt.mail.close();rt.store.close()
+
+    def test_the_catalog_normalization_is_one_function_for_a_pick_and_a_child(self):
+        # delegate._brain kept a second copy of /model's normalization that dropped max_tokens_auto and the entry's
+        # effort levels, so a child asked its provider for its parent's maximum (#382 review, Growth).
+        from caminus.ember.resident import catalog
+        from caminus.ember.resident.model import price
+        stale=dict(model='old',relay=True,prices=dict(input=9.0,output=9.0),context=1000,context_cap=500,
+                   thinking='adaptive',model_variants={'low':'old-low'},efforts=['high'],vision=True,
+                   max_tokens=4096,max_tokens_auto=True)
+        entry=dict(id='vendor/new',provider='p',context=32000,max_output=128000,efforts=['low','high'],
+                   thinking='',vision=False,prices=dict(input=1.0,output=2.0,cache_read=0.5))
+        conf=catalog.apply_entry(stale,entry,dict(kind='openai',endpoint='https://api.example/v1'))
+        self.assertEqual((conf['context'],conf['max_tokens'],conf['max_tokens_auto']),(32000,65536,True))
+        self.assertEqual(conf['efforts'],['low','high'],"the entry's own effort scale, not the old brain's")
+        for k in ('relay','model_variants','vision','thinking','context_cap'):
+            self.assertNotIn(k,conf,"the previous brain's %s is not this one's" % k)
+        self.assertAlmostEqual(price('vendor/new',dict(prompt_tokens=1_000_000)),1.0)
+        # a local server on this machine: its window is asked live and its reply limit comes from its card
+        local=catalog.apply_entry(dict(model='old',context=1000),dict(id='m',provider='local',context=262144,
+            max_output=8192,efforts=[],thinking='',vision=False),dict(kind='local',endpoint='http://127.0.0.1:8092/v1'))
+        self.assertNotIn('context',local);self.assertNotIn('max_tokens',local)
 
     def test_checkpoint_and_rollback_put_the_paths_back(self):
         target=self.home/'work.txt';target.write_text('before\n')
@@ -4098,6 +5500,26 @@ for line in sys.stdin:
         finally:rt.mail.close();rt.store.close()
         done=self.cmd('pause',[gid])
         self.assertEqual(done['state'],'paused','with no daemon the CLI pauses it at once')
+
+    def test_a_nested_child_run_leaves_the_parents_pauses_and_rewinds_alone(self):
+        # a delegate child runs inside the parent's tool call, so the child's loop is the place where the parent's
+        # queued /pause and /rewind used to be applied mid-call (#382 review, Opus 5.5 P2). Scoped to the target.
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('Parent.');rt.store.update(parent,state='working')
+            child=rt.store.enqueue('Child.');rt.store.update(child,state='working')
+            for gid,kind in ((parent,'pause'),(parent,'rewind'),(child,'pause')):
+                rt.store.request(gid,kind,{} if kind=='pause' else dict(to=0))
+            rt._apply_pauses(child);rt._apply_rewinds(child)
+            self.assertEqual(rt.store.goal(parent)['state'],'working','the parent was not paused mid-call')
+            self.assertIsNotNone(rt.store.pending_request(parent,'pause'),'its request is still queued')
+            self.assertIsNotNone(rt.store.pending_request(parent,'rewind'),'its rewind is still queued')
+            # the child's own pause did run: scoping is not "apply nothing"
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            # and the daemon's own pass (no target) still applies the parent's
+            rt._apply_pauses()
+            self.assertEqual(rt.store.goal(parent)['state'],'paused','the next unscoped pass applies it')
+        finally:rt.mail.close();rt.store.close()
 
     def test_stop_all_writes_and_lifts_the_shared_stop(self):
         from caminus.cmd import ember as envcmd
@@ -7692,7 +9114,8 @@ for line in sys.stdin:
         # overflowed the window (the goal paused on a context error, and resuming repeated it).
         from caminus.ember.resident.model import ModelContextError
         class BoundedModel:
-            def context_size(self):return 16384
+            size=16384
+            def context_size(self):return self.size
             def tokens(self,messages,tools):return len(json.dumps([messages,tools]))//4
             def complete(self,messages,tools=None,max_tokens=None,on_delta=None):
                 if self.tokens(messages,tools or [])+256>self.context_size():
@@ -7700,19 +9123,31 @@ for line in sys.stdin:
                 if tools:return call('finish',dict(summary='Compacted and continued.'))
                 return dict(role='assistant',content='Prior work verified; continue.')
         (self.home/'MEMORY.md').write_text('# memory\n'+'remembered fact. '*1700)
-        rt=Runtime(self.home,model=BoundedModel())
+        model=BoundedModel()
+        rt=Runtime(self.home,model=model)
         try:
             gid=rt.store.enqueue('Continue the long task.')
             rt.store.event('startup_discovery',dict(topic='skipped in this test'),gid)   # keeps the kept tail small
+            # The window is sized from the measured head, not fixed: MEMORY.md is clipped to INDEX_CAP, so a
+            # smaller file does not shrink the pinned head (the prompt, the tool schemas, the goal and the
+            # trailing context). A fixed 16K window left the summary 174 tokens of room, and one more prompt
+            # section (delegate's, #342) turned the compaction into a refusal instead of a summary.
+            while True:
+                size=model.size
+                reserve=min(rt._reply_limit(),size//4)
+                summary=max(2048,min(16384,size//64))
+                head=rt.model.tokens([rt.system(gid),rt.store.goal(gid)['messages'][0],rt.context_message(gid)],TOOLS)
+                if size-reserve-256-head-512>=summary:break
+                model.size*=2
             # The filler is sized from the measured request without it, so the precondition below (the history
             # alone fits with the reply budget, only the trailing context overflows) holds as tools are added.
             base=rt.store.goal(gid)['messages']+[dict(role='assistant',content='observation '*20) for _ in range(10)]
-            room=16384-4096-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
+            room=size-reserve-rt.model.tokens([rt.system(gid),*base],TOOLS)-600
             messages=rt.store.goal(gid)['messages']+[dict(role='assistant',content='x'*(room*4))]+base[len(rt.store.goal(gid)['messages']):]
             rt.store.update(gid,messages=messages)
             history=rt.model.tokens([rt.system(gid),*messages],TOOLS)
             # The history alone leaves room for the reply budget too, so only the trailing context overflows.
-            self.assertLess(history+4096,16384,'the history alone fits with the reply budget')
+            self.assertLess(history+reserve,size,'the history alone fits with the reply budget')
             result=rt.run(target=gid)
             self.assertEqual(result['state'],'completed',[(e['kind'],str(e['data'])[:160]) for e in rt.store.events()])
             self.assertTrue(any(e['kind']=='compacted' for e in rt.store.events()))
@@ -8875,6 +10310,84 @@ for line in sys.stdin:
         self.assertIn('mkdir -p',msg);self.assertIn('chmod 2770',msg)
         self.assertIn('sudo',msg)
 
+    def test_a_child_on_the_parents_own_brain_must_be_priceable_too(self):
+        # the priceability refusal covered only a child named from the catalog; the default child ran on the
+        # parent's own config verbatim, so a priced remote brain with no price priced every call None, its spend
+        # stayed 0 and its dollar cap could never trip (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.model import remember_prices
+        rt=Runtime(self.home)
+        try:
+            # the fixture's own brain is this machine's server: it bills nothing, so it needs no price
+            brain,who=delegate._brain(rt,dict())
+            self.assertFalse(brain.remote);self.assertEqual(who['model'],rt.config['model'])
+            # the same brain moved to a paid provider with no price is refused, the way a named catalog model is
+            rt.config.update(model='someone/unpriced-default',provider='deepinfra',
+                             endpoint='https://api.deepinfra.com/v1/openai',api='openai',
+                             providers={'deepinfra':dict(kind='deepinfra',endpoint='https://api.deepinfra.com/v1/openai')})
+            with self.assertRaises(ValueError) as caught:
+                delegate._brain(rt,dict())
+            self.assertIn('someone/unpriced-default',str(caught.exception))
+            self.assertIn('has a price',str(caught.exception))
+            # its price known (config `prices`, as Runtime registers them), the same call goes on
+            remember_prices('someone/unpriced-default',dict(input=1.0,output=2.0,cache_read=0.5))
+            brain,who=delegate._brain(rt,dict())
+            self.assertTrue(brain.remote);self.assertEqual(who['model'],'someone/unpriced-default')
+            # a plan's brain charges what its reply says, so its price tables are not needed and it is not refused
+            rt.config.update(model='plan-brain',provider='plan',provider_kind='opencode-go',
+                             endpoint='https://opencode.example/v1',providers={})
+            self.assertEqual(delegate._brain(rt,dict())[1]['model'],'plan-brain')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_restarted_runtime_still_trips_the_dollar_cap_of_an_open_child(self):
+        # the deadline and step-limit sites read the open row (`delegate.open_child`) so a restarted runtime still
+        # writes its cap event; the dollar-cap site alone checked only `delegate_caps`, this process's memory, so
+        # a restored child's spend reached its cap and nothing paused it (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            rt.store.delegate_spend(child,usd=.75)          # over the cap, written by an earlier process
+        finally:rt.mail.close();rt.store.close()
+        rt=Runtime(self.home)                              # a restart: a new process, no delegate_caps
+        try:
+            self.assertEqual(rt.delegate_caps,{},'the restarted runtime remembers no child')
+            self.assertTrue(rt._tick(child),'the tick ends the child on its cap')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('delegate spend cap reached',rt.store.goal(child)['error'])
+            self.assertFalse(rt.store.delegate(child)['outcome'],'the pause is the cap\'s; no one closed the row yet')
+            self.assertTrue(delegate._capped(rt,child),'the dollar-cap pause leaves its event')
+        finally:rt.mail.close();rt.store.close()
+
+    def test_a_child_with_no_brain_in_this_process_is_orphaned_and_never_runs_on_the_parents(self):
+        # delegate_models is live memory: only the process that ran start() holds the child's brain. A child that
+        # reached a turn without it used to run on whatever brain the runtime held (the parent's), uncapped on the
+        # wrong model. The fence is now in brains.choose, so it holds at every call site (#382 review, rev-glm P2).
+        from caminus.ember.resident import delegate
+        from caminus.ember.resident.model import Model
+        rt=Runtime(self.home)
+        try:
+            parent=rt.store.enqueue('p')
+            child=rt.store._enqueue('c',kind='delegate')
+            rt.store.delegate_add(child,parent,'','','worker',.5)
+            self.assertIs(rt.brains.choose(child),None,'a child with no brain of its own gets none from choose()')
+            self.assertEqual(rt.store.goal(child)['state'],'paused')
+            self.assertIn('runtime ended mid-delegation',rt.store.goal(child)['error'])
+            row=rt.store.delegate(child)
+            self.assertEqual(row['outcome'],'orphaned','the row is closed, so it never counts against the parent')
+            # its own brain registered, as start() leaves it, choose() answers with that brain and pauses nothing
+            mine=rt.store._enqueue('c2',kind='delegate')
+            rt.store.delegate_add(mine,parent,'','','worker',.5)
+            own=Model(dict(rt.config,model='its-own'))
+            rt.delegate_models[mine]=own
+            self.assertIs(rt.brains.choose(mine),own)
+            self.assertIn(rt.store.goal(mine)['state'],('queued','working'),'a child with its brain runs')
+            self.assertFalse(rt.store.delegate(mine)['outcome'])
+        finally:rt.mail.close();rt.store.close()
+
+
 class Wire:
     """a fake urlopen for the Messages API: records each request, answers with SSE lines or an HTTP error"""
     def __init__(self,*answers):self.answers=deque(answers);self.requests=[]
@@ -8914,7 +10427,6 @@ def sse(*blocks,stop='end_turn',stop_details=None,complete=True):
         ev.append(dict(type='message_delta',delta=dict(stop_reason=stop,**(dict(stop_details=stop_details) if stop_details else {})),usage=dict(output_tokens=40)))
         ev.append(dict(type='message_stop'))
     return ev
-
 
 class AnthropicTransport(unittest.TestCase):
     """The Messages API path, against recorded wire shapes. No network and no key: a fake opener answers."""

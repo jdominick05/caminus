@@ -220,31 +220,13 @@ def model_ops(a,home):
         endpoint,api=catalog.transport(spec,entry)   # (an OpenCode model: its own API under the plan's root)
         cfg['providers']=catalog.providers(cfg)      # the brain being left stays one /model can go back to
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=endpoint,api=api)
-        for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
-            cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
-        if cfg.pop('max_tokens_auto',None):
-            cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
         if cfg.get('compaction_model') and catalog.find(cat,cfg['compaction_model'],entry['provider']) is None:
             cfg.pop('compaction_model')
-        if spec.get('relay'):cfg['relay']=True
-        if entry.get('prices'):cfg['prices']=entry['prices']
-        from .model import LOOPBACK
-        live=spec['kind']=='local' and not spec.get('relay') and urllib.parse.urlsplit(spec['endpoint']).hostname in LOOPBACK
-        if entry.get('context') and not live:
-            cfg['context']=int(entry['context'])  # (a local server's window is asked live: catalog.window)
-        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
-        if entry.get('variants'):
-            cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
-        elif spec['kind']=='local':
+        # the entry's own facts, by the one normalization a delegate child's brain takes too (Growth: one copy)
+        catalog.apply_entry(cfg,entry,spec)
+        if spec['kind']=='local' and not entry.get('variants'):
             _local_effort(cfg)                        # (an entry from a catalog written before the ids were grouped)
-        elif spec['kind']!='anthropic':
-            cfg['efforts']=list(entry.get('efforts') or [])   # whether this model takes reasoning_effort at all
-        if entry.get('max_output') and spec['kind']!='local':
-            # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
-            cfg['max_tokens'],cfg['max_tokens_auto']=min(int(entry['max_output']),65536),True
-        if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
-            cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
         # the effort level stays when the new brain has effort control (every level runs as its nearest); with none it
         # goes back to the default
         from . import effort as eff
@@ -515,6 +497,17 @@ def summary(store,gid):
             'pending':[dict(id=a['id'],name=a['name'],request_id=a['bridge_id']) for a in store.actions(gid)]}
 
 
+def refuse_child_resume(store,gid,how):
+    """A delegate child's brain and caps lived in the process that ran it, so resumed or continued later it would run
+    uncapped on the wrong brain, and its report is already with its parent. The resume path and the continue path ask
+    the same question; one helper keeps the two refusals from drifting (#382 review)."""
+    from . import delegate
+    if not delegate.is_child(store, gid):
+        return
+    raise ValueError('that goal is a delegate child, and its report is already with its parent: a '+how+' child would '
+                     'run uncapped on the wrong brain. Delegate again from the parent goal')
+
+
 def resume_goal(store,gid,max_steps=None,max_seconds=None):
     # Cancellation/completion and this check-transition must share the same
     # SQLite write lock; a stale read must never resurrect a finished goal.
@@ -522,6 +515,7 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
         g=store.goal(gid)
         if g['state'] in ('completed','cancelled'):
             raise ValueError('submit a new goal instead of replaying a finished one')
+        refuse_child_resume(store, gid, 'resumed')
         store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
                      deadline=time.time()+max_seconds if max_seconds else None,error='')
 
@@ -1079,6 +1073,8 @@ def main(argv=None,stdin=None):
                       advisor=(cfg.get('advisor') or {}).get('model'),   # (the panel names it while a review is asked)
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
                       **({'allowance_today':allowance_today} if allowance_today else {}),
+                      # delegate children (#342): the running ones and the newest finished, with their spend and cap
+                      workers=store.workers(),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
                       online_s=_online_s(heartbeat.get('pid')),**store.status()),True)
             store.close();return 0
@@ -1292,6 +1288,8 @@ def main(argv=None,stdin=None):
                     if state=='cancelled' or state=='completed' and not a.continue_goal:
                         raise ValueError('goal finished; submit a new goal instead of steering it')
                     if state=='completed':
+                        # resume_goal refuses this for the same reason, in the same words; same write lock as the revive
+                        refuse_child_resume(store, a.goal_id, 'continued')
                         store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
                         store.event('goal_continued',{},a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',

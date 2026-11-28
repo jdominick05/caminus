@@ -81,9 +81,42 @@ def wait(rt, gid, until, target='', timeout=300):
                 return f'session {str(target)[:8]} ended (exit {st.get("exit_code", "?")}); poll it for the output'
             return False
     # until == 'message' has no condition of its own: the interruptions below are what it waits for.
+    # A goal's own time budget bounds the wait too: one wait blocked for its full 30 minutes against a 600 s child
+    # cap, and the deadline was checked only at the next tick (#382 review).
+    g = rt.store.goal(gid) or {}
+    deadline = g.get('deadline') or None
+    if deadline and deadline - time.time() < 1:
+        return dict(happened="the goal's time budget is used up", waited_s=0,
+                    note='the goal pauses at its next step; do not wait again')
     seen_inbox = _inbox_count(rt, gid)
     queued = _queued(rt, gid)
     while True:
+        # The wait lasts at most the caller's timeout AND the goal's time budget, and the budget is re-read every
+        # pass: a deadline extended or shortened mid-wait is the one that counts (rev-glm P2). A direct read, not
+        # store.goal() (which loads the whole row and its messages on every poll), and every way that read can fail
+        # ends the wait with a reply instead of raising out of the goal loop: the store closing under the wait, or
+        # the goal's row going away.
+        limit = timeout
+        try:
+            row = rt.store.db.execute('SELECT deadline FROM goals WHERE id=?', (gid,)).fetchone()
+        except Exception as e:
+            # a store that will not answer this pass is not a goal that went away: say which happened, so the goal
+            # pauses on the store's real fault instead of being told its own row is gone (#382 review, rev-glm P2)
+            return dict(happened='the store could not be read while this waited',
+                        waited_s=round(time.monotonic() - start, 1),
+                        note=f'{type(e).__name__}: {e}; the wait ended here rather than raising out of the goal loop')
+        if row is None:
+            return dict(happened='the goal is no longer in the store', waited_s=round(time.monotonic() - start, 1),
+                        note='nothing left to wait for; check the goal before waiting again')
+        deadline = row['deadline'] or None
+        if deadline is not None:
+            left = deadline - time.time()
+            if left < 1:
+                return dict(happened="the goal's time budget is used up",
+                            waited_s=round(time.monotonic() - start, 1),
+                            note='the goal pauses at its next step; do not wait again')
+            # round down: the clip may not run past the deadline (`int(left) + 1` did)
+            limit = min(timeout, int(left))
         if hasattr(rt, 'poll_requests'):
             rt.poll_requests(gid)             # an answer to a pending request is a message: it wakes this wait
         if check and (why := check()):
@@ -103,7 +136,13 @@ def wait(rt, gid, until, target='', timeout=300):
             return dict(happened='your human paused or interrupted this goal', waited_s=round(time.monotonic() - start, 1))
         if _queued(rt, gid) > queued:
             return dict(happened='new work was queued', waited_s=round(time.monotonic() - start, 1))
-        if time.monotonic() - start >= timeout:
+        if time.monotonic() - start >= limit:
+            # A wait clipped by the budget ends at the budget, not on a bare timeout: say so, so the goal pauses
+            # instead of waiting again (#382 review, rev-glm P2).
+            if limit < timeout:
+                return dict(happened="the goal's time budget is used up",
+                            waited_s=round(time.monotonic() - start, 1),
+                            note='the goal pauses at its next step; do not wait again')
             return dict(happened='timeout', waited_s=round(time.monotonic() - start, 1),
                         note='nothing happened in time; check why before waiting again')
         time.sleep(POLL)

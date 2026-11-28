@@ -200,6 +200,17 @@ finish, which reports verified results, failures and skipped work honestly; a
 plain reply does not end it, except to answer a question your human asked on a
 goal they reopened. In free time a plain reply is how you rest. Production
 work has no arbitrary step limit; explicit oneshot test budgets still apply.
+{delegate}'''
+
+
+# only where the delegate tool is offered (config delegate, true by default; issue #342). The tool's own description
+# carries the child's limits, its report's shape and the cap rule; this block adds only the judgement a schema cannot:
+# when to reach for it, and that a change is not its work (#382 review: one fact in one file).
+DELEGATION = '''
+## Delegation
+delegate runs a read-only child of this goal; its tool description says what the child may do and what it returns.
+Reach for it for a self-contained research or check you would otherwise do yourself, when a cheaper brain or a
+different family is a fair judge. Do not delegate a change: do it yourself.
 '''
 
 
@@ -226,7 +237,7 @@ an empty prediction_error is a claim the prediction held exactly. Proposals are
 not changes: record them with status proposed and make no change.'''
 
 
-def render(home, sim=True):
+def render(home, sim=True, delegate=True):
     from .browser import available
     try:
         account=pwd.getpwuid(os.getuid());user=account.pw_name;account_home=account.pw_dir
@@ -240,4 +251,5 @@ def render(home, sim=True):
     return SYSTEM.format(user=user,home=home,account_home=account_home,venv=AGENT_VENV,
                          venv_rel=AGENT_VENV.removeprefix('~/'),packages=packages,browser=BROWSER if there else '',
                          browser_text=', or the browser tool\'s snapshot' if there else '',
-                         sim_head=head, sim_section=section)
+                         sim_head=head, sim_section=section,
+                         delegate=DELEGATION if delegate else '')

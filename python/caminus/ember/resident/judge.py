@@ -260,6 +260,13 @@ def review(rt, gid, result):
     g = rt.store.goal(gid)
     gate = g.get('gate')
     if gate:
+        from . import delegate
+        if delegate.is_child(rt.store, gid):
+            # a child has no host shell at all (#382 review, fourth round): a gate runs in one, and even a
+            # "read-only" gate cannot be told from a writing one by a filter. One stored before this refusal
+            # must not run either.
+            return dict(error='a delegate child is read-only: it has no gate, because a gate runs in a shell on '
+                               'this machine. Report what you checked in sandbox and what you could not')
         ok, out = run_gate(rt.home, gate, stop=getattr(rt, 'stopping', None))
         if not ok and getattr(rt, 'stopping', lambda: False)():
             return dict(error='your runtime was stopped while the gate ran, so nothing was decided: finish again')
@@ -289,9 +296,16 @@ def review(rt, gid, result):
             except Exception:
                 pass
         msgs = brief(bool((getattr(rt.model, 'config', None) or {}).get('vision'))) + extra
+        before = getattr(rt.model, 'last_usage', None)   # a call that reports nothing must not re-charge the last one
         reply = rt.model.complete(msgs, tools=None, max_tokens=600)
         try:
             rt.brains.account(gid)
+        except Exception:
+            pass
+        try:
+            # a graded finish is a turn of the child's brain too: it counts against the child's dollar cap (#382 review)
+            from . import delegate
+            delegate.note_aux(rt, gid, since=before)
         except Exception:
             pass
         cfg = getattr(rt.model, 'config', None) or {}
@@ -356,12 +370,18 @@ def review(rt, gid, result):
                 # no advisor (or past its limits): the agent's own model in a fresh context, with the evidence but
                 # not the agent's reasoning, the way the judge itself runs
                 try:
+                    before = getattr(rt.model, 'last_usage', None)   # (a call that reported nothing charges nothing twice)
                     reply = rt.model.complete([dict(role='system', content=FRESH_EYES), dict(
                         role='user', content=evidence(rt, gid, result.get('summary', ''), result.get('open', '')) +
                         '\n\n' + question)], tools=None, max_tokens=1500)
                     text = (reply.get('content') if isinstance(reply, dict) else '') or ''
                     try:
                         rt.brains.account(gid)
+                    except Exception:
+                        pass
+                    try:
+                        from . import delegate
+                        delegate.note_aux(rt, gid, since=before)   # (a child's second opinion counts against its cap too)
                     except Exception:
                         pass
                     if text.strip():
