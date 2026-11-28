@@ -27,7 +27,7 @@ func goalGlyph(state string) (string, lipgloss.Style) {
 		return g.queue, emberDim
 	case "completed":
 		return g.done, emberCtxOK
-	case "paused", "waiting_human", "waiting_root", "parked":
+	case "paused", "waiting_human", "waiting_root", "waiting_plan", "waiting_children", "parked":
 		return g.waiting, emberWarn
 	case "error", "cancelled":
 		return g.fail, emberCtxHot

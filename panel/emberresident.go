@@ -56,6 +56,31 @@ type residentStatus struct {
 	DaemonAlive   bool           `json:"daemon_alive"`
 	Goals         []residentGoal `json:"goals"`
 	LastEvent     int            `json:"last_event"`
+	// Delegation (#342): the running children and the newest finished ones, with the spend its cap reads. An older
+	// resident sends none, and the card then says nothing about children.
+	Workers []residentWorker `json:"workers"`
+}
+
+type residentWorker struct {
+	Child    string  `json:"child"`
+	Parent   string  `json:"parent"`
+	Model    string  `json:"model"`
+	Role     string  `json:"role"`
+	CapUSD   float64 `json:"cap_usd"`
+	SpendUSD float64 `json:"spend_usd"`
+	// AllowanceUSD is the OpenCode plan's own dollars a child used: a Go turn costs $0 of money and real
+	// allowance, and the cap counts both, so the row must show both.
+	AllowanceUSD float64 `json:"allowance_usd"`
+	Outcome      string  `json:"outcome"`
+	Running      bool    `json:"running"`
+	Started      float64 `json:"started"`
+	// The full version (#342): what the child may do, the worktree a writing child works in, the goal it was
+	// given and the steps it used. An older resident sends none of them, and the line then says less, not "read".
+	Permissions string `json:"permissions"`
+	Worktree    string `json:"worktree"`
+	Branch      string `json:"branch"`
+	Goal        string `json:"goal"`
+	Steps       int    `json:"steps"`
 }
 
 // replySpeed is a session's speed as its status reports it: a Caminus server's own read (prompt) and write

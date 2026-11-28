@@ -715,7 +715,7 @@ func (m emberModel) windowTitle() string {
 			break // (stopped: its goals' last states run nothing)
 		}
 		switch gl.State {
-		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan":
+		case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan", "waiting_children":
 			state = gl.State
 		}
 		if state != "idle" && state != "stopped" {
@@ -1063,7 +1063,8 @@ func (m emberModel) nowState(goal *residentGoal) (string, string) {
 		now = map[string]string{
 			"waiting_user": "waiting for your answer · Tab", "waiting_root": "waiting for a root approval · Tab",
 			"waiting_plan": "waiting for your OK on its plan · /plan approve", "waiting_model": "waiting for the model",
-			"paused": "paused · /resume", "queued": "queued, starts next", "working": "between steps",
+			"waiting_children": "waiting for its delegate children · /goals",
+			"paused":           "paused · /resume", "queued": "queued, starts next", "working": "between steps",
 		}[goal.State]
 	}
 	return now, command
@@ -1106,7 +1107,7 @@ func (m emberModel) compactingNote(gid string) string {
 // waits its turn and a finished one runs nothing, whatever the transcript still shows.
 func goalRunning(state string) bool {
 	switch state {
-	case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan":
+	case "working", "waiting_model", "waiting_user", "waiting_root", "waiting_plan", "waiting_children":
 		return true
 	}
 	return false

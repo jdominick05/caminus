@@ -260,6 +260,14 @@ def review(rt, gid, result):
     g = rt.store.goal(gid)
     gate = g.get('gate')
     if gate:
+        from . import delegate
+        row = rt.store.delegate(gid)
+        if row and delegate.gate_refusal(gate, row):
+            # a child's gate runs in a shell here (and after a change turn): one stored before the refusal
+            # existed must not run either (#382 review). A writing child may root its gate in its worktree, and
+            # the message says what that child may do rather than calling it read-only (#384 review)
+            return dict(error=delegate.gate_refusal(gate, row) + '. Run the check in the terminal and report what '
+                                                                    'it showed')
         ok, out = run_gate(rt.home, gate, stop=getattr(rt, 'stopping', None))
         if not ok and getattr(rt, 'stopping', lambda: False)():
             return dict(error='your runtime was stopped while the gate ran, so nothing was decided: finish again')

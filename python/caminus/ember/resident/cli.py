@@ -88,31 +88,10 @@ def _effort_shown(cfg):
 
 
 def _local_effort(cfg, keep_level=False):
-    """A local brain stored without its effort ids (a session switcher session: create --model stores the catalog name
-    and no provider; or a /model pick from a catalog written before the ids were grouped) asks its server for them:
-    the id it serves and its -low / -xhigh / -nothink ids (catalog.local_brain). A stored effort id (k3-coder-nothink)
-    becomes its base at that level, as /model takes one. keep_level: an existing session keeps the level it ran (the
-    server runs its base id at medium) instead of moving to the lab's default and re-reading the conversation. A
-    server that answered as Caminus is recorded as provider_kind local, effort ids or not (catalog.providers lists it).
-    True when cfg changed; nothing changes when the server cannot be reached."""
+    """A local brain stored without its effort ids asks its server for them: catalog.local_effort is the one copy
+    (the CLI, the catalog's apply_entry and a delegate child's brain all read this)."""
     from . import catalog
-    if cfg.get('model_variants') or not catalog.local_candidate(cfg):
-        return False
-    got = catalog.local_brain(cfg)
-    if not got:
-        return False
-    kind = not cfg.get('provider_kind')
-    if kind:
-        cfg['provider_kind'] = 'local'
-    if not got[1]:
-        return kind
-    level = next((lvl for lvl, i in got[1].items() if i == cfg.get('model')), None)
-    cfg['model'], cfg['model_variants'] = got
-    if level:
-        cfg['effort'] = level
-    elif keep_level and not cfg.get('effort'):
-        cfg['effort'] = 'medium'
-    return True
+    return catalog.local_effort(cfg, keep_level)
 
 
 def _current(cfg):
@@ -220,31 +199,12 @@ def model_ops(a,home):
         endpoint,api=catalog.transport(spec,entry)   # (an OpenCode model: its own API under the plan's root)
         cfg['providers']=catalog.providers(cfg)      # the brain being left stays one /model can go back to
         cfg.update(model=entry['id'],provider=entry['provider'],provider_kind=spec['kind'],endpoint=endpoint,api=api)
-        for k in ('relay','prices','context','context_cap','thinking','model_variants','efforts','vision'):
-            cfg.pop(k,None)                   # (an owner's cap belongs to the brain it was set for)
-        if cfg.pop('max_tokens_auto',None):
-            cfg.pop('max_tokens',None)        # the previous brain's catalog maximum, not one the owner set
         # a separate compaction model belongs to the brain it was set for: kept only if the new provider serves it
         if cfg.get('compaction_model') and catalog.find(cat,cfg['compaction_model'],entry['provider']) is None:
             cfg.pop('compaction_model')
-        if spec.get('relay'):cfg['relay']=True
-        if entry.get('prices'):cfg['prices']=entry['prices']
-        from .model import LOOPBACK
-        live=spec['kind']=='local' and not spec.get('relay') and urllib.parse.urlsplit(spec['endpoint']).hostname in LOOPBACK
-        if entry.get('context') and not live:
-            cfg['context']=int(entry['context'])  # (a local server's window is asked live: catalog.window)
-        if entry.get('vision'):cfg['vision']=True    # (read sends images to this brain: model.py)
-        if entry.get('variants'):
-            cfg['model_variants']=entry['variants']   # a local model's effort levels: the server's id for each
-        elif spec['kind']=='local':
-            _local_effort(cfg)                        # (an entry from a catalog written before the ids were grouped)
-        elif spec['kind']!='anthropic':
-            cfg['efforts']=list(entry.get('efforts') or [])   # whether this model takes reasoning_effort at all
-        if entry.get('max_output') and spec['kind']!='local':
-            # a paid brain bills what it writes: its catalog maximum (up to 64K); a local one's comes from its card
-            cfg['max_tokens'],cfg['max_tokens_auto']=min(int(entry['max_output']),65536),True
-        if spec['kind']=='anthropic' and entry.get('thinking')=='adaptive':
-            cfg['thinking']='adaptive'        # current Opus and Sonnet refuse thinking off; the store keeps none anyway
+        # the entry's own facts (relay, prices, window, vision, effort levels, output cap, thinking) in the one
+        # normalization a delegate child's brain and `agent connect` also read (catalog.apply_entry)
+        catalog.apply_entry(cfg,entry,spec)
         # the effort level stays when the new brain has effort control (every level runs as its nearest); with none it
         # goes back to the default
         from . import effort as eff
@@ -522,6 +482,11 @@ def resume_goal(store,gid,max_steps=None,max_seconds=None):
         g=store.goal(gid)
         if g['state'] in ('completed','cancelled'):
             raise ValueError('submit a new goal instead of replaying a finished one')
+        if store.delegate(gid):
+            # A delegate child's brain and caps lived in the process that ran it; resumed later it would run on
+            # the parent's brain with no cap (#382 review). Its report is already with its parent: delegate again.
+            raise ValueError('that goal is a delegate child, and its report is already with its parent: a resumed '
+                             'child would run uncapped on the wrong brain. Delegate again from the parent goal')
         store.update(gid,state='working',step_limit=g['steps']+max_steps if max_steps else None,
                      deadline=time.time()+max_seconds if max_seconds else None,error='')
 
@@ -1079,6 +1044,8 @@ def main(argv=None,stdin=None):
                       advisor=(cfg.get('advisor') or {}).get('model'),   # (the panel names it while a review is asked)
                       spend_today=spend_today,spend_goals=spend.get('goals') or {},cache_hit=cache_hit,
                       **({'allowance_today':allowance_today} if allowance_today else {}),
+                      # delegate children (#342): the running ones and the newest finished, with their spend and cap
+                      workers=store.workers(),
                       daemon_alive=alive(heartbeat.get('pid')),heartbeat=heartbeat,
                       online_s=_online_s(heartbeat.get('pid')),**store.status()),True)
             store.close();return 0
@@ -1219,7 +1186,7 @@ def main(argv=None,stdin=None):
                 emit(dict(goal=gid,queued=True,request=rid,note='paused at its next step; /resume continues it'),a.json)
             else:
                 with store.transaction():
-                    if store.goal(gid)['state'] in ('queued','working','waiting_model','waiting_user','waiting_root'):
+                    if store.goal(gid)['state'] in ('queued','working','waiting_model','waiting_user','waiting_root','waiting_children'):
                         store.update(gid,state='paused',error='paused by your human')
                         store.event('paused',dict(by='owner'),gid)
                 emit(dict(goal=gid,state=store.goal(gid)['state']),a.json)
@@ -1292,6 +1259,13 @@ def main(argv=None,stdin=None):
                     if state=='cancelled' or state=='completed' and not a.continue_goal:
                         raise ValueError('goal finished; submit a new goal instead of steering it')
                     if state=='completed':
+                        if store.delegate(a.goal_id):
+                            # resume_goal refuses this for the same reason: a child's brain and caps die with the
+                            # process that ran it, so a continued child would run uncapped on another brain, and
+                            # its report is already with its parent (#382 review). Same write lock as the revive.
+                            raise ValueError('that goal is a delegate child, and its report is already with its '
+                                             'parent: a continued child would run uncapped on the wrong brain. '
+                                             'Delegate again from the parent goal')
                         store.update(a.goal_id,state='working',summary='',error='',deadline=None,step_limit=None)
                         store.event('goal_continued',{},a.goal_id)
                     store.db.execute('INSERT INTO inbox(goal,text,kind) VALUES(?,?,?)',

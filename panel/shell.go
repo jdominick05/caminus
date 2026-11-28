@@ -112,7 +112,7 @@ func stateStyle(state string) (string, lipgloss.Style) {
 	switch state {
 	case "working", "queued":
 		return g.working, lipgloss.NewStyle().Foreground(cBlue)
-	case "waiting_model", "waiting_root", "paused":
+	case "waiting_model", "waiting_root", "waiting_plan", "waiting_children", "paused":
 		return g.waiting, lipgloss.NewStyle().Foreground(cYellow)
 	case "waiting_user", "error":
 		return g.failed, lipgloss.NewStyle().Foreground(cRed)
