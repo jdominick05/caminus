@@ -40,6 +40,23 @@ enum { OP_OWN_MV16 = 52, OP_GDN_NORM16 = 53, OP_GATE_MUL16 = 54 };
 #ifndef ATTN_VH   // (one V pass over every query head: 6 here, 8 in the qwen35moe module)
 #define ATTN_VH 6
 #endif
+#if !defined(K3_Q35_KV_Q8) && !defined(K3_TP) && !defined(K3_Q35_MTP)
+// OP_ATTN_PART on the one-card F16 modules: the V phase loads ATTN_VU cells' values before it uses any (the same fmas
+// in the same order: the same bits), and the task's 6 query heads sit in LDS (ATTN_QL: +6 KB a workgroup, 5 per WGP
+// still fit). Ablation builds of dec_q35_tcap at 32K cells put 60 % of the PART's time in the V phase, which issued one
+// 2-byte load per cell and waited for it before the next. One layer alone (benchmarks/attn_depth.py, L2 flushed before
+// each launch, XT, median of 15 interleaved): 42.1 / 92.2 / 494.6 -> 35.0 / 71.3 / 373.7 us at 512 / 4,096 / 32,768
+// cells (VU 8: 390.0 at 32K); ThinkingCap's decode step (benchmarks/q35_verify.py, XT, base / change interleaved
+// twice): 23.56 / 24.34 / 30.73 -> 23.42 / 23.99 / 28.92 ms. The verify modules' packed PART has no VU / QL path (their
+// objects are unchanged); the Q8, two-card and MTP objects keep their code until their own gates run (with VU the Q8
+// verify object spilled one more SGPR).
+#ifndef ATTN_VU
+#define ATTN_VU 4
+#endif
+#if !defined(ATTN_QL) && !defined(K3_Q35_GSQ)   // (dec_q35_gsq: 20,528 B of LDS a workgroup; + 6 KB = 26,672 B, and a
+#define ATTN_QL                                 //  WGP's 128 KB then holds 4, not the XT grid's 5)
+#endif
+#endif
 #define K3_ATTN_COMB_FAST
 enum { OP_ATTN_PART = 41, OP_ATTN_COMB = 42 };
 #include "ops_attn_split.h"
